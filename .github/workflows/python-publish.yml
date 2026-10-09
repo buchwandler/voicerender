@@ -1,0 +1,101 @@
+# Build and publish a Python package when a GitHub Release is published.
+
+name: Upload Python Package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+      - name: Build package
+        run: |
+          rm -rf dist
+          python -m build
+      - name: Check built distributions
+        run: python -m twine check dist/*
+      - name: Validate release artifacts
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import zipfile
+          from email import policy
+          from email.parser import Parser
+          from pathlib import Path
+
+          from packaging.requirements import Requirement
+          from packaging.version import Version
+
+          def has_range(requirements, name, minimum, maximum):
+              minimum_version = Version(minimum)
+              maximum_version = Version(maximum)
+              return any(
+                  requirement.name == name
+                  and any(
+                      spec.operator == ">=" and Version(spec.version) == minimum_version
+                      for spec in requirement.specifier
+                  )
+                  and any(
+                      spec.operator == "<" and Version(spec.version) == maximum_version
+                      for spec in requirement.specifier
+                  )
+                  for requirement in requirements
+              )
+          tag_version = os.environ["RELEASE_TAG"].removeprefix("v")
+          artifacts = list(Path("dist").iterdir())
+          wheels = [path for path in artifacts if path.suffix == ".whl"]
+          sdists = [path for path in artifacts if path.name.endswith(".tar.gz")]
+          assert len(wheels) == 1, wheels
+          assert len(sdists) == 1, sdists
+          wheel_version = re.match(r"utterplan-([^-]+)-", wheels[0].name).group(1)
+          sdist_version = re.match(r"utterplan-([^-]+)\.tar\.gz$", sdists[0].name).group(1)
+          assert wheel_version == tag_version, (wheel_version, tag_version)
+          assert sdist_version == tag_version, (sdist_version, tag_version)
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_name = next(name for name in archive.namelist() if name.endswith("METADATA"))
+              metadata = Parser(policy=policy.default).parsestr(
+                  archive.read(metadata_name).decode("utf-8")
+              )
+              requirements = [
+                  Requirement(value) for value in metadata.get_all("Requires-Dist", [])
+              ]
+              assert has_range(requirements, "phrasplit", "0.3.9", "0.4")
+              assert has_range(requirements, "ssmd", "0.9.3", "0.10")
+              assert has_range(requirements, "spokenform", "0.4.3", "0.5")
+              names = set(archive.namelist())
+              expected = {
+                  "utterplan/py.typed",
+                  "utterplan/utterplan.schema.json",
+                  "utterplan/schemas/v1.schema.json",
+                  "utterplan/schemas/v2.schema.json",
+                  "utterplan/schemas/v3.schema.json",
+                  "utterplan/schemas/v4.schema.json",
+              }
+              assert expected <= names
+          PY
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.14.1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false
