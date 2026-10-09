@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
-from collections.abc import Iterable, Iterator
 
 from .engines import get_engine
 from .errors import ArtifactError, PlanError, ProfileError
@@ -25,7 +25,16 @@ from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
 RENDER_ALGORITHM = "voicerender.batch.v1"
 
 
-def _identity(binding: VoiceBinding, *, engine_version: str | None) -> dict[str, Any]:
+def _identity(
+    binding: VoiceBinding,
+    *,
+    engine_version: str | None,
+    algorithm: str = RENDER_ALGORITHM,
+) -> dict[str, Any]:
+    model_asset_hash: str | None = None
+    model_path = Path(binding.target_id).expanduser()
+    if model_path.is_file():
+        model_asset_hash = file_hash(model_path)
     reference_hash: str | None = None
     if binding.reference_audio is not None:
         if not binding.reference_audio.is_file():
@@ -35,6 +44,7 @@ def _identity(binding: VoiceBinding, *, engine_version: str | None) -> dict[str,
         "engine": binding.engine,
         "engine_version": engine_version,
         "target_id": binding.target_id,
+        "model_asset_sha256": model_asset_hash,
         "model_revision": binding.model_revision,
         "voice": binding.voice,
         "speaker": binding.speaker,
@@ -42,7 +52,7 @@ def _identity(binding: VoiceBinding, *, engine_version: str | None) -> dict[str,
         "options": {
             key: value for key, value in binding.options.items() if key != "offline"
         },
-        "algorithm": RENDER_ALGORITHM,
+        "algorithm": algorithm,
     }
 
 

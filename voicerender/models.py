@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from collections.abc import Mapping
 
 from .errors import PlanError, ProfileError
 
@@ -18,6 +18,8 @@ except ImportError:  # pragma: no cover - Python 3.10
 SCHEMA_PLAN = "utterplan.voiceplan.v1"
 SCHEMA_PROFILE = "voicerender.voice-profile.v1"
 SCHEMA_MANIFEST = "voicerender.render-manifest.v1"
+SCHEMA_MANIFEST_V2 = "voicerender.render-manifest.v2"
+SCHEMA_VOICE_CONFIG = "voicerender.voice-config.v1"
 
 
 def _mapping(value: Any, what: str, error: type[ValueError]) -> Mapping[str, Any]:
@@ -63,6 +65,66 @@ class SpeechSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRef:
+    plan_id: str
+    flow_index: int
+    segment_index: int
+    flow_hash: str
+    locator: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        _nonempty(self.plan_id, "source.plan_id", PlanError)
+        _nonempty(self.flow_hash, "source.flow_hash", PlanError)
+        if type(self.flow_index) is not int or self.flow_index < 0:
+            raise PlanError("source.flow_index must be a non-negative integer")
+        if type(self.segment_index) is not int or self.segment_index < 0:
+            raise PlanError("source.segment_index must be a non-negative integer")
+        object.__setattr__(
+            self, "locator", f"f{self.flow_index:06d}.s{self.segment_index:03d}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RenderSegment:
+    source: SourceRef
+    text: str
+    language: str
+    logical_voice: str | None
+    directives: Mapping[str, Any] = field(default_factory=dict)
+    tokens: tuple[Mapping[str, Any], ...] = ()
+    markers: tuple[str, ...] = ()
+    heading: int | None = None
+    pause_before: Any = None
+    pause_after: Any = None
+    semantic_segment_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, SourceRef):
+            raise PlanError("render segment source must be a SourceRef")
+        _nonempty(self.text, "segment.text", PlanError)
+        _nonempty(self.language, "segment.language", PlanError)
+        if self.logical_voice is not None:
+            _nonempty(self.logical_voice, "segment.logical_voice", PlanError)
+        _mapping(self.directives, "segment.directives", PlanError)
+        if not isinstance(self.tokens, tuple) or any(
+            not isinstance(token, Mapping) for token in self.tokens
+        ):
+            raise PlanError("segment.tokens must be a tuple of mappings")
+        if not isinstance(self.markers, tuple) or any(
+            not isinstance(marker, str) or not marker for marker in self.markers
+        ):
+            raise PlanError("segment.markers must be a tuple of non-empty strings")
+        if self.heading is not None and (
+            type(self.heading) is not int or self.heading < 1
+        ):
+            raise PlanError("segment.heading must be a positive integer")
+        if self.semantic_segment_hash and not self.semantic_segment_hash.startswith(
+            "sha256:"
+        ):
+            raise PlanError("segment semantic hash must use the sha256: prefix")
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceBinding:
     engine: str
     target_id: str
@@ -75,7 +137,17 @@ class VoiceBinding:
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any], *, base_dir: Path) -> VoiceBinding:
         engine = _nonempty(data.get("engine"), "role.engine", ProfileError)
-        target = _nonempty(data.get("target_id"), "role.target_id", ProfileError)
+        if (
+            "target_id" in data
+            and "model" in data
+            and data["target_id"] != data["model"]
+        ):
+            raise ProfileError(
+                "role.model and role.target_id must agree when both are set"
+            )
+        target = _nonempty(
+            data.get("target_id", data.get("model")), "role.model", ProfileError
+        )
         voice = data.get("voice")
         reference = data.get("reference_audio")
         if voice is not None:
@@ -100,6 +172,7 @@ class VoiceBinding:
         known = {
             "engine",
             "target_id",
+            "model",
             "voice",
             "speaker",
             "reference_audio",
@@ -125,6 +198,19 @@ class VoiceProfile:
     name: str
     roles: Mapping[str, VoiceBinding]
     schema: str = SCHEMA_PROFILE
+    defaults: Mapping[str, str] = field(default_factory=dict)
+    backend_defaults: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    source_path: Path | None = None
+
+    @property
+    def default_role(self) -> str | None:
+        role = self.defaults.get("role")
+        return role if isinstance(role, str) else None
+
+    @property
+    def default_language(self) -> str | None:
+        language = self.defaults.get("language")
+        return language if isinstance(language, str) else None
 
     @classmethod
     def load(cls, path: str | Path) -> VoiceProfile:
@@ -134,27 +220,83 @@ class VoiceProfile:
                 data = tomllib.load(stream)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ProfileError(f"Cannot read voice profile {location}: {exc}") from exc
-        if data.get("schema") != SCHEMA_PROFILE:
-            raise ProfileError(f"Expected profile schema {SCHEMA_PROFILE!r}")
+
+        legacy = data.get("schema") == SCHEMA_PROFILE
+        if legacy:
+            allowed_top = {"schema", "name", "roles"}
+            defaults: dict[str, str] = {}
+            backend_data: dict[str, dict[str, Any]] = {}
+            profile_schema = SCHEMA_PROFILE
+        else:
+            if (
+                type(data.get("schema_version")) is not int
+                or data["schema_version"] != 1
+            ):
+                raise ProfileError(
+                    "Expected legacy voice-profile schema or voice.toml schema_version = 1"
+                )
+            allowed_top = {"schema_version", "name", "defaults", "roles", "backend"}
+            raw_defaults = _mapping(data.get("defaults", {}), "defaults", ProfileError)
+            extra_defaults = set(raw_defaults).difference({"role", "language"})
+            if extra_defaults:
+                raise ProfileError(
+                    f"Unknown voice defaults: {', '.join(sorted(extra_defaults))}"
+                )
+            defaults = {
+                key: _nonempty(value, f"defaults.{key}", ProfileError)
+                for key, value in raw_defaults.items()
+            }
+            raw_backend = _mapping(data.get("backend", {}), "backend", ProfileError)
+            backend_data = {
+                _nonempty(engine, "backend engine", ProfileError): _options(
+                    options, f"backend.{engine}"
+                )
+                for engine, options in raw_backend.items()
+            }
+            profile_schema = SCHEMA_VOICE_CONFIG
+
         name = _nonempty(data.get("name"), "profile.name", ProfileError)
-        roles = _mapping(data.get("roles"), "profile.roles", ProfileError)
-        if not roles:
+        raw_roles = _mapping(data.get("roles"), "profile.roles", ProfileError)
+        if not raw_roles:
             raise ProfileError("At least one role binding is required")
-        unknown = set(data).difference({"schema", "name", "roles"})
+        unknown = set(data).difference(allowed_top)
         if unknown:
             raise ProfileError(
                 f"Unknown top-level profile fields: {', '.join(sorted(unknown))}"
             )
+
+        roles: dict[str, VoiceBinding] = {}
+        for role, raw in raw_roles.items():
+            role_name = _nonempty(role, "role name", ProfileError)
+            role_data = dict(_mapping(raw, f"roles.{role_name}", ProfileError))
+            engine = _nonempty(
+                role_data.get("engine"), f"roles.{role_name}.engine", ProfileError
+            )
+            role_options = _options(
+                role_data.get("options", {}), f"roles.{role_name}.options"
+            )
+            merged_options = {**backend_data.get(engine, {}), **role_options}
+            role_data["options"] = merged_options
+            roles[role_name] = VoiceBinding.from_mapping(
+                role_data, base_dir=location.parent
+            )
+
+        default_role = defaults.get("role")
+        if default_role is not None and default_role not in roles:
+            raise ProfileError(f"Default role {default_role!r} is not configured")
         return cls(
             name=name,
-            roles={
-                _nonempty(role, "role name", ProfileError): VoiceBinding.from_mapping(
-                    _mapping(raw, f"roles.{role}", ProfileError),
-                    base_dir=location.parent,
-                )
-                for role, raw in roles.items()
-            },
+            roles=roles,
+            schema=profile_schema,
+            defaults=defaults,
+            backend_defaults=backend_data,
+            source_path=location,
         )
+
+
+# The v5-facing name describes the new role-routing configuration; the alias
+# keeps one implementation and preserves existing VoiceProfile consumers.
+VoiceConfig = VoiceProfile
 
 
 @dataclass(frozen=True, slots=True)

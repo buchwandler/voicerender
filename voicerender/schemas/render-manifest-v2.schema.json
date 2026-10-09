@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voicerender.invalid/schemas/render-manifest-v2.schema.json",
+  "title": "VoiceRender render-manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "manifest_id", "manifest_id_algorithm", "source", "producer", "profile", "selection", "edge_policy", "complete", "segments"],
+  "properties": {
+    "schema": {"const": "voicerender.render-manifest.v2"},
+    "manifest_id": {"$ref": "#/$defs/sha256"},
+    "manifest_id_algorithm": {"const": "voicerender-manifest-id.v1"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "plan_id", "plan_file_sha256", "schema_version"],
+      "properties": {
+        "kind": {"const": "utterplan-v5"},
+        "plan_id": {"$ref": "#/$defs/sha256"},
+        "plan_file_sha256": {"$ref": "#/$defs/sha256"},
+        "schema_version": {"const": 5}
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "algorithm"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "algorithm": {"type": "string", "minLength": 1}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "effective_profile_sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "effective_profile_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "order", "selected_count", "is_full_plan"],
+      "properties": {
+        "kind": {"enum": ["all", "take", "locators"]},
+        "order": {"const": "source"},
+        "selected_count": {"type": "integer", "minimum": 1},
+        "is_full_plan": {"type": "boolean"},
+        "take": {"type": "integer", "minimum": 1},
+        "locators": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "take"}}}, "then": {"required": ["take"]}},
+        {"if": {"properties": {"kind": {"const": "locators"}}}, "then": {"required": ["locators"]}},
+        {"if": {"properties": {"kind": {"enum": ["all", "locators"]}}}, "then": {"not": {"required": ["take"]}}},
+        {"if": {"properties": {"kind": {"enum": ["all", "take"]}}}, "then": {"not": {"required": ["locators"]}}}
+      ]
+    },
+    "edge_policy": {"const": "preserved-unmeasured-v1"},
+    "complete": {"type": "boolean"},
+    "segments": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/segment"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableString": {"type": ["string", "null"]},
+    "directive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "value": {}}
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "logical_voice", "language", "resolved_voice", "synthesis_semantics_sha256", "acoustic_cache_key", "semantic_lowering", "edges", "timing", "status", "audio", "error"],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["locator", "flow_index", "segment_index", "flow_hash", "semantic_segment_hash"],
+          "properties": {
+            "locator": {"type": "string", "pattern": "^f[0-9]{6,}\\.s[0-9]{3,}$"},
+            "flow_index": {"type": "integer", "minimum": 0},
+            "segment_index": {"type": "integer", "minimum": 0},
+            "flow_hash": {"$ref": "#/$defs/sha256"},
+            "semantic_segment_hash": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "logical_voice": {"type": "string", "minLength": 1},
+        "language": {"type": "string", "minLength": 1},
+        "resolved_voice": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["engine", "model", "model_asset_sha256", "voice", "speaker", "model_revision", "reference_audio_sha256", "effective_binding_sha256"],
+          "properties": {
+            "engine": {"type": "string", "minLength": 1},
+            "model": {"type": "string", "minLength": 1},
+            "model_asset_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+            "voice": {"$ref": "#/$defs/nullableString"},
+            "speaker": {"type": ["integer", "null"], "minimum": 0},
+            "model_revision": {"$ref": "#/$defs/nullableString"},
+            "reference_audio_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+            "effective_binding_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "synthesis_semantics_sha256": {"$ref": "#/$defs/sha256"},
+        "acoustic_cache_key": {"$ref": "#/$defs/sha256"},
+        "semantic_lowering": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["native_directives", "composition_directives", "unsupported_directives"],
+          "properties": {
+            "native_directives": {"type": "array", "items": {"$ref": "#/$defs/directive"}},
+            "composition_directives": {"type": "array", "items": {"$ref": "#/$defs/directive"}},
+            "unsupported_directives": {"type": "array", "maxItems": 0}
+          }
+        },
+        "edges": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy", "source_frames", "trim_start_frames", "trim_end_frames", "leading_silence_frames", "trailing_silence_frames"],
+          "properties": {
+            "policy": {"const": "preserved-unmeasured-v1"},
+            "source_frames": {"type": ["integer", "null"], "minimum": 1},
+            "trim_start_frames": {"type": "integer", "minimum": 0},
+            "trim_end_frames": {"type": "integer", "minimum": 0},
+            "leading_silence_frames": {"type": ["integer", "null"], "minimum": 0},
+            "trailing_silence_frames": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provenance", "unit", "sample_rate", "spans"],
+          "properties": {
+            "provenance": {"enum": ["absent", "provided"]},
+            "unit": {"const": "frames"},
+            "sample_rate": {"type": ["integer", "null"], "minimum": 1},
+            "spans": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["start_frame", "end_frame"],
+                "properties": {
+                  "kind": {"type": "string", "minLength": 1},
+                  "start_frame": {"type": "integer", "minimum": 0},
+                  "end_frame": {"type": "integer", "minimum": 1},
+                  "text_start": {"type": "integer", "minimum": 0},
+                  "text_end": {"type": "integer", "minimum": 0},
+                  "text": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "status": {"enum": ["pending", "rendered", "reused", "failed"]},
+        "audio": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "sha256", "sample_rate", "channels", "frames", "encoding"],
+              "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "sample_rate": {"type": "integer", "minimum": 1},
+                "channels": {"const": 1},
+                "frames": {"type": "integer", "minimum": 1},
+                "encoding": {"const": "PCM_16"}
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "message"],
+              "properties": {"type": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"enum": ["rendered", "reused"]}}}, "then": {"properties": {"audio": {"type": "object"}, "error": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"audio": {"type": "null"}, "error": {"type": "object"}}}},
+        {"if": {"properties": {"status": {"const": "pending"}}}, "then": {"properties": {"audio": {"type": "null"}, "error": {"type": "null"}}}}
+      ]
+    }
+  }
+}

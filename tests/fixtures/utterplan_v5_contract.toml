@@ -1,0 +1,36 @@
+# VoiceRender interoperability fixture sourced from UtterPlan's canonical consumer contract.
+format = "utterplan"
+schema_version = 5
+plan_id = "sha256:d806e55fabbb3428621850f8e6a6dee76842acfd13c134bb4f68d980afa98efa"
+language = "fr-FR"
+unit = "paragraph"
+hash_schema = "utterplan-flow-v1"
+
+[producer]
+name = "utterplan"
+version = "0.4.1"
+
+[document]
+format = "ssmd"
+ssmd_version = "0.9"
+semantics = {voice_bindings = {narrator = "renderer-owned-choice"}, prosody_transitions = {enabled = true, same_voice_only = true}, requires = {extensions = ["acme.effects.whisper"]}}
+
+[[linguistics]]
+language = "en-GB"
+provider = "fallback"
+
+[[flow]]
+hash = "sha256:c65d170e77a410449075aa48a99e2b35cb3052b37ca41c59e459e9a5c9b1b154"
+
+[[flow.segment]]
+text = "Hello."
+language = "en-GB"
+pause_after = "sentence"
+voice = {reference = "narrator"}
+prosody = {rate = "slow"}
+token.span = [[0, 6]]
+
+[[flow.segment]]
+text = "Next."
+language = "en-GB"
+token.span = [[0, 5]]

@@ -2,9 +2,9 @@
 
 **Standalone, resumable multi-engine speech synthesis and reference-voice rendering for Python.**
 
-VoiceRender turns an ordered, speech-only `voiceplan.toml` plus a TOML voice profile into a portable bundle of mono WAV segments and a JSON manifest. It does **not** depend on Readio, parse SSMD, compose pauses, master audio or encode MP3/M4B. The flat package lives in `voicerender/` (no `src/` directory).
+VoiceRender directly renders ordered UtterPlan v5 speech segments (and retains the legacy `voiceplan.toml` API) into resumable mono WAV bundles with a verifiable render manifest. An optional integration materializes a producer-neutral AudioCompose `AudioJob`; core rendering does **not** compose, master, or encode audio. The flat package lives in `voicerender/` (no `src/` directory).
 
-> **Status: MVP source release.** PiperSynth and PocketSynth are optional backend adapters based on the released APIs exercised by Readio. Only stubbed backend-contract tests and mocked audio unit tests have run for this ZIP; real synthesizer/model execution is **not yet verified** here. Full UtterPlan linguistic-token/prosody exports and capacity-aware request splitting are deliberately not implemented. Unsupported segment fields fail validation rather than being silently dropped.
+> **Status:** Legacy VoicePlan rendering remains supported. UtterPlan v5 accepts only the documented subset of source semantics and rejects unsupported directives before rendering; symbolic pauses are preserved for the optional composition handoff. PiperSynth and PocketSynth remain optional backends. Backend-specific real model execution depends on locally installed engines and models.
 
 ## Install
 
@@ -14,6 +14,8 @@ Extract the ZIP, open a shell in the extracted project directory and run:
 python -m pip install -e ".[piper]"
 # or with PocketSynth reference-voice support:
 python -m pip install -e ".[pocket]"
+# optional UtterPlan v5 AudioCompose AudioJob materializer:
+python -m pip install -e ".[audiocompose]"
 ```
 
 You can also install a built wheel, or use `python -m voicerender` while working from the source tree with its runtime dependencies installed.
@@ -36,7 +38,35 @@ Setuptools-scm's VCS-based version changes when tags/commits change; build from 
 
 ## Quick start
 
-The archive includes `examples/plans/chapter.voiceplan.toml`, `examples/voices/piper.toml`, and a Pocket reference-voice example.
+The examples directory includes a minimal UtterPlan v5 input and voice configuration, plus the legacy VoicePlan/profile examples.
+
+### Direct UtterPlan v5
+
+Install the optional backend and render the included plan directly. The example Piper model must be installed separately:
+
+```bash
+python -m pip install -e ".[piper]"
+voicerender engines list
+voicerender render examples/plans/chapter.utterplan.toml \
+  --voice examples/voices/voice.toml \
+  --out-dir renders/voice1
+voicerender inspect renders/voice1/manifest.json --verify --json
+```
+
+`--take N` selects the first N flattened speech segments. `--select f000000.s000` selects by the zero-based source locator (`--select` and `--take` are mutually exclusive). The v5 renderer resumes verified outputs automatically; `--force` bypasses reuse. `--profile` / `--voices` remain supported for the legacy VoicePlan path.
+
+To optionally hand verified renders to AudioCompose, install `python -m pip install -e ".[audiocompose]"`, then materialize a copying AudioJob bundle:
+
+```bash
+voicerender audiojob examples/plans/chapter.utterplan.toml \
+  --renders renders/voice1/manifest.json \
+  --pauses examples/pauses/audiobook.toml \
+  --output renders/audiojob
+```
+
+The AudioJob bundle copies its source WAVs and includes the job manifest. Composition, mastering, and export remain AudioCompose responsibilities; VoiceRender's core renderer does not import AudioCompose.
+
+### Legacy VoicePlan
 
 ```bash
 voicerender engines list
@@ -45,18 +75,23 @@ voicerender profiles validate examples/voices/piper.toml
 voicerender render examples/plans/chapter.voiceplan.toml \
   --profile examples/voices/piper.toml \
   --take 2 \
-  --out-dir renders/voice1
-voicerender inspect renders/voice1/manifest.json --json
+  --out-dir renders/legacy
+voicerender inspect renders/legacy/manifest.json --json
 ```
 
-The **primary command is always `voicerender render`**. `--take N` counts logical speech segments, not backend-internal chunks or silence events. Selection by ID is available using `--select chapter-0001:seg-000002` (comma-separate multiple IDs). `--force` bypasses cached audio. The renderer resumes automatically when called again with the same output directory. Use `--json` on `render` for machine-readable summaries.
+Use a separate `--out-dir` per voice profile. The legacy renderer shares a content-addressed cache by default at `OUT_DIR/../.voicerender-cache`; use `--cache-dir` to share a cache across directory structures.
 
-For ten profiles, render each with its own `--out-dir`. VoiceRender shares a content-addressed cache by default at `OUT_DIR/../.voicerender-cache`; `--cache-dir` can be supplied explicitly to share a cache across directory structures.
 
 ## Python API
 
 ```python
-from voicerender import SpeechSegment, VoiceProfile, render, render_plan
+from voicerender import (
+    SpeechSegment,
+    VoiceProfile,
+    render,
+    render_plan,
+    render_utterplan_v5,
+)
 
 # From a persisted voiceplan:
 result = render_plan(
@@ -67,6 +102,13 @@ result = render_plan(
 )
 print(result.manifest_path)
 
+# Directly from UtterPlan v5 with a role-routed voice.toml:
+v5_result = render_utterplan_v5(
+    "examples/plans/chapter.utterplan.toml",
+    profile="examples/voices/voice.toml",
+    output_dir="renders/utterplan-v5",
+)
+
 # Without UtterPlan or any file-based plan:
 segments = [SpeechSegment(id="hello", text="Hello there!", role="narrator")]
 profile = VoiceProfile.load("examples/voices/piper.toml")
@@ -75,7 +117,21 @@ result = render(segments, profile=profile, output_dir="renders/hello")
 
 For third-party engines, implement the small engine protocol in `voicerender.engines.base` and register it using `voicerender.engines.register_engine(adapter)`. See `tests/test_renderer.py` for a fully executable mock adapter. The core imports no synthesis backend until one is opened.
 
-## Profile schema
+## UtterPlan v5 voice configuration
+
+Direct v5 rendering uses the `voice.toml` form (`schema_version = 1`), with optional defaults and one or more logical role bindings. See `examples/voices/voice.toml`. A role can bind an `engine` and `model` (or `target_id`), and optionally define native engine options, a language-specific voice, speaker, reference audio, or a cache-only `model_revision`. Relative reference-audio paths resolve from this file.
+
+```toml
+schema_version = 1
+name = "narration"
+[defaults]
+role = "narrator"
+[roles.narrator]
+engine = "piper"
+model = "en_US-amy-medium"
+```
+
+## Legacy VoiceProfile schema
 
 ```toml
 schema = "voicerender.voice-profile.v1"
@@ -109,48 +165,42 @@ Paths to reference audio resolve relative to the profile file and are checked be
 
 `model_revision` is an optional per-role declaration used **only for cache identity**. It does not download or pin the corresponding model revision. Exact model-asset resolution and revision verification need backend-specific follow-up work; changing the configured string changes cache identity but does not change the loaded model.
 
-The MVP separates `native_speed` (engine-native acoustic control) from AudioCompose tempo. Piper supports native speed; PocketSynth does not.
+VoiceRender profile options describe engine-native controls such as Piper `native_speed`; AudioCompose tempo is a separate composition operation. PocketSynth does not support Piper's native speed control.
+
 
 ## Persisted contracts
 
-### Input: `utterplan.voiceplan.v1`
+### Input: UtterPlan v5
 
-```toml
-schema = "utterplan.voiceplan.v1"
-source_plan_id = "chapter-001"
+VoiceRender consumes a UtterPlan v5 TOML export directly; it flattens flow units and segments in source order and addresses each segment as `f{flow_index:06d}.s{segment_index:03d}`. The sample `examples/plans/chapter.utterplan.toml` demonstrates the minimal supported shape. See [`docs/utterplan-v5-integration.md`](docs/utterplan-v5-integration.md) for supported semantics, strict rejection rules, voice routing, selection, timing, and composition boundaries.
 
-[[segments]]
-id = "seg-001"
-scope_id = "chapter-001"
-role = "narrator"
-language = "en-US"
-text = "Once upon a time."
-```
+Legacy consumers can continue using the custom `utterplan.voiceplan.v1` input and `render_plan()` API. This is a VoiceRender compatibility format, not a replacement for UtterPlan v5.
 
-UtterPlan's proposed exported voiceplan is **not yet released**; this MVP implements the minimal proposed contract illustrated in the migration roadmap. Only `id`, `scope_id`, `role`, `language`, `text` are accepted for each segment. Native pronunciation overrides, linguistic tokens, alignment hints, whole-request phonemes and advanced multi-language lowering require a versioned follow-up contract and adapter.
-
-### Output: `voicerender.render-manifest.v1`
+### Output: `voicerender.render-manifest.v2`
 
 ```text
 renders/voice1/
   manifest.json
   segments/
-    000001-<hashed-id>.wav
-    000002-<hashed-id>.wav
+    <source-addressed-render>.wav
 ```
 
-The manifest has ordered segment records with stable `scope_id`/`segment_id`, engine and voice identity, synthesis key, relative WAV path, SHA-256, frames, sample rate, channels, timing provenance and `pending|rendered|reused|failed` state. It persists after each segment. WAV files are mono 16-bit PCM. Render failures are recorded in `manifest.json`; `--continue-on-error` attempts remaining segments and returns a nonzero exit code if any failed. `voicerender inspect` verifies WAV hashes and structure.
+Manifest v2 preserves source plan and segment identity separately from versioned VoiceRender semantic identities, records selection, acoustic cache keys, timing provenance and the `preserved-unmeasured-v1` edge policy. Every completed WAV is checked against its relative safe path, SHA-256 and recorded WAV metadata before reuse or AudioJob materialization. The manifest is updated atomically as segments move through `pending|rendered|reused|failed`; `voicerender inspect` verifies v2 media by default (and accepts explicit `--verify`).
 
-VoiceRender does not synthesize silence for pauses: `composeplan.toml` and AudioCompose own speech ordering, inter-segment silence, gain/tempo/pitch, fades and mastering. AudioCompose's future manifest adapter is **not part of this MVP**.
+AudioCompose materialization is optional and producer-side: `voicerender audiojob` joins the source plan, complete v2 manifest and verified WAV files, resolves the pause policy, and saves an AudioJob with copied sources. It rejects noncontiguous selections rather than inventing authored boundaries. VoiceRender does not synthesize semantic pauses into segment WAVs.
+
+### Legacy output: `voicerender.render-manifest.v1`
+
+The legacy VoicePlan renderer continues writing v1 manifests with ordered `scope_id`/`segment_id`, engine and voice identity, WAV path and digest, timing, and per-segment status. `inspect` continues to verify v1 bundles.
 
 ## Operational boundaries and known limitations
 
-- **Not yet real-model tested:** test adapters with installed `pipersynth` / `pocketsynth` and actual model downloads in your deployment environment. `tests/test_backends.py` stubs their documented public APIs.
-- **Speech-only v1:** advanced UtterPlan attributes are rejected rather than discarded; long requests are submitted once and may be rejected by backend capacity limits. No engine-level auto-splitting yet.
-- **No guarantees of bit-for-bit deterministic synthesis:** stochastic backends may vary; first verified WAV output is reused for a given acoustic key. Pass stable backend options/seed when available (not standardized here).
-- **WAV only:** no playback, audio composition, FFmpeg/export, model fine-tuning, speaker-embedding training or managed voice-prompt catalog yet. Cloning is limited to Pocket reference-audio inference.
-- **Concurrency:** exclusive lock within one output folder prevents accidental overlapping runs. Shared cache writes are atomic, but multi-process computation de-duplication and stale-lock recovery are not implemented yet.
-- **Cache invalidation:** includes engine distribution version, target ID, profile-native options, configured model revision, spoken text, language and reference SHA-256. For model updates not reflected in a pinned revision or engine version, clear the shared cache or set a new `model_revision` explicitly.
+- **Model execution:** test adapters exercise public backend contracts, but validate real Piper/Pocket synthesis with installed engines and model assets in the deployment environment.
+- **Fail-closed v5 subset:** unsupported source directives and document semantics are rejected rather than discarded. Long requests are submitted once; engine-level capacity splitting is not implemented.
+- **Synthesis variability:** stochastic backends may vary bit-for-bit; verified outputs are reused for matching acoustic inputs. Stable backend options/seeds are engine-specific.
+- **Composition and export:** VoiceRender stores speech WAVs and can optionally materialize an AudioCompose AudioJob. Composition, mastering, playback, and encoding are owned by AudioCompose or other downstream tools. Cloning is limited to Pocket reference-audio inference.
+- **Concurrency:** an exclusive lock prevents overlapping runs in one output folder. Shared cache writes are atomic, but multi-process computation de-duplication and stale-lock recovery are not implemented.
+- **Cache invalidation:** legacy cache identity uses engine, target, profile options, text, language, revision, and reference-audio bytes. V5 keys use effective acoustic inputs and exclude source position and semantic pauses. Set a new `model_revision` or clear the cache when model changes are not reflected in engine identity.
 
 ## Tests
 

@@ -21,6 +21,7 @@ dependencies = [
 piper = ["pipersynth>=0.2.1,<0.3"]
 pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
 dev = ["pytest>=8", "build>=1.2", "setuptools-scm>=9.2"]
+audiocompose = ["audiocompose>=0.2"]
 
 [project.scripts]
 voicerender = "voicerender.cli:main"
@@ -31,7 +32,7 @@ include = ["voicerender*"]
 exclude = ["tests*", "examples*"]
 
 [tool.setuptools.package-data]
-voicerender = ["py.typed"]
+voicerender = ["py.typed", "schemas/*.json"]
 
 [tool.setuptools_scm]
 fallback_version = "0.1.0"

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
-from voicerender.engines.piper import PiperAdapter, discover_voices as piper_voices
-from voicerender.engines.pocket import PocketAdapter, discover_voices as pocket_voices
+from voicerender.engines.base import SynthesisRequest
+from voicerender.engines.piper import PiperAdapter
+from voicerender.engines.piper import discover_voices as piper_voices
+from voicerender.engines.pocket import PocketAdapter
+from voicerender.engines.pocket import discover_voices as pocket_voices
 from voicerender.models import VoiceBinding
 
 
@@ -59,8 +61,12 @@ def test_piper_public_api(monkeypatch):
     with adapter.open(binding) as session:
         result = session.synthesize(request_id="1", text="hello", language="en-US")
         assert result.sample_rate == 16000
+        typed_result = session.synthesize_request(
+            SynthesisRequest("2", "typed", "en-US")
+        )
+        assert typed_result.sample_rate == 16000
     assert events[1] == ("synthesize", "hello", 1, 0.5)
-    assert events[2] == ("close",)
+    assert events[-1] == ("close",)
     assert piper_voices(language="en-US")[0]["target_id"] == "model"
 
 
@@ -110,6 +116,10 @@ def test_pocket_reference_audio_public_api(monkeypatch, tmp_path):
     with PocketAdapter().open(binding) as session:
         result = session.synthesize(request_id="1", text="cloned", language="en-US")
         assert result.sample_rate == 24000
+        typed_result = session.synthesize_request(
+            SynthesisRequest("2", "typed", "en-US")
+        )
+        assert typed_result.sample_rate == 24000
     assert ("prepare", str(ref)) in events
     assert ("synthesize", "cloned", "prepared") in events
     assert events[-1] == ("close",)
@@ -117,9 +127,10 @@ def test_pocket_reference_audio_public_api(monkeypatch, tmp_path):
 
 
 def test_cli_render_with_fake_piper_runtime(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
     from voicerender.cli import main
     from voicerender.storage import wav_info
-    from types import SimpleNamespace
 
     class Voice:
         @classmethod

@@ -13,6 +13,10 @@ class ProfileError(VoiceRenderError, ValueError):
     """Invalid voice profile or unsupported selection."""
 
 
+class PausePolicyError(VoiceRenderError, ValueError):
+    """Invalid or unresolved semantic pause policy."""
+
+
 class EngineError(VoiceRenderError, RuntimeError):
     """Engine installation, initialization or synthesis failure."""
 

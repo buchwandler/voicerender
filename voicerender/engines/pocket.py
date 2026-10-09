@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
-from collections.abc import Iterator
 
 from ..errors import EngineError, ProfileError
 from ..models import VoiceBinding
-from .base import EngineCapabilities, SynthesisOutput
+from .base import EngineCapabilities, SynthesisOutput, SynthesisRequest
 
 _ALLOWED = frozenset(
     {
@@ -26,7 +26,11 @@ _ALLOWED = frozenset(
 class PocketAdapter:
     id = "pocket"
     package = "pocketsynth"
-    capabilities = EngineCapabilities(supports_reference_audio=True, options=_ALLOWED)
+    capabilities = EngineCapabilities(
+        supports_reference_audio=True,
+        options=_ALLOWED,
+        supports_synthesis_request=True,
+    )
 
     def version(self) -> str | None:
         try:
@@ -90,6 +94,17 @@ class PocketAdapter:
             ) from exc
 
         class Session:
+            def synthesize_request(self, request: SynthesisRequest) -> SynthesisOutput:
+                if request.directives:
+                    raise EngineError(
+                        "Pocket does not support per-segment UtterPlan directives"
+                    )
+                return self.synthesize(
+                    request_id=request.request_id,
+                    text=request.text,
+                    language=request.language,
+                )
+
             def synthesize(
                 self, *, request_id: str, text: str, language: str
             ) -> SynthesisOutput:

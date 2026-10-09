@@ -1,0 +1,15 @@
+schema = "voicerender.pause-policy.v1"
+merge = "max"
+
+[default]
+none = "0ms"
+clause = "140ms"
+sentence = "320ms"
+paragraph = "700ms"
+parenthetical = "110ms"
+voice_change = "250ms"
+x-weak = "70ms"
+weak = "120ms"
+medium = "220ms"
+strong = "420ms"
+x-strong = "700ms"
