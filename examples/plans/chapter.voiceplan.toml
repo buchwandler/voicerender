@@ -1,0 +1,23 @@
+schema = "utterplan.voiceplan.v1"
+source_plan_id = "example-chapter-0001"
+
+[[segments]]
+id = "seg-000001"
+scope_id = "chapter-0001"
+role = "narrator"
+language = "en-US"
+text = "A quiet morning began."
+
+[[segments]]
+id = "seg-000002"
+scope_id = "chapter-0001"
+role = "guest"
+language = "en-US"
+text = "Hello and welcome."
+
+[[segments]]
+id = "seg-000003"
+scope_id = "chapter-0001"
+role = "narrator"
+language = "en-US"
+text = "And so the story continued."

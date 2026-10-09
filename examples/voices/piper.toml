@@ -1,0 +1,10 @@
+schema = "voicerender.voice-profile.v1"
+name = "piper-narration"
+
+[roles.narrator]
+engine = "piper"
+target_id = "en_US-amy-medium"
+
+[roles.guest]
+engine = "piper"
+target_id = "en_US-lessac-medium"

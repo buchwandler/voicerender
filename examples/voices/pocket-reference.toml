@@ -1,0 +1,10 @@
+schema = "voicerender.voice-profile.v1"
+name = "cloned-narrator"
+
+[roles.narrator]
+engine = "pocket"
+target_id = "REPLACE_WITH_INSTALLED_BUNDLE_ID"
+reference_audio = "../../my-reference-voice.wav"
+
+[roles.narrator.options]
+precision = "int8"

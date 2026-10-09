@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm>=9.2", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicerender"
+dynamic = ["version"]
+description = "Resumable multi-engine speech synthesis and reference-voice rendering"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{name = "buchwandler"}]
+keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
+dependencies = [
+  "numpy>=1.23",
+  "soundfile>=0.12",
+  "tomli>=2; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+piper = ["pipersynth>=0.2.1,<0.3"]
+pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+dev = ["pytest>=8", "build>=1.2", "setuptools-scm>=9.2"]
+
+[project.scripts]
+voicerender = "voicerender.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["voicerender*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+voicerender = ["py.typed"]
+
+[tool.setuptools_scm]
+fallback_version = "0.1.0"
+version_file = "voicerender/_version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
