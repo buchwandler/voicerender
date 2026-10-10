@@ -1,0 +1,2801 @@
+ .codecrate.toml                                 |  24 ++
+ .gitignore                                      |   2 +
+ .ledger/ledger.toml                             |  24 ++
+ .ledger/releaseledger/.ledger-project.toml      |   6 +
+ .ledger/releaseledger/config.toml               |  57 ++++
+ .ledger/releaseledger/data/.ledger-project.toml |   6 +
+ .ledger/taskledger/.ledger-project.toml         |   6 +
+ .ledger/taskledger/config.toml                  |   7 +
+ .pre-commit-config.yaml                         |  64 +++++
+ README.md                                       | 169 ++++++++++-
+ docs/Makefile                                   |  32 +++
+ docs/conf.py                                    | 101 +++++++
+ docs/make.bat                                   | 113 ++++++++
+ docs/make.py                                    |  89 ++++++
+ docs/requirements.txt                           |   5 +
+ examples/plans/chapter.voiceplan.toml           |  23 ++
+ examples/voices/piper.toml                      |  10 +
+ examples/voices/pocket-reference.toml           |  10 +
+ pyproject.toml                                  |  41 +++
+ tests/test_backends.py                          | 169 +++++++++++
+ tests/test_renderer.py                          | 264 ++++++++++++++++++
+ voicerender/__init__.py                         |  34 +++
+ voicerender/__main__.py                         |   3 +
+ voicerender/cli.py                              | 185 ++++++++++++
+ voicerender/engines/__init__.py                 |  48 ++++
+ voicerender/engines/base.py                     |  43 +++
+ voicerender/engines/piper.py                    | 158 +++++++++++
+ voicerender/engines/pocket.py                   | 154 ++++++++++
+ voicerender/errors.py                           |  21 ++
+ voicerender/models.py                           | 233 ++++++++++++++++
+ voicerender/py.typed                            |   0
+ voicerender/render.py                           | 355 ++++++++++++++++++++++++
+ voicerender/storage.py                          | 113 ++++++++
+ 33 files changed, 2568 insertions(+), 1 deletion(-)
+
+diff --git a/.codecrate.toml b/.codecrate.toml
+new file mode 100644
+index 0000000..220b45e
+--- /dev/null
++++ b/.codecrate.toml
+@@ -0,0 +1,24 @@
++[codecrate]
++output = "context_voicerender.md"
++keep_docstrings = true
++dedupe = true
++metadata = false
++respect_gitignore = true
++exclude = ["*/.venv/*", "context_voicerender.*"]
++include = [
++  "**/*.py",
++  "**/*.toml",
++  "**/*.md",
++  "**/*.json",
++  "**/*.txt",
++  "**/*.csv",
++  "**/*.tsv",
++  "**/*.yaml",
++  "**/*.yml",
++  "**/*.ssmd",
++  "LICENSE",
++]
++split_max_chars = 0
++layout = "full"
++profile = "portable-agent"
++emit_standalone_unpacker = true
+diff --git a/.gitignore b/.gitignore
+index 6f596e1..528551a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -218,3 +218,5 @@ __marimo__/
+
+ # Streamlit
+ .streamlit/secrets.toml
++voicerender/_version.py
++context_voicerender*.*
+diff --git a/.ledger/ledger.toml b/.ledger/ledger.toml
+new file mode 100644
+index 0000000..76763a1
+--- /dev/null
++++ b/.ledger/ledger.toml
+@@ -0,0 +1,24 @@
++schema_version = 3
++
++[project]
++uuid = "c801dfa2-85a1-498d-930b-bae570286fce"
++name = "voicerender"
++
++[ledgers.taskledger.mounts.data]
++storage = "external"
++root = "../ledger"
++
++[ledgers.taskledger.mounts.runtime]
++storage = "user-data"
++
++[ledgers.taskledger.mounts.logs]
++storage = "user-data"
++
++[ledgers.taskledger.mounts.indexes]
++storage = "cache"
++
++[ledgers.releaseledger.mounts.data]
++storage = "project"
++
++[ledgers.releaseledger.mounts.indexes]
++storage = "cache"
+diff --git a/.ledger/releaseledger/.ledger-project.toml b/.ledger/releaseledger/.ledger-project.toml
+new file mode 100644
+index 0000000..a8b652e
+--- /dev/null
++++ b/.ledger/releaseledger/.ledger-project.toml
+@@ -0,0 +1,6 @@
++schema_version = 1
++layout_version = 3
++project_uuid = "c801dfa2-85a1-498d-930b-bae570286fce"
++tool = "releaseledger"
++mount = "config"
++storage = "project"
+diff --git a/.ledger/releaseledger/config.toml b/.ledger/releaseledger/config.toml
+new file mode 100644
+index 0000000..b440614
+--- /dev/null
++++ b/.ledger/releaseledger/config.toml
+@@ -0,0 +1,57 @@
++config_version = 2
++# Branch-scoped release state. This block is safe to commit.
++ledger_ref = "main"
++ledger_parent_ref = ""
++ledger_branch_guard = "off"
++# Cross-ledger identity. Local record IDs stay unchanged.
++
++[ledger]
++code = "rl"
++# Release defaults.
++
++[release]
++default_changelog = "CHANGELOG.md"
++default_status = "planned"
++allow_dirty_worktree = true
++# Changelog build defaults.
++
++[changelog]
++output = "docs/changelog.md"
++header = ""
++body = """## {% if release.date %}[{{ release.version }}] - {{ release.date }}{% else %}[{{ release.version }}] - Unreleased{% endif %}
++
++{% for group in groups %}
++### {{ group.title }}
++{% for entry in group.entries %}
++- {% if entry.breaking %}**BREAKING:** {% endif %}{{ entry.summary }}
++{% endfor %}
++
++{% endfor %}
++"""
++footer = "<!-- generated by releaseledger -->"
++trim = true
++render_always = false
++postprocessors = []
++standard = ""
++group_mode = "extended"
++link_references = false
++repository_url = ""
++tag_prefix = "v"
++compare_url_template = ""
++release_url_template = ""
++preamble = ""
++semver = false
++unreleased = true
++# Git-first release evidence.
++
++[git]
++enabled = true
++tag_creation = "local"
++default_base = "previous_release_tag"
++default_head = "HEAD"
++previous_tag_patterns = ["v{version}", "{version}"]
++include_merges = "nontrivial"
++require_clean_worktree = false
++max_commits = 500
++max_diff_chars_per_commit = 12000
++candidate_status = "draft"
+diff --git a/.ledger/releaseledger/data/.ledger-project.toml b/.ledger/releaseledger/data/.ledger-project.toml
+new file mode 100644
+index 0000000..cab91d6
+--- /dev/null
++++ b/.ledger/releaseledger/data/.ledger-project.toml
+@@ -0,0 +1,6 @@
++schema_version = 1
++layout_version = 3
++project_uuid = "c801dfa2-85a1-498d-930b-bae570286fce"
++tool = "releaseledger"
++mount = "data"
++storage = "project"
+diff --git a/.ledger/taskledger/.ledger-project.toml b/.ledger/taskledger/.ledger-project.toml
+new file mode 100644
+index 0000000..e8000d9
+--- /dev/null
++++ b/.ledger/taskledger/.ledger-project.toml
+@@ -0,0 +1,6 @@
++schema_version = 1
++layout_version = 3
++project_uuid = "c801dfa2-85a1-498d-930b-bae570286fce"
++tool = "taskledger"
++mount = "config"
++storage = "project"
+diff --git a/.ledger/taskledger/config.toml b/.ledger/taskledger/config.toml
+new file mode 100644
+index 0000000..6f94549
+--- /dev/null
++++ b/.ledger/taskledger/config.toml
+@@ -0,0 +1,7 @@
++# Project-local Taskledger configuration.
++# Storage topology belongs to Ledgercore; branch state belongs to data/state.toml.
++config_version = 3
++
++[ledger]
++code = 'tl'
++name = 'taskledger'
+diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+new file mode 100644
+index 0000000..61a9e5e
+--- /dev/null
++++ b/.pre-commit-config.yaml
+@@ -0,0 +1,64 @@
++exclude: |
++  # NOT INSTALLABLE ADDONS
++  # END NOT INSTALLABLE ADDONS
++  # Files and folders generated by bots, to avoid loops
++  ^setup/|/static/description/index\.html$|
++  # We don't want to mess with tool-generated files
++  .svg$|/tests/([^/]+/)?cassettes/|^.copier-answers.yml$|^.github/|
++  # Maybe reactivate this when all README files include prettier ignore tags?
++  ^README\.md$|
++  # Repos using Sphinx to generate docs don't need prettying
++  ^docs/_templates/.*\.html$|
++  # Don't bother non-technical authors with formatting issues in docs
++  readme/.*\.(rst|md)$|
++  # Ignore build and dist directories in addons
++  /build/|/dist/|/dev/|/notnebooks/
++  # You don't usually want a bot to modify your legal texts
++  (LICENSE.*|COPYING.*)|
++default_language_version:
++  python: python3
++repos:
++  - repo: local
++    hooks:
++      - id: ruff-check
++        name: ruff check
++        entry: ruff check --exit-non-zero-on-fix --force-exclude
++        language: system
++        types_or: [python, pyi]
++      - id: ruff-format
++        name: ruff format
++        entry: ruff format --force-exclude
++        language: system
++        types_or: [python, pyi]
++  - repo: https://github.com/asottile/pyupgrade
++    rev: v3.21.2
++    hooks:
++      - id: pyupgrade
++        args: [--py310-plus]
++  - repo: https://github.com/pre-commit/pre-commit-hooks
++    rev: v6.0.0
++    hooks:
++      - id: check-toml
++      - id: check-yaml
++      - id: end-of-file-fixer
++      - id: trailing-whitespace
++      - id: check-symlinks
++      - id: check-xml
++      - id: mixed-line-ending
++        args: ["--fix=lf"]
++      - id: debug-statements
++      - id: check-case-conflict
++      - id: check-docstring-first
++      - id: check-executables-have-shebangs
++      - id: check-merge-conflict
++  - repo: https://github.com/pre-commit/mirrors-prettier
++    rev: v4.0.0-alpha.8
++    hooks:
++      - id: prettier
++        name: prettier (with plugin-xml)
++        additional_dependencies:
++          - "prettier@2.7.1"
++          - "@prettier/plugin-xml@2.2.0"
++        args:
++          - --plugin=@prettier/plugin-xml
++        files: \.(css|htm|html|js|json|jsx|less|md|scss|toml|ts|xml|yaml|yml)$
+diff --git a/README.md b/README.md
+index c1ac9c5..755aea8 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,168 @@
+-# voicerender
+\ No newline at end of file
++# VoiceRender
++
++**Standalone, resumable multi-engine speech synthesis and reference-voice rendering for Python.**
++
++VoiceRender turns an ordered, speech-only `voiceplan.toml` plus a TOML voice profile into a portable bundle of mono WAV segments and a JSON manifest. It does **not** depend on Readio, parse SSMD, compose pauses, master audio or encode MP3/M4B. The flat package lives in `voicerender/` (no `src/` directory).
++
++> **Status: MVP source release.** PiperSynth and PocketSynth are optional backend adapters based on the released APIs exercised by Readio. Only stubbed backend-contract tests and mocked audio unit tests have run for this ZIP; real synthesizer/model execution is **not yet verified** here. Full UtterPlan linguistic-token/prosody exports and capacity-aware request splitting are deliberately not implemented. Unsupported segment fields fail validation rather than being silently dropped.
++
++## Install
++
++Extract the ZIP, open a shell in the extracted project directory and run:
++
++```bash
++python -m pip install -e ".[piper]"
++# or with PocketSynth reference-voice support:
++python -m pip install -e ".[pocket]"
++```
++
++You can also install a built wheel, or use `python -m voicerender` while working from the source tree with its runtime dependencies installed.
++
++### Dynamic versioning
++
++Versioning uses **`setuptools-scm`** (`[project].dynamic = ["version"]`) and Git tags, with the generated Python version module at `voicerender/_version.py` during builds. There is no hard-coded project version and no `src/` layout. Tag releases with `v0.1.0`, `v0.2.0`, etc. Building from a ZIP without `.git` uses the explicitly declared bootstrap fallback `0.1.0`.
++
++```bash
++git init
++git add .
++git commit -m "Initial VoiceRender MVP"
++git tag v0.1.0
++python -m pip install build
++python -m build
++voicerender --version
++```
++
++Setuptools-scm's VCS-based version changes when tags/commits change; build from the tagged repository to get the intended release version. For reproducible source distributions, use the build-produced sdist rather than re-zipping a checkout.
++
++## Quick start
++
++The archive includes `examples/plans/chapter.voiceplan.toml`, `examples/voices/piper.toml`, and a Pocket reference-voice example.
++
++```bash
++voicerender engines list
++voicerender voices list --engine piper --lang en-US
++voicerender profiles validate examples/voices/piper.toml
++voicerender render examples/plans/chapter.voiceplan.toml \
++  --profile examples/voices/piper.toml \
++  --take 2 \
++  --out-dir renders/voice1
++voicerender inspect renders/voice1/manifest.json --json
++```
++
++The **primary command is always `voicerender render`**. `--take N` counts logical speech segments, not backend-internal chunks or silence events. Selection by ID is available using `--select chapter-0001:seg-000002` (comma-separate multiple IDs). `--force` bypasses cached audio. The renderer resumes automatically when called again with the same output directory. Use `--json` on `render` for machine-readable summaries.
++
++For ten profiles, render each with its own `--out-dir`. VoiceRender shares a content-addressed cache by default at `OUT_DIR/../.voicerender-cache`; `--cache-dir` can be supplied explicitly to share a cache across directory structures.
++
++## Python API
++
++```python
++from voicerender import SpeechSegment, VoiceProfile, render, render_plan
++
++# From a persisted voiceplan:
++result = render_plan(
++    "examples/plans/chapter.voiceplan.toml",
++    profile="examples/voices/piper.toml",
++    output_dir="renders/voice1",
++    take=2,
++)
++print(result.manifest_path)
++
++# Without UtterPlan or any file-based plan:
++segments = [SpeechSegment(id="hello", text="Hello there!", role="narrator")]
++profile = VoiceProfile.load("examples/voices/piper.toml")
++result = render(segments, profile=profile, output_dir="renders/hello")
++```
++
++For third-party engines, implement the small engine protocol in `voicerender.engines.base` and register it using `voicerender.engines.register_engine(adapter)`. See `tests/test_renderer.py` for a fully executable mock adapter. The core imports no synthesis backend until one is opened.
++
++## Profile schema
++
++```toml
++schema = "voicerender.voice-profile.v1"
++name = "narration"
++
++[roles.narrator]
++engine = "piper"
++target_id = "en_US-amy-medium"
++
++[roles.narrator.options]
++native_speed = 1.1  # maps to Piper length_scale = 1 / native_speed
++```
++
++### Reference-voice cloning (PocketSynth)
++
++```toml
++schema = "voicerender.voice-profile.v1"
++name = "reference-narrator"
++
++[roles.narrator]
++engine = "pocket"
++target_id = "YOUR_INSTALLED_BUNDLE_ID"
++reference_audio = "../recordings/my-consented-speaker.wav"
++
++[roles.narrator.options]
++precision = "int8"
++temperature = 0.6
++```
++
++Paths to reference audio resolve relative to the profile file and are checked before rendering. The **SHA-256 of reference-audio bytes** participates in the acoustic cache key, not the local path, so two identical recordings can share synthesized output. Reference audio is not copied into the render bundle. Use reference recordings you have the right and consent to use; do not misrepresent cloned audio as the speaker's own recording.
++
++`model_revision` is an optional per-role declaration used **only for cache identity**. It does not download or pin the corresponding model revision. Exact model-asset resolution and revision verification need backend-specific follow-up work; changing the configured string changes cache identity but does not change the loaded model.
++
++The MVP separates `native_speed` (engine-native acoustic control) from AudioCompose tempo. Piper supports native speed; PocketSynth does not.
++
++## Persisted contracts
++
++### Input: `utterplan.voiceplan.v1`
++
++```toml
++schema = "utterplan.voiceplan.v1"
++source_plan_id = "chapter-001"
++
++[[segments]]
++id = "seg-001"
++scope_id = "chapter-001"
++role = "narrator"
++language = "en-US"
++text = "Once upon a time."
++```
++
++UtterPlan's proposed exported voiceplan is **not yet released**; this MVP implements the minimal proposed contract illustrated in the migration roadmap. Only `id`, `scope_id`, `role`, `language`, `text` are accepted for each segment. Native pronunciation overrides, linguistic tokens, alignment hints, whole-request phonemes and advanced multi-language lowering require a versioned follow-up contract and adapter.
++
++### Output: `voicerender.render-manifest.v1`
++
++```text
++renders/voice1/
++  manifest.json
++  segments/
++    000001-<hashed-id>.wav
++    000002-<hashed-id>.wav
++```
++
++The manifest has ordered segment records with stable `scope_id`/`segment_id`, engine and voice identity, synthesis key, relative WAV path, SHA-256, frames, sample rate, channels, timing provenance and `pending|rendered|reused|failed` state. It persists after each segment. WAV files are mono 16-bit PCM. Render failures are recorded in `manifest.json`; `--continue-on-error` attempts remaining segments and returns a nonzero exit code if any failed. `voicerender inspect` verifies WAV hashes and structure.
++
++VoiceRender does not synthesize silence for pauses: `composeplan.toml` and AudioCompose own speech ordering, inter-segment silence, gain/tempo/pitch, fades and mastering. AudioCompose's future manifest adapter is **not part of this MVP**.
++
++## Operational boundaries and known limitations
++
++- **Not yet real-model tested:** test adapters with installed `pipersynth` / `pocketsynth` and actual model downloads in your deployment environment. `tests/test_backends.py` stubs their documented public APIs.
++- **Speech-only v1:** advanced UtterPlan attributes are rejected rather than discarded; long requests are submitted once and may be rejected by backend capacity limits. No engine-level auto-splitting yet.
++- **No guarantees of bit-for-bit deterministic synthesis:** stochastic backends may vary; first verified WAV output is reused for a given acoustic key. Pass stable backend options/seed when available (not standardized here).
++- **WAV only:** no playback, audio composition, FFmpeg/export, model fine-tuning, speaker-embedding training or managed voice-prompt catalog yet. Cloning is limited to Pocket reference-audio inference.
++- **Concurrency:** exclusive lock within one output folder prevents accidental overlapping runs. Shared cache writes are atomic, but multi-process computation de-duplication and stale-lock recovery are not implemented yet.
++- **Cache invalidation:** includes engine distribution version, target ID, profile-native options, configured model revision, spoken text, language and reference SHA-256. For model updates not reflected in a pinned revision or engine version, clear the shared cache or set a new `model_revision` explicitly.
++
++## Tests
++
++```bash
++python -m pip install -e ".[dev]"
++python -m pytest -q
++python -m voicerender --help
++python -m voicerender engines list
++```
++
++Tests use synthetic arrays and fake engine modules; they do not require downloaded model weights. Validate real Piper/Pocket synthesis separately before production use.
++
++## License
++
++Apache-2.0 (see `LICENSE`). The initial adapters follow the public request-level contracts already used by Readio; VoiceRender is a separate package and has no Readio dependency.
+diff --git a/docs/Makefile b/docs/Makefile
+new file mode 100644
+index 0000000..3ff8019
+--- /dev/null
++++ b/docs/Makefile
+@@ -0,0 +1,32 @@
++# Makefile for Sphinx documentation
++
++# You can set these variables from the command line
++SPHINXOPTS    ?=
++SPHINXBUILD   ?= sphinx-build
++SOURCEDIR     = .
++BUILDDIR      = _build
++
++# Put it first so that "make" without argument is like "make help".
++help:
++	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++
++.PHONY: help Makefile clean html livehtml
++
++# Clean build directory
++clean:
++	rm -rf $(BUILDDIR)/*
++
++# Build HTML documentation
++html:
++	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++	@echo
++	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."
++
++# Live reload server (requires sphinx-autobuild)
++livehtml:
++	sphinx-autobuild "$(SOURCEDIR)" "$(BUILDDIR)/html" $(SPHINXOPTS) $(O)
++
++# Catch-all target: route all unknown targets to Sphinx using the new
++# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
++%: Makefile
++	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+diff --git a/docs/conf.py b/docs/conf.py
+new file mode 100644
+index 0000000..40d03fa
+--- /dev/null
++++ b/docs/conf.py
+@@ -0,0 +1,101 @@
++# -- Path setup --------------------------------------------------------------
++
++# If extensions (or modules to document with autodoc) are in another directory,
++# add these directories to sys.path here. If the directory is relative to the
++# documentation root, use os.path.abspath to make it absolute, like shown here.
++#
++import os
++import sys
++
++sys.path.insert(0, os.path.abspath(".."))
++sys.path.insert(0, os.path.abspath("../pykokoro"))
++# -- Project information -----------------------------------------------------
++# https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
++
++project = "pykokoro"
++copyright = "2025, Holger Nahrstaedt"
++author = "Holger Nahrstaedt"
++
++# -- General configuration ---------------------------------------------------
++
++# Add any Sphinx extension module names here, as strings. They can be
++# extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
++# ones.
++extensions = [
++    "sphinx.ext.autodoc",
++    "sphinx.ext.doctest",
++    "sphinx.ext.intersphinx",
++    "sphinx.ext.napoleon",
++    "sphinx.ext.viewcode",
++    "myst_parser",
++]
++
++# All authored Sphinx pages are MyST Markdown.
++source_suffix = {
++    ".md": "markdown",
++}
++
++# Required for readable Markdown-native admonitions.
++myst_enable_extensions = ["colon_fence"]
++
++# Current documentation contains headings through H4.
++myst_heading_anchors = 4
++
++# Napoleon settings for NumPy-style docstrings
++napoleon_google_docstring = False
++napoleon_numpy_docstring = True
++napoleon_include_init_with_doc = True
++napoleon_include_private_with_doc = False
++napoleon_include_special_with_doc = True
++napoleon_use_admonition_for_examples = False
++napoleon_use_admonition_for_notes = False
++napoleon_use_admonition_for_references = False
++napoleon_use_ivar = False
++napoleon_use_param = True
++napoleon_use_rtype = True
++napoleon_preprocess_types = False
++napoleon_type_aliases = None
++napoleon_attr_annotations = True
++
++# Autodoc settings
++autodoc_default_options = {
++    "members": True,
++    "undoc-members": True,
++    "show-inheritance": True,
++    "member-order": "bysource",
++}
++
++# Add any paths that contain templates here, relative to this directory.
++templates_path = ["_templates"]
++
++# List of patterns, relative to source directory, that match files and
++# directories to ignore when looking for source files.
++# This pattern also affects html_static_path and html_extra_path.
++exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
++
++
++# -- Options for HTML output -------------------------------------------------
++
++# The theme to use for HTML and HTML Help pages.  See the documentation for
++# a list of builtin themes.
++#
++# html_theme = 'furo'
++
++html_theme = "sphinx_rtd_theme"
++
++html_theme_options = {
++    "navigation_depth": 4,
++    "titles_only": False,
++}
++
++# Add any paths that contain custom static files (such as style sheets) here,
++# relative to this directory. They are copied after the builtin static files,
++# so a file named "default.css" will overwrite the builtin "default.css".
++# html_static_path = ['_static']
++
++# Set up intersphinx maps
++intersphinx_mapping = {
++    "python": ("https://docs.python.org/3", None),
++    "numpy": ("https://numpy.org/doc/stable", None),
++    "PIL": ("https://pillow.readthedocs.io/en/stable", None),
++}
+diff --git a/docs/make.bat b/docs/make.bat
+new file mode 100644
+index 0000000..d6a9242
+--- /dev/null
++++ b/docs/make.bat
+@@ -0,0 +1,113 @@
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++set SPHINXBUILD=sphinx-build
++set BUILDDIR=build
++set ALLSPHINXOPTS=-d %BUILDDIR%/doctrees %SPHINXOPTS% .
++if NOT "%PAPER%" == "" (
++	set ALLSPHINXOPTS=-D latex_paper_size=%PAPER% %ALLSPHINXOPTS%
++)
++
++if "%1" == "" goto help
++
++if "%1" == "help" (
++	:help
++	echo.Please use `make ^<target^>` where ^<target^> is one of
++	echo.  html      to make standalone HTML files
++	echo.  dirhtml   to make HTML files named index.html in directories
++	echo.  pickle    to make pickle files
++	echo.  json      to make JSON files
++	echo.  htmlhelp  to make HTML files and a HTML help project
++	echo.  qthelp    to make HTML files and a qthelp project
++	echo.  latex     to make LaTeX files, you can set PAPER=a4 or PAPER=letter
++	echo.  changes   to make an overview over all changed/added/deprecated items
++	echo.  linkcheck to check all external links for integrity
++	echo.  doctest   to run all doctests embedded in the documentation if enabled
++	goto end
++)
++
++if "%1" == "clean" (
++	for /d %%i in (%BUILDDIR%\*) do rmdir /q /s %%i
++	del /q /s %BUILDDIR%\*
++	goto end
++)
++
++if "%1" == "html" (
++	%SPHINXBUILD% -b html %ALLSPHINXOPTS% %BUILDDIR%/html
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/html.
++	goto end
++)
++
++if "%1" == "dirhtml" (
++	%SPHINXBUILD% -b dirhtml %ALLSPHINXOPTS% %BUILDDIR%/dirhtml
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/dirhtml.
++	goto end
++)
++
++if "%1" == "pickle" (
++	%SPHINXBUILD% -b pickle %ALLSPHINXOPTS% %BUILDDIR%/pickle
++	echo.
++	echo.Build finished; now you can process the pickle files.
++	goto end
++)
++
++if "%1" == "json" (
++	%SPHINXBUILD% -b json %ALLSPHINXOPTS% %BUILDDIR%/json
++	echo.
++	echo.Build finished; now you can process the JSON files.
++	goto end
++)
++
++if "%1" == "htmlhelp" (
++	%SPHINXBUILD% -b htmlhelp %ALLSPHINXOPTS% %BUILDDIR%/htmlhelp
++	echo.
++	echo.Build finished; now you can run HTML Help Workshop with the ^
++.hhp project file in %BUILDDIR%/htmlhelp.
++	goto end
++)
++
++if "%1" == "qthelp" (
++	%SPHINXBUILD% -b qthelp %ALLSPHINXOPTS% %BUILDDIR%/qthelp
++	echo.
++	echo.Build finished; now you can run "qcollectiongenerator" with the ^
++.qhcp project file in %BUILDDIR%/qthelp, like this:
++	echo.^> qcollectiongenerator %BUILDDIR%\qthelp\PyWavelets.qhcp
++	echo.To view the help file:
++	echo.^> assistant -collectionFile %BUILDDIR%\qthelp\PyWavelets.ghc
++	goto end
++)
++
++if "%1" == "latex" (
++	%SPHINXBUILD% -b latex %ALLSPHINXOPTS% %BUILDDIR%/latex
++	echo.
++	echo.Build finished; the LaTeX files are in %BUILDDIR%/latex.
++	goto end
++)
++
++if "%1" == "changes" (
++	%SPHINXBUILD% -b changes %ALLSPHINXOPTS% %BUILDDIR%/changes
++	echo.
++	echo.The overview file is in %BUILDDIR%/changes.
++	goto end
++)
++
++if "%1" == "linkcheck" (
++	%SPHINXBUILD% -b linkcheck %ALLSPHINXOPTS% %BUILDDIR%/linkcheck
++	echo.
++	echo.Link check complete; look for any errors in the above output ^
++or in %BUILDDIR%/linkcheck/output.txt.
++	goto end
++)
++
++if "%1" == "doctest" (
++	%SPHINXBUILD% -b doctest %ALLSPHINXOPTS% %BUILDDIR%/doctest
++	echo.
++	echo.Testing of doctests in the sources finished, look at the ^
++results in %BUILDDIR%/doctest/output.txt.
++	goto end
++)
++
++:end
+diff --git a/docs/make.py b/docs/make.py
+new file mode 100755
+index 0000000..5e2a591
+--- /dev/null
++++ b/docs/make.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python
++"""
++Script to build documentation for pykokoro.
++
++This script builds the Sphinx documentation for the pykokoro package.
++It can be run using:
++    python docs/make.py [option]
++
++Options:
++    clean   - clean the build directory
++    html    - build HTML documentation
++    dirhtml - build HTML documentation with directory structure
++    all     - build all documentation formats
++    help    - show help message
++"""
++
++import os
++import shutil
++import subprocess
++import sys
++
++
++def main():
++    """Run the script."""
++    sphinx_build = "sphinx-build"
++
++    # Determine if we're being run from docs/ or from project root
++    script_dir = os.path.dirname(os.path.abspath(__file__))
++    if os.path.basename(script_dir) == "docs":
++        # Running from docs directory
++        build_dir = "_build"
++        source_dir = "."
++    else:
++        # Running from project root
++        build_dir = os.path.join("docs", "_build")
++        source_dir = "docs"
++
++    target = "html" if len(sys.argv) < 2 else sys.argv[1]
++
++    if target == "clean":
++        if os.path.exists(build_dir):
++            print(f"Cleaning {build_dir}...")
++            shutil.rmtree(build_dir)
++        return 0
++
++    if target == "help":
++        print(__doc__)
++        return 0
++
++    if not os.path.exists(build_dir):
++        os.makedirs(build_dir)
++
++    # Set of valid targets
++    valid_targets = {
++        "html",
++        "dirhtml",
++        "latex",
++        "latexpdf",
++        "text",
++        "man",
++        "changes",
++        "linkcheck",
++        "doctest",
++        "all",
++    }
++
++    if target not in valid_targets:
++        print(f"Unknown target: {target}")
++        print("Use 'help' target for help")
++        return 1
++
++    if target == "all":
++        # Build all formats
++        for fmt in ["html", "dirhtml", "latex"]:
++            cmd = [sphinx_build, "-b", fmt, source_dir, os.path.join(build_dir, fmt)]
++            print(f"Building {fmt} documentation...")
++            subprocess.run(cmd, check=True)
++    else:
++        # Build specific format
++        cmd = [sphinx_build, "-b", target, source_dir, os.path.join(build_dir, target)]
++        print(f"Building {target} documentation...")
++        subprocess.run(cmd, check=True)
++
++    print(f"Build finished. Documentation is in {os.path.join(build_dir, target)}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/docs/requirements.txt b/docs/requirements.txt
+new file mode 100644
+index 0000000..ecff980
+--- /dev/null
++++ b/docs/requirements.txt
+@@ -0,0 +1,5 @@
++sphinx>=7.0.0
++sphinx-rtd-theme>=2.0.0
++sphinx-autobuild>=2024.0.0
++myst-parser>=2.0.0
++pillow
+diff --git a/examples/plans/chapter.voiceplan.toml b/examples/plans/chapter.voiceplan.toml
+new file mode 100644
+index 0000000..ee4541b
+--- /dev/null
++++ b/examples/plans/chapter.voiceplan.toml
+@@ -0,0 +1,23 @@
++schema = "utterplan.voiceplan.v1"
++source_plan_id = "example-chapter-0001"
++
++[[segments]]
++id = "seg-000001"
++scope_id = "chapter-0001"
++role = "narrator"
++language = "en-US"
++text = "A quiet morning began."
++
++[[segments]]
++id = "seg-000002"
++scope_id = "chapter-0001"
++role = "guest"
++language = "en-US"
++text = "Hello and welcome."
++
++[[segments]]
++id = "seg-000003"
++scope_id = "chapter-0001"
++role = "narrator"
++language = "en-US"
++text = "And so the story continued."
+diff --git a/examples/voices/piper.toml b/examples/voices/piper.toml
+new file mode 100644
+index 0000000..f19c00a
+--- /dev/null
++++ b/examples/voices/piper.toml
+@@ -0,0 +1,10 @@
++schema = "voicerender.voice-profile.v1"
++name = "piper-narration"
++
++[roles.narrator]
++engine = "piper"
++target_id = "en_US-amy-medium"
++
++[roles.guest]
++engine = "piper"
++target_id = "en_US-lessac-medium"
+diff --git a/examples/voices/pocket-reference.toml b/examples/voices/pocket-reference.toml
+new file mode 100644
+index 0000000..9004463
+--- /dev/null
++++ b/examples/voices/pocket-reference.toml
+@@ -0,0 +1,10 @@
++schema = "voicerender.voice-profile.v1"
++name = "cloned-narrator"
++
++[roles.narrator]
++engine = "pocket"
++target_id = "REPLACE_WITH_INSTALLED_BUNDLE_ID"
++reference_audio = "../../my-reference-voice.wav"
++
++[roles.narrator.options]
++precision = "int8"
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..80ab421
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,41 @@
++[build-system]
++requires = ["setuptools>=80", "setuptools-scm>=9.2", "wheel"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "voicerender"
++dynamic = ["version"]
++description = "Resumable multi-engine speech synthesis and reference-voice rendering"
++readme = "README.md"
++requires-python = ">=3.10"
++license = "Apache-2.0"
++authors = [{name = "buchwandler"}]
++keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
++dependencies = [
++  "numpy>=1.23",
++  "soundfile>=0.12",
++  "tomli>=2; python_version < '3.11'",
++]
++
++[project.optional-dependencies]
++piper = ["pipersynth>=0.2.1,<0.3"]
++pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
++dev = ["pytest>=8", "build>=1.2", "setuptools-scm>=9.2"]
++
++[project.scripts]
++voicerender = "voicerender.cli:main"
++
++[tool.setuptools.packages.find]
++where = ["."]
++include = ["voicerender*"]
++exclude = ["tests*", "examples*"]
++
++[tool.setuptools.package-data]
++voicerender = ["py.typed"]
++
++[tool.setuptools_scm]
++fallback_version = "0.1.0"
++version_file = "voicerender/_version.py"
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
+diff --git a/tests/test_backends.py b/tests/test_backends.py
+new file mode 100644
+index 0000000..9e09053
+--- /dev/null
++++ b/tests/test_backends.py
+@@ -0,0 +1,169 @@
++"""Mocked released-package public contracts: no models or network required."""
++
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import numpy as np
++
++from voicerender.engines.piper import PiperAdapter, discover_voices as piper_voices
++from voicerender.engines.pocket import PocketAdapter, discover_voices as pocket_voices
++from voicerender.models import VoiceBinding
++
++
++def test_piper_public_api(monkeypatch):
++    events = []
++
++    class FakePiperVoice:
++        @classmethod
++        def from_pretrained(cls, *args, **kwargs):
++            events.append(("load", args, kwargs))
++            return cls()
++
++        def synthesize(self, request, *, config):
++            events.append(
++                ("synthesize", request.text, request.speaker, config.length_scale)
++            )
++            return SimpleNamespace(
++                audio=np.ones(80, dtype=np.float32) / 4, sample_rate=16000, warnings=()
++            )
++
++        def close(self):
++            events.append(("close",))
++
++    class SynthesisConfig:
++        def __init__(self, **kwargs):
++            self.length_scale = kwargs["length_scale"]
++
++    class VoiceAssetManager:
++        def __init__(self, offline):
++            pass
++
++        def list_voices(self, language):
++            return [SimpleNamespace(id="model", name="Model", language_code="en-US")]
++
++    fake = SimpleNamespace(
++        PiperVoice=FakePiperVoice,
++        SynthesisConfig=SynthesisConfig,
++        SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs),
++        VoiceLevelConfig=lambda mode: SimpleNamespace(mode=mode),
++        VoiceAssetManager=VoiceAssetManager,
++    )
++    monkeypatch.setitem(sys.modules, "pipersynth", fake)
++    adapter = PiperAdapter()
++    binding = VoiceBinding(
++        engine="piper", target_id="model", speaker=1, options={"native_speed": 2.0}
++    )
++    with adapter.open(binding) as session:
++        result = session.synthesize(request_id="1", text="hello", language="en-US")
++        assert result.sample_rate == 16000
++    assert events[1] == ("synthesize", "hello", 1, 0.5)
++    assert events[2] == ("close",)
++    assert piper_voices(language="en-US")[0]["target_id"] == "model"
++
++
++def test_pocket_reference_audio_public_api(monkeypatch, tmp_path):
++    events = []
++
++    class Runtime:
++        @classmethod
++        def from_resolved(cls, bundle, offline):
++            events.append(("runtime", bundle))
++            return cls()
++
++        def prepare_voice(self, voice_source):
++            events.append(("prepare", str(voice_source)))
++            return "prepared"
++
++        def synthesize(self, request, *, voice, config, voice_level):
++            events.append(("synthesize", request.text, voice))
++            return SimpleNamespace(
++                audio=np.ones(40, dtype=np.float32) / 4, sample_rate=24000, warnings=()
++            )
++
++        def close(self):
++            events.append(("close",))
++
++    class BundleManager:
++        def __init__(self, offline):
++            events.append(("bundle_manager", offline))
++
++        def resolve_bundle(self, name, precision):
++            return name
++
++        def list_bundles(self, language):
++            return [SimpleNamespace(id="english", predefined_voices=("alba", "alex"))]
++
++    fake = SimpleNamespace(
++        PocketRuntime=Runtime,
++        BundleAssetManager=BundleManager,
++        SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs),
++        GenerationConfig=lambda **kwargs: kwargs,
++        VoiceLevelConfig=lambda mode: SimpleNamespace(mode=mode),
++    )
++    monkeypatch.setitem(sys.modules, "pocketsynth", fake)
++    ref = tmp_path / "reference.wav"
++    ref.write_bytes(b"fixture")
++    binding = VoiceBinding(engine="pocket", target_id="english", reference_audio=ref)
++    with PocketAdapter().open(binding) as session:
++        result = session.synthesize(request_id="1", text="cloned", language="en-US")
++        assert result.sample_rate == 24000
++    assert ("prepare", str(ref)) in events
++    assert ("synthesize", "cloned", "prepared") in events
++    assert events[-1] == ("close",)
++    assert pocket_voices()[0]["voices"] == ["alba", "alex"]
++
++
++def test_cli_render_with_fake_piper_runtime(monkeypatch, tmp_path):
++    from voicerender.cli import main
++    from voicerender.storage import wav_info
++    from types import SimpleNamespace
++
++    class Voice:
++        @classmethod
++        def from_pretrained(cls, *args, **kwargs):
++            return cls()
++
++        def synthesize(self, request, *, config):
++            return SimpleNamespace(
++                audio=np.full(96, 0.1, dtype=np.float32), sample_rate=16000, warnings=()
++            )
++
++        def close(self):
++            return None
++
++    fake = SimpleNamespace(
++        PiperVoice=Voice,
++        SynthesisConfig=lambda **kwargs: kwargs,
++        SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs),
++        VoiceLevelConfig=lambda mode: mode,
++    )
++    monkeypatch.setitem(sys.modules, "pipersynth", fake)
++    plan = tmp_path / "plan.toml"
++    plan.write_text(
++        'schema = "utterplan.voiceplan.v1"\n[[segments]]\nid = "s1"\ntext = "Hello"\n'
++    )
++    profile = tmp_path / "profile.toml"
++    profile.write_text(
++        'schema = "voicerender.voice-profile.v1"\nname = "simple"\n[roles.narrator]\nengine = "piper"\ntarget_id = "en_US-amy-medium"\n'
++    )
++    out = tmp_path / "renders"
++    args = [
++        "render",
++        str(plan),
++        "--profile",
++        str(profile),
++        "--out-dir",
++        str(out),
++        "--take",
++        "1",
++        "--json",
++    ]
++    assert main(args) == 0
++    manifest = __import__("json").loads((out / "manifest.json").read_text())
++    assert manifest["complete"]
++    assert wav_info(out / manifest["segments"][0]["path"])["frames"] == 96
++    assert main(args) == 0
++    assert main(["inspect", str(out / "manifest.json")]) == 0
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+new file mode 100644
+index 0000000..859e751
+--- /dev/null
++++ b/tests/test_renderer.py
+@@ -0,0 +1,264 @@
++from __future__ import annotations
++
++import json
++import sys
++from contextlib import contextmanager
++from pathlib import Path
++
++import numpy as np
++import pytest
++import soundfile as sf
++
++from voicerender import (
++    PlanError,
++    ProfileError,
++    SpeechSegment,
++    VoiceBinding,
++    VoicePlan,
++    VoiceProfile,
++    render,
++    render_plan,
++)
++from voicerender.cli import main
++from voicerender.engines import get_engine, list_engines, register_engine
++from voicerender.engines.base import EngineCapabilities, SynthesisOutput
++from voicerender.engines import _ADAPTERS
++
++
++class FakeEngine:
++    id = "testengine"
++    package = "fake-backend"
++    capabilities = EngineCapabilities(supports_reference_audio=True)
++
++    def __init__(self):
++        self.calls = []
++        self.fail_once_for = None
++
++    def version(self):
++        return "1.0"
++
++    def validate(self, binding):
++        if binding.target_id == "bad":
++            raise ProfileError("target not available")
++
++    @contextmanager
++    def open(self, binding):
++        owner = self
++
++        class Session:
++            def synthesize(self, *, request_id, text, language):
++                owner.calls.append((request_id, text, language, binding.target_id))
++                if request_id == owner.fail_once_for:
++                    owner.fail_once_for = None
++                    raise RuntimeError("injected interruption")
++                return SynthesisOutput(
++                    audio=np.full(160, 0.1, dtype=np.float32), sample_rate=16000
++                )
++
++        yield Session()
++
++
++@pytest.fixture
++def mock_engine(monkeypatch):
++    adapter = FakeEngine()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    return adapter
++
++
++def segments():
++    return [
++        SpeechSegment(id="s1", scope_id="chapter", role="narrator", text="First."),
++        SpeechSegment(id="s2", scope_id="chapter", role="guest", text="Second."),
++        SpeechSegment(id="s3", scope_id="chapter", role="narrator", text="Third."),
++    ]
++
++
++def profile(*, narrator="narrator-model", guest="guest-model", name="cast"):
++    return VoiceProfile(
++        name=name,
++        roles={
++            "narrator": VoiceBinding(engine="testengine", target_id=narrator),
++            "guest": VoiceBinding(engine="testengine", target_id=guest),
++        },
++    )
++
++
++def read_manifest(directory):
++    return json.loads((directory / "manifest.json").read_text())
++
++
++def test_render_reuse_and_cross_profile_cache(tmp_path, mock_engine):
++    out = tmp_path / "voice1"
++    result = render(segments(), profile=profile(), output_dir=out, take=2)
++    assert (result.rendered_count, result.reused_count, result.selected_count) == (
++        2,
++        0,
++        2,
++    )
++    manifest = read_manifest(out)
++    assert manifest["complete"] and len(manifest["segments"]) == 2
++    assert manifest["source_plan_id"] is None
++    for item in manifest["segments"]:
++        assert item["wav"]["frames"] == 160
++        assert item["wav"]["sample_rate"] == 16000
++        with sf.SoundFile(out / item["path"]) as file:
++            assert file.frames == 160
++    second = render(segments(), profile=profile(), output_dir=out, take=2)
++    assert (second.rendered_count, second.reused_count) == (0, 2)
++    other = render(
++        segments(),
++        profile=profile(name="different-label"),
++        output_dir=tmp_path / "voice2",
++        take=2,
++    )
++    assert (other.rendered_count, other.reused_count) == (0, 2)
++    assert len(mock_engine.calls) == 2
++
++
++def test_only_changed_role_rerenders(tmp_path, mock_engine):
++    out = tmp_path / "voice1"
++    render(segments(), profile=profile(), output_dir=out)
++    changed = render(
++        segments(), profile=profile(guest="different-guest"), output_dir=out
++    )
++    assert (changed.rendered_count, changed.reused_count) == (1, 2)
++    assert len(mock_engine.calls) == 4
++
++
++def test_interruption_is_resumable(tmp_path, mock_engine):
++    out = tmp_path / "render"
++    mock_engine.fail_once_for = "s2"
++    with pytest.raises(RuntimeError, match="injected interruption"):
++        render(segments(), profile=profile(), output_dir=out)
++    interrupted = read_manifest(out)
++    assert [item["status"] for item in interrupted["segments"]] == [
++        "rendered",
++        "failed",
++        "pending",
++    ]
++    assert not interrupted["complete"]
++    resumed = render(segments(), profile=profile(), output_dir=out)
++    assert (resumed.rendered_count, resumed.reused_count) == (2, 1)
++    assert read_manifest(out)["complete"]
++    assert len(mock_engine.calls) == 4
++    assert not (out / ".voicerender.lock").exists()
++
++
++def test_corrupt_cache_is_not_reused(tmp_path, mock_engine):
++    a = tmp_path / "a"
++    first = render(segments(), profile=profile(), output_dir=a, take=1)
++    cache = tmp_path / ".voicerender-cache"
++    key = read_manifest(a)["segments"][0]["synthesis_key"]
++    (cache / f"{key}.wav").write_bytes(b"bad")
++    second = render(segments(), profile=profile(), output_dir=tmp_path / "b", take=1)
++    assert second.rendered_count == 1 and second.reused_count == 0
++
++
++def test_force_disables_cache(tmp_path, mock_engine):
++    out = tmp_path / "o"
++    render(segments(), profile=profile(), output_dir=out, take=1)
++    result = render(segments(), profile=profile(), output_dir=out, take=1, force=True)
++    assert result.rendered_count == 1 and result.reused_count == 0
++
++
++def test_reference_audio_affects_key_not_path(tmp_path, mock_engine):
++    reference1 = tmp_path / "ref1.wav"
++    reference2 = tmp_path / "ref2.wav"
++    reference1.write_bytes(b"speaker A")
++    reference2.write_bytes(b"speaker A")
++
++    def make(reference):
++        return VoiceProfile(
++            name="clone",
++            roles={
++                "narrator": VoiceBinding(
++                    engine="testengine",
++                    target_id="clone-model",
++                    reference_audio=reference,
++                )
++            },
++        )
++
++    speech = [segments()[0]]
++    first = render(speech, profile=make(reference1), output_dir=tmp_path / "a")
++    second = render(speech, profile=make(reference2), output_dir=tmp_path / "b")
++    assert first.rendered_count == 1 and second.reused_count == 1
++    reference2.write_bytes(b"speaker B")
++    third = render(speech, profile=make(reference2), output_dir=tmp_path / "c")
++    assert third.rendered_count == 1
++    assert len(mock_engine.calls) == 2
++
++
++def test_selection_validation(tmp_path, mock_engine):
++    with pytest.raises(PlanError, match="Use take or select"):
++        render(
++            segments(),
++            profile=profile(),
++            output_dir=tmp_path / "x",
++            take=2,
++            select=["s2"],
++        )
++    result = render(
++        segments(), profile=profile(), output_dir=tmp_path / "y", select=["chapter:s3"]
++    )
++    assert result.selected_count == 1 and mock_engine.calls[-1][0] == "s3"
++    with pytest.raises(PlanError, match="Ambiguous"):
++        render(
++            [segments()[0], SpeechSegment(id="s1", scope_id="other", text="X.")],
++            profile=profile(),
++            output_dir=tmp_path / "z",
++            select=["s1"],
++        )
++
++
++def test_profile_validation_and_load(tmp_path):
++    path = tmp_path / "p.toml"
++    path.write_text(
++        'schema = "voicerender.voice-profile.v1"\nname = "p"\n[roles.narrator]\nengine = "piper"\ntarget_id = "amy"\n'
++    )
++    loaded = VoiceProfile.load(path)
++    assert loaded.roles["narrator"].target_id == "amy"
++    assert main(["profiles", "validate", str(path)]) == 0
++    path.write_text(
++        'schema = "voicerender.voice-profile.v1"\nname = "p"\n[roles.narrator]\nengine = "piper"\ntarget_id = "amy"\nreference_audio = "reference.wav"\n'
++    )
++    with pytest.raises(ProfileError, match="does not support"):
++        VoiceProfile.load(path)
++
++
++def test_plan_load_and_cli_inspect(tmp_path, mock_engine):
++    plan_path = tmp_path / "chapter.toml"
++    plan_path.write_text(
++        'schema = "utterplan.voiceplan.v1"\nsource_plan_id = "plan123"\n[[segments]]\nid = "1"\nscope_id = "c"\nrole = "narrator"\ntext = "Hello"\n'
++    )
++    plan = VoicePlan.load(plan_path)
++    out = tmp_path / "o"
++    render_plan(plan, profile=profile(), output_dir=out)
++    assert read_manifest(out)["source_plan_id"] == "plan123"
++    assert main(["inspect", str(out / "manifest.json"), "--json"]) == 0
++    text = plan_path.read_text() + 'engine_options = "unsupported"\n'
++    plan_path.write_text(text)
++    with pytest.raises(PlanError, match="Unsupported speech metadata"):
++        VoicePlan.load(plan_path)
++
++
++def test_bad_output_path_segment_id_never_escapes(tmp_path, mock_engine):
++    malicious = SpeechSegment(id="../../../escape", text="Safe", role="narrator")
++    out = tmp_path / "out"
++    render([malicious], profile=profile(), output_dir=out)
++    item = read_manifest(out)["segments"][0]
++    assert ".." not in Path(item["path"]).parts
++    assert (out / item["path"]).is_file()
++
++
++def test_missing_role_rejected_before_manifest(tmp_path, mock_engine):
++    out = tmp_path / "o"
++    with pytest.raises(ProfileError, match="No voice binding"):
++        render(
++            segments(),
++            profile=VoiceProfile(
++                name="single", roles={"narrator": profile().roles["narrator"]}
++            ),
++            output_dir=out,
++        )
++    assert not (out / "manifest.json").exists()
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+new file mode 100644
+index 0000000..ea94349
+--- /dev/null
++++ b/voicerender/__init__.py
+@@ -0,0 +1,34 @@
++"""VoiceRender: standalone, resumable speech synthesis to reusable WAV segments."""
++
++from importlib.metadata import PackageNotFoundError, version
++
++from .errors import (
++    ArtifactError,
++    EngineError,
++    PlanError,
++    ProfileError,
++    VoiceRenderError,
++)
++from .models import RenderResult, SpeechSegment, VoiceBinding, VoicePlan, VoiceProfile
++from .render import render, render_plan
++
++try:
++    __version__ = version("voicerender")
++except PackageNotFoundError:
++    __version__ = "0+unknown"
++
++__all__ = [
++    "__version__",
++    "render",
++    "render_plan",
++    "SpeechSegment",
++    "VoiceBinding",
++    "VoicePlan",
++    "VoiceProfile",
++    "RenderResult",
++    "VoiceRenderError",
++    "PlanError",
++    "ProfileError",
++    "EngineError",
++    "ArtifactError",
++]
+diff --git a/voicerender/__main__.py b/voicerender/__main__.py
+new file mode 100644
+index 0000000..eb53e2f
+--- /dev/null
++++ b/voicerender/__main__.py
+@@ -0,0 +1,3 @@
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+new file mode 100644
+index 0000000..c9b7259
+--- /dev/null
++++ b/voicerender/cli.py
+@@ -0,0 +1,185 @@
++"""Command-line interface for independent VoiceRender usage."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++
++from . import __version__
++from .engines import get_engine, list_engines
++from .errors import VoiceRenderError
++from .models import SCHEMA_MANIFEST, VoicePlan, VoiceProfile
++from .render import render_plan
++from .storage import verified_wav
++
++
++def _parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="voicerender", description="Render voice plans to resumable WAV bundles"
++    )
++    parser.add_argument(
++        "--version", action="version", version=f"voicerender {__version__}"
++    )
++    commands = parser.add_subparsers(dest="command", required=True)
++    render = commands.add_parser(
++        "render", help="Synthesize selected logical speech segments"
++    )
++    render.add_argument("plan", type=Path)
++    render.add_argument(
++        "--profile", "--voices", dest="profile", required=True, type=Path
++    )
++    render.add_argument("--out-dir", required=True, type=Path)
++    render.add_argument("--cache-dir", type=Path)
++    select = render.add_mutually_exclusive_group()
++    select.add_argument("--take", type=int)
++    select.add_argument(
++        "--select", metavar="ID[,ID...]", help="Speech IDs, optionally scope:ID"
++    )
++    render.add_argument(
++        "--force", action="store_true", help="Regenerate selected audio, bypass cache"
++    )
++    render.add_argument("--continue-on-error", action="store_true")
++    render.add_argument("--json", action="store_true")
++    engines = commands.add_parser("engines", help="Inspect installed synthesis engines")
++    engines.add_argument("action", choices=["list"])
++    engines.add_argument("--json", action="store_true")
++    voices = commands.add_parser(
++        "voices", help="Discover backend voice and model choices"
++    )
++    voices.add_argument("action", choices=["list"])
++    voices.add_argument("--engine", required=True, choices=["piper", "pocket"])
++    voices.add_argument("--lang")
++    voices.add_argument("--offline", action="store_true")
++    voices.add_argument("--json", action="store_true")
++    profiles = commands.add_parser("profiles", help="Validate a voice profile")
++    profiles.add_argument("action", choices=["validate"])
++    profiles.add_argument("path", type=Path)
++    profiles.add_argument("--json", action="store_true")
++    inspect = commands.add_parser(
++        "inspect", help="Inspect a persisted manifest and verify WAVs"
++    )
++    inspect.add_argument("manifest", type=Path)
++    inspect.add_argument("--json", action="store_true")
++    return parser
++
++
++def main(argv: list[str] | None = None) -> int:
++    args = _parser().parse_args(argv)
++    try:
++        if args.command == "render":
++            selected = args.select.split(",") if args.select is not None else None
++            result = render_plan(
++                args.plan,
++                profile=args.profile,
++                output_dir=args.out_dir,
++                cache_dir=args.cache_dir,
++                take=args.take,
++                select=selected,
++                force=args.force,
++                fail_fast=not args.continue_on_error,
++            )
++            payload = result.as_dict()
++            if args.json:
++                print(json.dumps(payload, indent=2))
++            else:
++                print(
++                    f"Rendered {payload['rendered']}, reused {payload['reused']}, "
++                    f"failed {payload['failed']} of {payload['selected']} → {result.manifest_path}"
++                )
++            return 1 if result.failed_count else 0
++        if args.command == "engines":
++            engines = list_engines()
++            if args.json:
++                print(json.dumps(engines, indent=2))
++            else:
++                for engine in engines:
++                    print(
++                        f"{engine['id']}: {engine['installed_version'] or 'not installed'} "
++                        f"(reference audio: {'yes' if engine['reference_audio'] else 'no'})"
++                    )
++            return 0
++        if args.command == "voices":
++            if args.engine == "piper":
++                from .engines.piper import discover_voices
++            else:
++                from .engines.pocket import discover_voices
++            found = discover_voices(language=args.lang, offline=args.offline)
++            if args.json:
++                print(json.dumps(found, indent=2))
++            else:
++                for item in found:
++                    names = ", ".join(item.get("voices", ()))
++                    print(
++                        f"{item['engine']}:{item['target_id']}"
++                        + (f" ({names})" if names else "")
++                    )
++            return 0
++        if args.command == "profiles":
++            profile = VoiceProfile.load(args.path)
++            for binding in profile.roles.values():
++                get_engine(binding.engine).validate(binding)
++            payload = {
++                "valid": True,
++                "name": profile.name,
++                "roles": list(profile.roles),
++            }
++            print(
++                json.dumps(payload, indent=2)
++                if args.json
++                else f"Valid profile {profile.name}: {len(profile.roles)} roles"
++            )
++            return 0
++        if args.command == "inspect":
++            manifest_path = args.manifest.resolve()
++            document = json.loads(manifest_path.read_text(encoding="utf-8"))
++            if document.get("schema") != SCHEMA_MANIFEST:
++                raise VoiceRenderError(
++                    f"Unsupported manifest schema: {document.get('schema')}"
++                )
++            findings = []
++            for entry in document.get("segments", []):
++                wav = entry.get("wav")
++                stored = Path(entry["path"])
++                if stored.is_absolute() or ".." in stored.parts:
++                    valid = False
++                else:
++                    valid = bool(
++                        isinstance(wav, dict)
++                        and verified_wav(manifest_path.parent / stored, wav)
++                    )
++                findings.append(
++                    {
++                        "scope_id": entry["scope_id"],
++                        "segment_id": entry["segment_id"],
++                        "status": entry["status"],
++                        "wav_valid": valid,
++                    }
++                )
++            payload = {
++                "schema": SCHEMA_MANIFEST,
++                "complete": document.get("complete"),
++                "valid_wavs": sum(item["wav_valid"] for item in findings),
++                "selected": len(findings),
++                "segments": findings,
++            }
++            if args.json:
++                print(json.dumps(payload, indent=2))
++            else:
++                print(
++                    f"{payload['valid_wavs']}/{payload['selected']} WAVs verified; complete: {payload['complete']}"
++                )
++            return (
++                0
++                if payload["complete"] and payload["valid_wavs"] == payload["selected"]
++                else 1
++            )
++    except (VoiceRenderError, OSError, ValueError, KeyError) as exc:
++        print(f"voicerender: {exc}", file=sys.stderr)
++        return 2
++    return 2
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/voicerender/engines/__init__.py b/voicerender/engines/__init__.py
+new file mode 100644
+index 0000000..7916c61
+--- /dev/null
++++ b/voicerender/engines/__init__.py
+@@ -0,0 +1,48 @@
++"""Registry of engine adapters; runtime packages are imported lazily."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++from ..errors import ProfileError
++from .piper import PiperAdapter
++from .pocket import PocketAdapter
++
++if TYPE_CHECKING:
++    from .base import EngineAdapter
++
++_ADAPTERS: dict[str, EngineAdapter] = {
++    "piper": PiperAdapter(),
++    "pocket": PocketAdapter(),
++}
++
++
++def register_engine(adapter: EngineAdapter) -> None:
++    """Allow third-party backends without importing Readio."""
++    if not adapter.id or adapter.id in _ADAPTERS:
++        raise ProfileError(f"Invalid or already registered engine: {adapter.id!r}")
++    _ADAPTERS[adapter.id] = adapter
++
++
++def get_engine(name: str) -> EngineAdapter:
++    try:
++        return _ADAPTERS[name]
++    except KeyError as exc:
++        raise ProfileError(
++            f"Unknown engine {name!r}; available: {', '.join(sorted(_ADAPTERS))}"
++        ) from exc
++
++
++def list_engines() -> list[dict[str, object]]:
++    return [
++        {
++            "id": name,
++            "package": engine.package,
++            "installed_version": engine.version(),
++            "reference_audio": engine.capabilities.supports_reference_audio,
++        }
++        for name, engine in sorted(_ADAPTERS.items())
++    ]
++
++
++__all__ = ["get_engine", "list_engines", "register_engine"]
+diff --git a/voicerender/engines/base.py b/voicerender/engines/base.py
+new file mode 100644
+index 0000000..bffe5a4
+--- /dev/null
++++ b/voicerender/engines/base.py
+@@ -0,0 +1,43 @@
++"""Minimal extension point for engine adapters."""
++
++from __future__ import annotations
++
++from contextlib import AbstractContextManager
++from dataclasses import dataclass, field
++from typing import Any, Protocol
++from collections.abc import Mapping
++
++from ..models import VoiceBinding
++
++
++@dataclass(frozen=True)
++class EngineCapabilities:
++    supports_builtin_voices: bool = True
++    supports_reference_audio: bool = False
++    supports_speaker_selection: bool = False
++    supports_word_timings: bool = False
++    options: frozenset[str] = field(default_factory=frozenset)
++
++
++@dataclass(frozen=True)
++class SynthesisOutput:
++    audio: Any
++    sample_rate: int
++    word_timings: tuple[Mapping[str, Any], ...] = ()
++    metadata: Mapping[str, Any] = field(default_factory=dict)
++
++
++class EngineSession(Protocol):
++    def synthesize(
++        self, *, request_id: str, text: str, language: str
++    ) -> SynthesisOutput: ...
++
++
++class EngineAdapter(Protocol):
++    id: str
++    package: str
++    capabilities: EngineCapabilities
++
++    def version(self) -> str | None: ...
++    def validate(self, binding: VoiceBinding) -> None: ...
++    def open(self, binding: VoiceBinding) -> AbstractContextManager[EngineSession]: ...
+diff --git a/voicerender/engines/piper.py b/voicerender/engines/piper.py
+new file mode 100644
+index 0000000..6033cf1
+--- /dev/null
++++ b/voicerender/engines/piper.py
+@@ -0,0 +1,158 @@
++"""PiperSynth 0.2.x backend. Mirrors its public request-centric contract."""
++
++from __future__ import annotations
++
++import math
++from contextlib import contextmanager
++from importlib.metadata import PackageNotFoundError, version
++from collections.abc import Iterator
++
++from ..errors import EngineError, ProfileError
++from ..models import VoiceBinding
++from .base import EngineCapabilities, SynthesisOutput
++
++_ALLOWED = frozenset(
++    {
++        "native_speed",
++        "length_scale",
++        "noise_scale",
++        "noise_w_scale",
++        "normalize_audio",
++        "output_gain",
++        "voice_level",
++        "offline",
++    }
++)
++
++
++class PiperAdapter:
++    id = "piper"
++    package = "pipersynth"
++    capabilities = EngineCapabilities(supports_speaker_selection=True, options=_ALLOWED)
++
++    def version(self) -> str | None:
++        try:
++            return version(self.package)
++        except PackageNotFoundError:
++            return None
++
++    def validate(self, binding: VoiceBinding) -> None:
++        if binding.reference_audio:
++            raise ProfileError("PiperSynth cannot clone a voice from reference audio")
++        unknown = set(binding.options) - _ALLOWED
++        if unknown:
++            raise ProfileError(f"Unsupported Piper options: {sorted(unknown)}")
++        if binding.options.get("native_speed") is not None:
++            speed = binding.options["native_speed"]
++            if (
++                isinstance(speed, bool)
++                or not isinstance(speed, (float, int))
++                or not math.isfinite(speed)
++                or speed <= 0
++            ):
++                raise ProfileError("native_speed must be finite and > 0")
++            if "length_scale" in binding.options:
++                raise ProfileError("Use native_speed or length_scale, not both")
++        if binding.voice and binding.voice != binding.target_id:
++            raise ProfileError(
++                "Piper voice must match the target_id; use speaker for a multi-speaker target"
++            )
++
++    @staticmethod
++    def _request_language(requested: str, voice: object) -> str:
++        # Piper's eSpeak frontend may declare a more specific active locale
++        # than a canonical voiceplan language such as "en-US".
++        config = getattr(voice, "config", None)
++        active = getattr(config, "espeak_voice", None)
++        phoneme_type = getattr(config, "phoneme_type", None)
++        if getattr(phoneme_type, "value", phoneme_type) != "espeak" or not active:
++            return requested
++        a = str(active).lower().replace("_", "-")
++        r = requested.lower().replace("_", "-")
++        if r == a or r == a.split("-")[0] or (a.startswith(r + "-")):
++            return str(active)
++        return requested
++
++    @contextmanager
++    def open(self, binding: VoiceBinding) -> Iterator[object]:
++        self.validate(binding)
++        try:
++            import pipersynth
++        except ImportError as exc:
++            raise EngineError(
++                'PiperSynth is not installed; run pip install "voicerender[piper]"'
++            ) from exc
++        opts = binding.options
++        try:
++            voice = pipersynth.PiperVoice.from_pretrained(
++                binding.target_id, offline=bool(opts.get("offline", False))
++            )
++            length_scale = opts.get("length_scale")
++            if "native_speed" in opts:
++                length_scale = 1.0 / float(opts["native_speed"])
++            config = pipersynth.SynthesisConfig(
++                length_scale=length_scale,
++                noise_scale=opts.get("noise_scale"),
++                noise_w_scale=opts.get("noise_w_scale"),
++                normalize_audio=opts.get("normalize_audio", True),
++                output_gain=opts.get("output_gain", 1.0),
++                voice_level=pipersynth.VoiceLevelConfig(
++                    mode=opts.get("voice_level", "off")
++                ),
++            )
++        except Exception as exc:
++            raise EngineError(
++                f"Cannot initialize Piper target {binding.target_id!r}: {exc}"
++            ) from exc
++
++        class Session:
++            def synthesize(
++                self, *, request_id: str, text: str, language: str
++            ) -> SynthesisOutput:
++                try:
++                    native = pipersynth.SynthesisRequest(
++                        id=request_id,
++                        text=text,
++                        language=PiperAdapter._request_language(language, voice),
++                        speaker=binding.speaker,
++                    )
++                    result = voice.synthesize(native, config=config)
++                except Exception as exc:
++                    raise EngineError(f"Piper synthesis failed: {exc}") from exc
++                return SynthesisOutput(
++                    result.audio,
++                    result.sample_rate,
++                    metadata={"warnings": list(getattr(result, "warnings", ()) or ())},
++                )
++
++        try:
++            yield Session()
++        finally:
++            voice.close()
++
++
++def discover_voices(
++    *, language: str | None = None, offline: bool = False
++) -> list[dict[str, object]]:
++    """List published Piper bundle IDs without synthesizing audio."""
++    try:
++        import pipersynth
++    except ImportError as exc:
++        raise EngineError(
++            'Install optional runtime: pip install "voicerender[piper]"'
++        ) from exc
++    try:
++        entries = pipersynth.VoiceAssetManager(offline=offline).list_voices(
++            language=language
++        )
++        return [
++            {
++                "engine": "piper",
++                "target_id": item.id,
++                "name": getattr(item, "name", item.id),
++                "language": getattr(item, "language_code", None),
++            }
++            for item in entries
++        ]
++    except Exception as exc:
++        raise EngineError(f"Piper voice discovery failed: {exc}") from exc
+diff --git a/voicerender/engines/pocket.py b/voicerender/engines/pocket.py
+new file mode 100644
+index 0000000..53270ee
+--- /dev/null
++++ b/voicerender/engines/pocket.py
+@@ -0,0 +1,154 @@
++"""PocketSynth 0.2.x named-voice and local reference-audio backend."""
++
++from __future__ import annotations
++
++from contextlib import contextmanager
++from importlib.metadata import PackageNotFoundError, version
++from collections.abc import Iterator
++
++from ..errors import EngineError, ProfileError
++from ..models import VoiceBinding
++from .base import EngineCapabilities, SynthesisOutput
++
++_ALLOWED = frozenset(
++    {
++        "precision",
++        "temperature",
++        "lsd_steps",
++        "max_frames",
++        "frames_after_eos",
++        "voice_level",
++        "offline",
++    }
++)
++
++
++class PocketAdapter:
++    id = "pocket"
++    package = "pocketsynth"
++    capabilities = EngineCapabilities(supports_reference_audio=True, options=_ALLOWED)
++
++    def version(self) -> str | None:
++        try:
++            return version(self.package)
++        except PackageNotFoundError:
++            return None
++
++    def validate(self, binding: VoiceBinding) -> None:
++        unknown = set(binding.options) - _ALLOWED
++        if unknown:
++            raise ProfileError(f"Unsupported Pocket options: {sorted(unknown)}")
++        if not binding.reference_audio and not binding.voice:
++            raise ProfileError("Pocket requires a named voice or reference_audio")
++        if binding.speaker is not None:
++            raise ProfileError("Pocket does not support speaker selection")
++        if binding.reference_audio and not binding.reference_audio.is_file():
++            raise ProfileError(f"Reference audio missing: {binding.reference_audio}")
++        if "native_speed" in binding.options:
++            raise ProfileError("PocketSynth has no supported native speed control")
++
++    @contextmanager
++    def open(self, binding: VoiceBinding) -> Iterator[object]:
++        self.validate(binding)
++        try:
++            import pocketsynth
++        except ImportError as exc:
++            raise EngineError(
++                'PocketSynth is not installed; run pip install "voicerender[pocket]"'
++            ) from exc
++        opts = binding.options
++        try:
++            manager = pocketsynth.BundleAssetManager(
++                offline=bool(opts.get("offline", False))
++            )
++            bundle = manager.resolve_bundle(
++                binding.target_id, precision=opts.get("precision", "int8")
++            )
++            runtime = pocketsynth.PocketRuntime.from_resolved(
++                bundle, offline=bool(opts.get("offline", False))
++            )
++            generation_args = {
++                key: opts[key]
++                for key in (
++                    "temperature",
++                    "lsd_steps",
++                    "max_frames",
++                    "frames_after_eos",
++                )
++                if key in opts
++            }
++            generation = pocketsynth.GenerationConfig(**generation_args)
++            voice_level = pocketsynth.VoiceLevelConfig(
++                mode=opts.get("voice_level", "off")
++            )
++            voice = runtime.prepare_voice(binding.reference_audio or binding.voice)
++        except Exception as exc:
++            if "runtime" in locals():
++                runtime.close()
++            raise EngineError(
++                f"Cannot initialize Pocket target {binding.target_id!r}: {exc}"
++            ) from exc
++
++        class Session:
++            def synthesize(
++                self, *, request_id: str, text: str, language: str
++            ) -> SynthesisOutput:
++                try:
++                    request = pocketsynth.SynthesisRequest(
++                        id=request_id, text=text, language=language
++                    )
++                    result = runtime.synthesize(
++                        request, voice=voice, config=generation, voice_level=voice_level
++                    )
++                except Exception as exc:
++                    raise EngineError(f"Pocket synthesis failed: {exc}") from exc
++                return SynthesisOutput(
++                    result.audio,
++                    result.sample_rate,
++                    metadata={"warnings": list(getattr(result, "warnings", ()) or ())},
++                )
++
++        try:
++            yield Session()
++        finally:
++            runtime.close()
++
++
++def discover_voices(
++    *, language: str | None = None, offline: bool = False
++) -> list[dict[str, object]]:
++    """List Pocket bundle IDs and named voice choices without loading a model."""
++    try:
++        import pocketsynth
++    except ImportError as exc:
++        raise EngineError(
++            'Install optional runtime: pip install "voicerender[pocket]"'
++        ) from exc
++    try:
++        manager = pocketsynth.BundleAssetManager(offline=offline)
++        bundles = manager.list_bundles(language=language)
++        output = []
++        for bundle in bundles:
++            bundle_id = getattr(bundle, "id", None) or getattr(
++                bundle, "bundle_id", None
++            )
++            if not bundle_id:
++                continue
++            names = getattr(bundle, "predefined_voices", None)
++            if names is None:
++                meta = getattr(bundle, "metadata", {}) or {}
++                names = (
++                    meta.get("predefined_voice_names", ())
++                    if isinstance(meta, dict)
++                    else ()
++                )
++            output.append(
++                {
++                    "engine": "pocket",
++                    "target_id": bundle_id,
++                    "voices": list(names or ()),
++                }
++            )
++        return output
++    except Exception as exc:
++        raise EngineError(f"Pocket voice discovery failed: {exc}") from exc
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+new file mode 100644
+index 0000000..5b81960
+--- /dev/null
++++ b/voicerender/errors.py
+@@ -0,0 +1,21 @@
++"""Stable public exception types."""
++
++
++class VoiceRenderError(Exception):
++    """Base error for VoiceRender."""
++
++
++class PlanError(VoiceRenderError, ValueError):
++    """Invalid speech plan or selection."""
++
++
++class ProfileError(VoiceRenderError, ValueError):
++    """Invalid voice profile or unsupported selection."""
++
++
++class EngineError(VoiceRenderError, RuntimeError):
++    """Engine installation, initialization or synthesis failure."""
++
++
++class ArtifactError(VoiceRenderError, RuntimeError):
++    """Corrupt or invalid WAV or cache artifact."""
+diff --git a/voicerender/models.py b/voicerender/models.py
+new file mode 100644
+index 0000000..6071af3
+--- /dev/null
++++ b/voicerender/models.py
+@@ -0,0 +1,233 @@
++"""Engine-neutral request, profile and result contracts."""
++
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any
++from collections.abc import Mapping
++
++from .errors import PlanError, ProfileError
++
++try:
++    import tomllib
++except ImportError:  # pragma: no cover - Python 3.10
++    import tomli as tomllib
++
++SCHEMA_PLAN = "utterplan.voiceplan.v1"
++SCHEMA_PROFILE = "voicerender.voice-profile.v1"
++SCHEMA_MANIFEST = "voicerender.render-manifest.v1"
++
++
++def _mapping(value: Any, what: str, error: type[ValueError]) -> Mapping[str, Any]:
++    if not isinstance(value, dict):
++        raise error(f"{what} must be a table/object")
++    return value
++
++
++def _nonempty(value: Any, what: str, error: type[ValueError]) -> str:
++    if not isinstance(value, str) or not value.strip():
++        raise error(f"{what} must be a non-empty string")
++    return value
++
++
++def _options(value: Any, what: str) -> dict[str, Any]:
++    opts = dict(_mapping(value, what, ProfileError))
++    try:
++        json.dumps(opts, allow_nan=False)
++    except (TypeError, ValueError) as exc:
++        raise ProfileError(
++            f"{what} must contain finite, JSON-compatible values"
++        ) from exc
++    return opts
++
++
++@dataclass(frozen=True, slots=True)
++class SpeechSegment:
++    id: str
++    text: str
++    language: str = "en-US"
++    role: str = "narrator"
++    scope_id: str = "default"
++
++    def __post_init__(self) -> None:
++        for key in ("id", "role", "scope_id", "language"):
++            _nonempty(getattr(self, key), f"segment.{key}", PlanError)
++        _nonempty(self.text, "segment.text", PlanError)
++
++    def as_dict(self) -> dict[str, str]:
++        return {
++            k: getattr(self, k) for k in ("id", "scope_id", "role", "language", "text")
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class VoiceBinding:
++    engine: str
++    target_id: str
++    voice: str | None = None
++    speaker: str | int | None = None
++    reference_audio: Path | None = None
++    options: Mapping[str, Any] = field(default_factory=dict)
++    model_revision: str | None = None
++
++    @classmethod
++    def from_mapping(cls, data: Mapping[str, Any], *, base_dir: Path) -> VoiceBinding:
++        engine = _nonempty(data.get("engine"), "role.engine", ProfileError)
++        target = _nonempty(data.get("target_id"), "role.target_id", ProfileError)
++        voice = data.get("voice")
++        reference = data.get("reference_audio")
++        if voice is not None:
++            _nonempty(voice, "role.voice", ProfileError)
++        if reference is not None:
++            _nonempty(reference, "role.reference_audio", ProfileError)
++            reference = (base_dir / Path(reference).expanduser()).resolve()
++        if reference is not None and voice is not None:
++            raise ProfileError("Choose either voice or reference_audio for a role")
++        if reference is not None and engine != "pocket":
++            raise ProfileError(
++                f"Engine {engine!r} does not support reference_audio in this MVP"
++            )
++        speaker = data.get("speaker")
++        if speaker is not None and (
++            isinstance(speaker, bool) or not isinstance(speaker, (str, int))
++        ):
++            raise ProfileError("speaker must be a name or integer")
++        revision = data.get("model_revision")
++        if revision is not None:
++            _nonempty(revision, "role.model_revision", ProfileError)
++        known = {
++            "engine",
++            "target_id",
++            "voice",
++            "speaker",
++            "reference_audio",
++            "options",
++            "model_revision",
++        }
++        extra = set(data).difference(known)
++        if extra:
++            raise ProfileError(f"Unknown role fields: {', '.join(sorted(extra))}")
++        return cls(
++            engine=engine,
++            target_id=target,
++            voice=voice,
++            speaker=speaker,
++            reference_audio=reference,
++            options=_options(data.get("options", {}), "role.options"),
++            model_revision=revision,
++        )
++
++
++@dataclass(frozen=True, slots=True)
++class VoiceProfile:
++    name: str
++    roles: Mapping[str, VoiceBinding]
++    schema: str = SCHEMA_PROFILE
++
++    @classmethod
++    def load(cls, path: str | Path) -> VoiceProfile:
++        location = Path(path).expanduser().resolve()
++        try:
++            with location.open("rb") as stream:
++                data = tomllib.load(stream)
++        except (OSError, tomllib.TOMLDecodeError) as exc:
++            raise ProfileError(f"Cannot read voice profile {location}: {exc}") from exc
++        if data.get("schema") != SCHEMA_PROFILE:
++            raise ProfileError(f"Expected profile schema {SCHEMA_PROFILE!r}")
++        name = _nonempty(data.get("name"), "profile.name", ProfileError)
++        roles = _mapping(data.get("roles"), "profile.roles", ProfileError)
++        if not roles:
++            raise ProfileError("At least one role binding is required")
++        unknown = set(data).difference({"schema", "name", "roles"})
++        if unknown:
++            raise ProfileError(
++                f"Unknown top-level profile fields: {', '.join(sorted(unknown))}"
++            )
++        return cls(
++            name=name,
++            roles={
++                _nonempty(role, "role name", ProfileError): VoiceBinding.from_mapping(
++                    _mapping(raw, f"roles.{role}", ProfileError),
++                    base_dir=location.parent,
++                )
++                for role, raw in roles.items()
++            },
++        )
++
++
++@dataclass(frozen=True, slots=True)
++class VoicePlan:
++    segments: tuple[SpeechSegment, ...]
++    source_plan_id: str | None = None
++    source_plan: str | None = None
++    schema: str = SCHEMA_PLAN
++
++    @classmethod
++    def load(cls, path: str | Path) -> VoicePlan:
++        location = Path(path)
++        try:
++            with location.open("rb") as stream:
++                data = tomllib.load(stream)
++        except (OSError, tomllib.TOMLDecodeError) as exc:
++            raise PlanError(f"Cannot read voiceplan {location}: {exc}") from exc
++        if data.get("schema") != SCHEMA_PLAN:
++            raise PlanError(f"Expected voiceplan schema {SCHEMA_PLAN!r}")
++        unknown_root = set(data).difference(
++            {"schema", "source_plan_id", "source_plan", "segments"}
++        )
++        if unknown_root:
++            raise PlanError(f"Unknown voiceplan fields: {sorted(unknown_root)}")
++        for key in ("source_plan_id", "source_plan"):
++            if data.get(key) is not None:
++                _nonempty(data[key], key, PlanError)
++        raw_segments = data.get("segments")
++        if not isinstance(raw_segments, list) or not raw_segments:
++            raise PlanError("voiceplan must include one or more [[segments]]")
++        segments: list[SpeechSegment] = []
++        seen: set[tuple[str, str]] = set()
++        for index, item in enumerate(raw_segments):
++            item = _mapping(item, f"segments[{index}]", PlanError)
++            unknown = set(item).difference(
++                {"id", "scope_id", "text", "language", "role"}
++            )
++            if unknown:
++                raise PlanError(
++                    f"Unsupported speech metadata in segment {index}: {sorted(unknown)}; do not drop semantics"
++                )
++            segment = SpeechSegment(
++                id=item.get("id"),
++                scope_id=item.get("scope_id", "default"),
++                text=item.get("text"),
++                role=item.get("role", "narrator"),
++                language=item.get("language", "en-US"),
++            )
++            identity = (segment.scope_id, segment.id)
++            if identity in seen:
++                raise PlanError(f"Duplicate logical speech segment {identity}")
++            seen.add(identity)
++            segments.append(segment)
++        return cls(
++            segments=tuple(segments),
++            source_plan_id=data.get("source_plan_id"),
++            source_plan=data.get("source_plan"),
++        )
++
++
++@dataclass(frozen=True, slots=True)
++class RenderResult:
++    manifest_path: Path
++    rendered_count: int
++    reused_count: int
++    failed_count: int
++    selected_count: int
++
++    def as_dict(self) -> dict[str, Any]:
++        return {
++            "manifest_path": str(self.manifest_path),
++            "rendered": self.rendered_count,
++            "reused": self.reused_count,
++            "failed": self.failed_count,
++            "selected": self.selected_count,
++        }
+diff --git a/voicerender/py.typed b/voicerender/py.typed
+new file mode 100644
+index 0000000..e69de29
+diff --git a/voicerender/render.py b/voicerender/render.py
+new file mode 100644
+index 0000000..4fde493
+--- /dev/null
++++ b/voicerender/render.py
+@@ -0,0 +1,355 @@
++"""Resumable, content-addressed speech rendering; no Readio dependency."""
++
++from __future__ import annotations
++
++import json
++import os
++import shutil
++from contextlib import ExitStack, contextmanager
++from pathlib import Path
++from typing import Any
++from collections.abc import Iterable, Iterator
++
++from .engines import get_engine
++from .errors import ArtifactError, PlanError, ProfileError
++from .models import (
++    SCHEMA_MANIFEST,
++    RenderResult,
++    SpeechSegment,
++    VoiceBinding,
++    VoicePlan,
++    VoiceProfile,
++)
++from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
++
++RENDER_ALGORITHM = "voicerender.batch.v1"
++
++
++def _identity(binding: VoiceBinding, *, engine_version: str | None) -> dict[str, Any]:
++    reference_hash: str | None = None
++    if binding.reference_audio is not None:
++        if not binding.reference_audio.is_file():
++            raise ProfileError(f"Reference audio is missing: {binding.reference_audio}")
++        reference_hash = file_hash(binding.reference_audio)
++    return {
++        "engine": binding.engine,
++        "engine_version": engine_version,
++        "target_id": binding.target_id,
++        "model_revision": binding.model_revision,
++        "voice": binding.voice,
++        "speaker": binding.speaker,
++        "reference_sha256": reference_hash,
++        "options": {
++            key: value for key, value in binding.options.items() if key != "offline"
++        },
++        "algorithm": RENDER_ALGORITHM,
++    }
++
++
++def _safe_filename(segment: SpeechSegment, index: int) -> str:
++    # No unsanitized logical ID is ever treated as an output path.
++    return f"{index + 1:06d}-{digest([segment.scope_id, segment.id])[:12]}.wav"
++
++
++def _select(
++    segments: tuple[SpeechSegment, ...],
++    *,
++    take: int | None,
++    select: Iterable[str] | None,
++) -> list[SpeechSegment]:
++    if take is not None and (
++        isinstance(take, bool) or not isinstance(take, int) or take < 1
++    ):
++        raise PlanError("--take must be a positive integer")
++    if take is not None and select is not None:
++        raise PlanError("Use take or select, not both")
++    if select is None:
++        return list(segments[:take])
++    wanted = list(select)
++    if not wanted or len(wanted) != len(set(wanted)):
++        raise PlanError("select must contain distinct segment IDs")
++    matched: set[str] = set()
++    result: list[SpeechSegment] = []
++    for item in segments:
++        qualified = f"{item.scope_id}:{item.id}"
++        if qualified in wanted or item.id in wanted:
++            key = qualified if qualified in wanted else item.id
++            matched.add(key)
++            result.append(item)
++    missing = set(wanted) - matched
++    if missing:
++        raise PlanError(f"Unknown selected segment(s): {sorted(missing)}")
++    for name in wanted:
++        if ":" not in name and sum(segment.id == name for segment in segments) > 1:
++            raise PlanError(f"Ambiguous segment ID {name!r}; use scope_id:segment_id")
++    return result
++
++
++@contextmanager
++def _exclusive_run(output_dir: Path) -> Iterator[None]:
++    output_dir.mkdir(parents=True, exist_ok=True)
++    lock = output_dir / ".voicerender.lock"
++    try:
++        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
++    except FileExistsError as exc:
++        raise ArtifactError(f"Render directory is locked: {output_dir}") from exc
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as stream:
++            stream.write(str(os.getpid()))
++        yield
++    finally:
++        lock.unlink(missing_ok=True)
++
++
++def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None:
++    wav = cache_dir / f"{key}.wav"
++    meta = cache_dir / f"{key}.json"
++    try:
++        data = json.loads(meta.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    if not isinstance(data, dict) or data.get("key") != key:
++        return None
++    info = data.get("wav")
++    if not isinstance(info, dict) or not verified_wav(wav, info):
++        return None
++    return wav, data
++
++
++def _copy_verified(source: Path, target: Path, info: dict[str, Any]) -> None:
++    target.parent.mkdir(parents=True, exist_ok=True)
++    tmp = target.with_name("." + target.name + ".tmp-" + str(os.getpid()))
++    try:
++        shutil.copyfile(source, tmp)
++        if not verified_wav(tmp, info):
++            raise ArtifactError(f"WAV copy failed integrity validation: {source}")
++        os.replace(tmp, target)
++    finally:
++        tmp.unlink(missing_ok=True)
++
++
++def render(
++    segments: Iterable[SpeechSegment],
++    *,
++    profile: VoiceProfile,
++    output_dir: str | Path,
++    cache_dir: str | Path | None = None,
++    take: int | None = None,
++    select: Iterable[str] | None = None,
++    resume: bool = True,
++    force: bool = False,
++    source_plan_id: str | None = None,
++    fail_fast: bool = True,
++) -> RenderResult:
++    """Render selected logical speech segments into a persisted WAV bundle.
++
++    A valid audio file is committed immediately after each successful synthesis.
++    Identical effective synthesis requests share a WAV cache across profiles.
++    """
++    full = tuple(segments)
++    if not full:
++        raise PlanError("At least one speech segment is required")
++    if any(not isinstance(seg, SpeechSegment) for seg in full):
++        raise PlanError("segments must contain SpeechSegment values")
++    ids = [(seg.scope_id, seg.id) for seg in full]
++    if len(set(ids)) != len(ids):
++        raise PlanError("Duplicate logical segment IDs")
++    chosen = _select(full, take=take, select=select)
++    if not chosen:
++        raise PlanError("No speech segments selected")
++    out = Path(output_dir).expanduser().resolve()
++    cache = (
++        Path(cache_dir).expanduser().resolve()
++        if cache_dir
++        else out.parent / ".voicerender-cache"
++    )
++    # Avoid using an output directory as the shared cache itself.
++    if cache == out or cache.is_relative_to(out) or out.is_relative_to(cache):
++        raise ArtifactError("cache_dir must be outside output_dir")
++
++    identity_by_role: dict[str, dict[str, Any]] = {}
++    for seg in chosen:
++        binding = profile.roles.get(seg.role)
++        if binding is None:
++            raise ProfileError(
++                f"No voice binding for role {seg.role!r} (segment {seg.id!r})"
++            )
++        if seg.role not in identity_by_role:
++            adapter = get_engine(binding.engine)
++            adapter.validate(binding)
++            identity_by_role[seg.role] = _identity(
++                binding, engine_version=adapter.version()
++            )
++
++    profile_id = digest(
++        {role: identity_by_role[role] for role in sorted(identity_by_role)}
++    )
++    entries: list[dict[str, Any]] = []
++    for index, seg in enumerate(chosen):
++        acoustic = identity_by_role[seg.role]
++        key = digest({"acoustic": acoustic, "text": seg.text, "language": seg.language})
++        entries.append(
++            {
++                "scope_id": seg.scope_id,
++                "segment_id": seg.id,
++                "role": seg.role,
++                "language": seg.language,
++                "synthesis_key": key,
++                "engine": acoustic["engine"],
++                "target_id": acoustic["target_id"],
++                "voice": acoustic["voice"],
++                "model_revision": acoustic["model_revision"],
++                "reference_sha256": acoustic["reference_sha256"],
++                "path": f"segments/{_safe_filename(seg, index)}",
++                "status": "pending",
++                "wav": None,
++                "timings": [],
++                "timing_source": "absent",
++                "error": None,
++            }
++        )
++    document: dict[str, Any] = {
++        "schema": SCHEMA_MANIFEST,
++        "source_plan_id": source_plan_id,
++        "profile_name": profile.name,
++        "effective_profile_id": profile_id,
++        "selected_count": len(chosen),
++        "complete": False,
++        "segments": entries,
++    }
++    manifest_path = out / "manifest.json"
++    rendered = reused = failed = 0
++
++    with _exclusive_run(out):
++        prior: dict[str, Any] = {}
++        if resume and not force and manifest_path.is_file():
++            try:
++                previous = json.loads(manifest_path.read_text(encoding="utf-8"))
++                if previous.get("schema") == SCHEMA_MANIFEST:
++                    prior = {
++                        (
++                            item.get("scope_id"),
++                            item.get("segment_id"),
++                            item.get("synthesis_key"),
++                        ): item
++                        for item in previous.get("segments", [])
++                        if isinstance(item, dict)
++                    }
++            except (OSError, ValueError, TypeError):
++                pass
++        atomic_json(manifest_path, document)
++        cache.mkdir(parents=True, exist_ok=True)
++        with ExitStack() as opened:
++            sessions: dict[str, Any] = {}
++            for index, seg in enumerate(chosen):
++                entry = entries[index]
++                key = entry["synthesis_key"]
++                target = out / entry["path"]
++                try:
++                    old = prior.get((seg.scope_id, seg.id, key)) if prior else None
++                    if (
++                        not force
++                        and old
++                        and isinstance(old.get("wav"), dict)
++                        and verified_wav(target, old["wav"])
++                    ):
++                        entry.update(
++                            status="reused",
++                            wav=old["wav"],
++                            timings=old.get("timings", []),
++                            timing_source=old.get("timing_source", "absent"),
++                        )
++                        reused += 1
++                    else:
++                        cached = None if force else _read_cache(cache, key)
++                        if cached:
++                            source, sidecar = cached
++                            _copy_verified(source, target, sidecar["wav"])
++                            entry.update(
++                                status="reused",
++                                wav=sidecar["wav"],
++                                timings=sidecar.get("timings", []),
++                                timing_source=sidecar.get("timing_source", "absent"),
++                            )
++                            reused += 1
++                        else:
++                            binding = profile.roles[seg.role]
++                            role_key = digest(identity_by_role[seg.role])
++                            if role_key not in sessions:
++                                sessions[role_key] = opened.enter_context(
++                                    get_engine(binding.engine).open(binding)
++                                )
++                            result = sessions[role_key].synthesize(
++                                request_id=seg.id, text=seg.text, language=seg.language
++                            )
++                            info = atomic_wav(
++                                cache / f"{key}.wav",
++                                result.audio,
++                                int(result.sample_rate),
++                            )
++                            timings = [dict(item) for item in result.word_timings]
++                            sidecar = {
++                                "key": key,
++                                "wav": info,
++                                "timings": timings,
++                                "timing_source": "provided" if timings else "absent",
++                            }
++                            atomic_json(cache / f"{key}.json", sidecar)
++                            _copy_verified(cache / f"{key}.wav", target, info)
++                            entry.update(
++                                status="rendered",
++                                wav=info,
++                                timings=timings,
++                                timing_source=sidecar["timing_source"],
++                            )
++                            rendered += 1
++                except Exception as exc:
++                    entry.update(
++                        status="failed",
++                        error={"type": type(exc).__name__, "message": str(exc)},
++                    )
++                    failed += 1
++                    atomic_json(manifest_path, document)
++                    if fail_fast:
++                        raise
++                atomic_json(manifest_path, document)
++        document["complete"] = failed == 0
++        atomic_json(manifest_path, document)
++    return RenderResult(
++        manifest_path=manifest_path,
++        rendered_count=rendered,
++        reused_count=reused,
++        failed_count=failed,
++        selected_count=len(chosen),
++    )
++
++
++def render_plan(
++    plan: VoicePlan | str | Path,
++    *,
++    profile: VoiceProfile | str | Path,
++    output_dir: str | Path,
++    cache_dir: str | Path | None = None,
++    take: int | None = None,
++    select: Iterable[str] | None = None,
++    resume: bool = True,
++    force: bool = False,
++    fail_fast: bool = True,
++) -> RenderResult:
++    """Load the neutral voiceplan TOML contract and execute its speech segments."""
++    parsed = VoicePlan.load(plan) if isinstance(plan, (str, Path)) else plan
++    loaded_profile = (
++        VoiceProfile.load(profile) if isinstance(profile, (str, Path)) else profile
++    )
++    return render(
++        parsed.segments,
++        profile=loaded_profile,
++        output_dir=output_dir,
++        cache_dir=cache_dir,
++        take=take,
++        select=select,
++        resume=resume,
++        force=force,
++        source_plan_id=parsed.source_plan_id,
++        fail_fast=fail_fast,
++    )
+diff --git a/voicerender/storage.py b/voicerender/storage.py
+new file mode 100644
+index 0000000..69141e7
+--- /dev/null
++++ b/voicerender/storage.py
+@@ -0,0 +1,113 @@
++"""Canonical hashes, atomic artifact persistence and verified WAV operations."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import tempfile
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import soundfile as sf
++
++from .errors import ArtifactError
++
++
++def digest(value: Any) -> str:
++    return hashlib.sha256(
++        json.dumps(
++            value,
++            ensure_ascii=False,
++            sort_keys=True,
++            separators=(",", ":"),
++            allow_nan=False,
++        ).encode()
++    ).hexdigest()
++
++
++def file_hash(path: Path) -> str:
++    h = hashlib.sha256()
++    with path.open("rb") as stream:
++        for block in iter(lambda: stream.read(1024 * 1024), b""):
++            h.update(block)
++    return h.hexdigest()
++
++
++def atomic_json(path: Path, value: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as stream:
++            json.dump(
++                value,
++                stream,
++                indent=2,
++                sort_keys=True,
++                ensure_ascii=False,
++                allow_nan=False,
++            )
++            stream.write("\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(name, path)
++    finally:
++        Path(name).unlink(missing_ok=True)
++
++
++def atomic_wav(path: Path, audio: Any, sample_rate: int) -> dict[str, Any]:
++    if (
++        isinstance(sample_rate, bool)
++        or not isinstance(sample_rate, int)
++        or sample_rate <= 0
++    ):
++        raise ArtifactError("Engine returned invalid sample rate")
++    signal = np.asarray(audio, dtype=np.float32)
++    if signal.ndim != 1 or not signal.size or not np.all(np.isfinite(signal)):
++        raise ArtifactError("Engine must return nonempty, finite, mono audio")
++    if np.max(np.abs(signal)) > 1.00001:
++        raise ArtifactError("Engine returned audio outside [-1, 1]")
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".wav", dir=path.parent)
++    os.close(fd)
++    try:
++        sf.write(name, signal, sample_rate, format="WAV", subtype="PCM_16")
++        os.replace(name, path)
++    finally:
++        Path(name).unlink(missing_ok=True)
++    return wav_info(path)
++
++
++def wav_info(path: Path) -> dict[str, Any]:
++    try:
++        with sf.SoundFile(path) as wav:
++            if (
++                wav.format != "WAV"
++                or wav.channels != 1
++                or wav.frames <= 0
++                or wav.samplerate <= 0
++            ):
++                raise ArtifactError(f"Invalid mono WAV artifact: {path}")
++            return {
++                "sha256": file_hash(path),
++                "sample_rate": wav.samplerate,
++                "channels": wav.channels,
++                "frames": wav.frames,
++                "duration_seconds": wav.frames / wav.samplerate,
++            }
++    except (RuntimeError, OSError) as exc:
++        raise ArtifactError(f"Corrupt or unavailable WAV {path}: {exc}") from exc
++
++
++def verified_wav(path: Path, expected: dict[str, Any]) -> bool:
++    if not path.is_file():
++        return False
++    try:
++        actual = wav_info(path)
++    except ArtifactError:
++        return False
++    return all(
++        actual.get(key) == expected.get(key)
++        for key in ("sha256", "frames", "sample_rate", "channels")
++    )

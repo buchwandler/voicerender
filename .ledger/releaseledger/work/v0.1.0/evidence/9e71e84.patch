@@ -1,0 +1,316 @@
+ .github/workflows/codecov.yml        |  29 ++++++++
+ .github/workflows/pre-commit.yml     |  31 +++++++++
+ .github/workflows/python-publish.yml | 101 ++++++++++++++++++++++++++++
+ .github/workflows/tests.yml          | 125 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 286 insertions(+)
+
+diff --git a/.github/workflows/codecov.yml b/.github/workflows/codecov.yml
+new file mode 100644
+index 0000000..7cc52e9
+--- /dev/null
++++ b/.github/workflows/codecov.yml
+@@ -0,0 +1,29 @@
++name: Codecov
++
++on:
++  push:
++
++jobs:
++  coverage:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++      - name: Run tests with coverage
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install coverage pytest pytest-cov
++          python -m pip install -e ".[dev]"
++          python -m pytest --cov=utterplan --cov-report=xml --junitxml=junit.xml
++      - name: Upload coverage to Codecov
++        uses: codecov/codecov-action@v5
++        with:
++          token: ${{ secrets.CODECOV_TOKEN }}
++      - name: Upload test results to Codecov
++        if: ${{ !cancelled() }}
++        uses: codecov/test-results-action@v1
++        with:
++          token: ${{ secrets.CODECOV_TOKEN }}
+diff --git a/.github/workflows/pre-commit.yml b/.github/workflows/pre-commit.yml
+new file mode 100644
+index 0000000..0e24e53
+--- /dev/null
++++ b/.github/workflows/pre-commit.yml
+@@ -0,0 +1,31 @@
++name: pre-commit
++
++on:
++  pull_request:
++  push:
++
++jobs:
++  pre-commit:
++    runs-on: ubuntu-latest
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.13"
++
++      - uses: actions/setup-node@v4
++        with:
++          node-version: "20"
++
++      - name: Install Python tools
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install "ruff==0.16.0"
++
++      - name: Install Node tools
++        run: |
++          npm install -g prettier@2.7.1 @prettier/plugin-xml@2.2.0 eslint
++
++      - uses: pre-commit/action@v3.0.1
+diff --git a/.github/workflows/python-publish.yml b/.github/workflows/python-publish.yml
+new file mode 100644
+index 0000000..0fd8311
+--- /dev/null
++++ b/.github/workflows/python-publish.yml
+@@ -0,0 +1,101 @@
++# Build and publish a Python package when a GitHub Release is published.
++
++name: Upload Python Package
++
++on:
++  release:
++    types: [published]
++
++permissions:
++  contents: read
++
++jobs:
++  deploy:
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Check out release
++        uses: actions/checkout@v4
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.13"
++
++      - name: Install build tooling
++        run: python -m pip install --upgrade pip build twine
++      - name: Build package
++        run: |
++          rm -rf dist
++          python -m build
++      - name: Check built distributions
++        run: python -m twine check dist/*
++      - name: Validate release artifacts
++        env:
++          RELEASE_TAG: ${{ github.event.release.tag_name }}
++        run: |
++          python - <<'PY'
++          import os
++          import re
++          import zipfile
++          from email import policy
++          from email.parser import Parser
++          from pathlib import Path
++
++          from packaging.requirements import Requirement
++          from packaging.version import Version
++
++          def has_range(requirements, name, minimum, maximum):
++              minimum_version = Version(minimum)
++              maximum_version = Version(maximum)
++              return any(
++                  requirement.name == name
++                  and any(
++                      spec.operator == ">=" and Version(spec.version) == minimum_version
++                      for spec in requirement.specifier
++                  )
++                  and any(
++                      spec.operator == "<" and Version(spec.version) == maximum_version
++                      for spec in requirement.specifier
++                  )
++                  for requirement in requirements
++              )
++          tag_version = os.environ["RELEASE_TAG"].removeprefix("v")
++          artifacts = list(Path("dist").iterdir())
++          wheels = [path for path in artifacts if path.suffix == ".whl"]
++          sdists = [path for path in artifacts if path.name.endswith(".tar.gz")]
++          assert len(wheels) == 1, wheels
++          assert len(sdists) == 1, sdists
++          wheel_version = re.match(r"utterplan-([^-]+)-", wheels[0].name).group(1)
++          sdist_version = re.match(r"utterplan-([^-]+)\.tar\.gz$", sdists[0].name).group(1)
++          assert wheel_version == tag_version, (wheel_version, tag_version)
++          assert sdist_version == tag_version, (sdist_version, tag_version)
++
++          with zipfile.ZipFile(wheels[0]) as archive:
++              metadata_name = next(name for name in archive.namelist() if name.endswith("METADATA"))
++              metadata = Parser(policy=policy.default).parsestr(
++                  archive.read(metadata_name).decode("utf-8")
++              )
++              requirements = [
++                  Requirement(value) for value in metadata.get_all("Requires-Dist", [])
++              ]
++              assert has_range(requirements, "phrasplit", "0.3.9", "0.4")
++              assert has_range(requirements, "ssmd", "0.9.3", "0.10")
++              assert has_range(requirements, "spokenform", "0.4.3", "0.5")
++              names = set(archive.namelist())
++              expected = {
++                  "utterplan/py.typed",
++                  "utterplan/utterplan.schema.json",
++                  "utterplan/schemas/v1.schema.json",
++                  "utterplan/schemas/v2.schema.json",
++                  "utterplan/schemas/v3.schema.json",
++                  "utterplan/schemas/v4.schema.json",
++              }
++              assert expected <= names
++          PY
++
++      - name: Publish package to PyPI
++        uses: pypa/gh-action-pypi-publish@v1.14.1
++        with:
++          password: ${{ secrets.PYPI_API_TOKEN }}
++          attestations: false
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+new file mode 100644
+index 0000000..162a39c
+--- /dev/null
++++ b/.github/workflows/tests.yml
+@@ -0,0 +1,125 @@
++name: Run tests
++
++on:
++  push:
++  pull_request:
++  workflow_call:
++
++jobs:
++  test:
++    runs-on: ${{ matrix.os }}
++    strategy:
++      matrix:
++        os: [ubuntu-latest, windows-latest, macos-latest]
++        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
++    steps:
++      - uses: actions/checkout@v4
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: ${{ matrix.python-version }}
++      - name: Install package
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install -e ".[dev]"
++          python -m compileall -q voicerender tests
++      - name: Run tests
++        run: python -m pytest -q
++
++  lower-bounds:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.10"
++      - name: Install lower-bound dependencies
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install \
++            "pytest==8.0.0" \
++            "numpy==1.23.0" \
++            "soundfile==0.12.1" \
++            "tomli==2.0.1"
++          python -m pip install --no-deps -e .
++      - name: Run lower-bound tests
++        run: python -m pytest -q
++
++  package-smoke:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++      - name: Build wheel and sdist
++        run: |
++          python -m pip install --upgrade pip build
++          python -m build --outdir "$RUNNER_TEMP/dist"
++      - name: Verify package contents
++        run: |
++          python - <<'PY'
++          import os
++          import tarfile
++          from email import policy
++          from email.parser import Parser
++          from pathlib import Path
++          from zipfile import ZipFile
++
++          from packaging.requirements import Requirement
++
++          artifacts = Path(os.environ["RUNNER_TEMP"]) / "dist"
++          wheel = next(artifacts.glob("voicerender-*.whl"))
++          sdist = next(artifacts.glob("voicerender-*.tar.gz"))
++          expected = {
++              "voicerender/py.typed",
++              "voicerender/schemas/render-manifest-v2.schema.json",
++          }
++
++          with ZipFile(wheel) as archive:
++              names = set(archive.namelist())
++              assert expected <= names
++              metadata_name = next(name for name in names if name.endswith("METADATA"))
++              metadata = Parser(policy=policy.default).parsestr(
++                  archive.read(metadata_name).decode("utf-8")
++              )
++              requirements = {
++                  Requirement(value).name
++                  for value in metadata.get_all("Requires-Dist", [])
++              }
++              assert {"numpy", "soundfile"} <= requirements
++
++          with tarfile.open(sdist, "r:gz") as archive:
++              names = archive.getnames()
++              assert all(any(name.endswith(resource) for name in names) for resource in expected)
++          PY
++      - name: Install wheel in clean environment
++        run: |
++          python -m venv "$RUNNER_TEMP/voicerender-wheel-venv"
++          "$RUNNER_TEMP/voicerender-wheel-venv/bin/python" -m pip install \
++            "$RUNNER_TEMP"/dist/voicerender-*.whl
++      - name: Run installed smoke checks
++        run: |
++          VENV="$RUNNER_TEMP/voicerender-wheel-venv"
++          "$VENV/bin/python" -c \
++            "import importlib.metadata as m; import voicerender; assert m.version('voicerender') == voicerender.__version__"
++          "$VENV/bin/voicerender" --version
++          "$VENV/bin/voicerender" engines list --json
++          "$VENV/bin/voicerender" profiles validate examples/voices/voice.toml
++
++  docs:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++      - name: Install documentation dependencies
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install -r docs/requirements.txt
++      - name: Build documentation
++        run: sphinx-build -W --keep-going -D master_doc=utterplan-v5-integration -b html docs docs/_build/html

@@ -1,0 +1,326 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.0
+git_base_ref: :root
+git_base_sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+git_head_ref: HEAD
+git_head_sha: c4a2872bd2830ef7eb348688b2194af169bbe6aa
+git_range: :root..c4a2872bd2830ef7eb348688b2194af169bbe6aa
+commit_count: 5
+rows:
+  - sha: 774f6f28687ae6e7f1b5468725cbae1b7dcffe9f
+    source_ref: git:774f6f28687ae6e7f1b5468725cbae1b7dcffe9f
+    short_sha: 774f6f2
+    changed_paths: []
+    stats:
+      files_changed: 0
+      insertions: 0
+      deletions: 0
+    inspected: true
+    inspected_paths:
+      - .gitignore
+      - LICENSE
+      - README.md
+    observed_behavior:
+      Repository licensing and ignore rules were established; this
+      commit adds no product behavior.
+    public_impact: none
+    decision: internal
+    stale: false
+    evidence_subject: Initial commit
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: fb7faafcdaaac6c934f5f6bff02b35612d1817b2
+    source_ref: git:fb7faafcdaaac6c934f5f6bff02b35612d1817b2
+    short_sha: fb7faaf
+    changed_paths:
+      - .codecrate.toml
+      - .gitignore
+      - .ledger/ledger.toml
+      - .ledger/releaseledger/.ledger-project.toml
+      - .ledger/releaseledger/config.toml
+      - .ledger/releaseledger/data/.ledger-project.toml
+      - .ledger/taskledger/.ledger-project.toml
+      - .ledger/taskledger/config.toml
+      - .pre-commit-config.yaml
+      - README.md
+      - docs/Makefile
+      - docs/conf.py
+      - docs/make.bat
+      - docs/make.py
+      - docs/requirements.txt
+      - examples/plans/chapter.voiceplan.toml
+      - examples/voices/piper.toml
+      - examples/voices/pocket-reference.toml
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_renderer.py
+      - voicerender/__init__.py
+      - voicerender/__main__.py
+      - voicerender/cli.py
+      - voicerender/engines/__init__.py
+      - voicerender/engines/base.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pocket.py
+      - voicerender/errors.py
+      - voicerender/models.py
+      - voicerender/py.typed
+      - voicerender/render.py
+      - voicerender/storage.py
+    stats:
+      files_changed: 33
+      insertions: 2568
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - .codecrate.toml
+      - .gitignore
+      - .ledger/ledger.toml
+      - .ledger/releaseledger/.ledger-project.toml
+      - .ledger/releaseledger/config.toml
+      - .ledger/releaseledger/data/.ledger-project.toml
+      - .ledger/taskledger/.ledger-project.toml
+      - .ledger/taskledger/config.toml
+      - .pre-commit-config.yaml
+      - README.md
+      - docs/Makefile
+      - docs/conf.py
+      - docs/make.bat
+      - docs/make.py
+      - docs/requirements.txt
+      - examples/plans/chapter.voiceplan.toml
+      - examples/voices/piper.toml
+      - examples/voices/pocket-reference.toml
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_renderer.py
+      - voicerender/__init__.py
+      - voicerender/__main__.py
+      - voicerender/cli.py
+      - voicerender/engines/__init__.py
+      - voicerender/engines/base.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pocket.py
+      - voicerender/errors.py
+      - voicerender/models.py
+      - voicerender/py.typed
+      - voicerender/render.py
+      - voicerender/storage.py
+    observed_behavior:
+      Added the initial VoiceRender package, command-line interface,
+      Piper and Pocket backends, rendering pipeline, storage helpers, examples, documentation
+      scaffolding, and automated tests.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: initial version"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 264eb9b941d2b2086e092aff11ebebae47ed293c
+    source_ref: git:264eb9b941d2b2086e092aff11ebebae47ed293c
+    short_sha: 264eb9b
+    changed_paths:
+      - MANIFEST.in
+      - README.md
+      - docs/utterplan-v5-integration.md
+      - examples/pauses/audiobook.toml
+      - examples/plans/chapter.utterplan.toml
+      - examples/voices/voice.toml
+      - pyproject.toml
+      - tests/fixtures/utterplan_v5_contract.toml
+      - tests/test_audiocompose_integration.py
+      - tests/test_backends.py
+      - tests/test_cli_v5.py
+      - tests/test_manifest.py
+      - tests/test_render_v5.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pocket.py
+      - voicerender/errors.py
+      - voicerender/inputs/__init__.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/integrations/__init__.py
+      - voicerender/integrations/audiocompose.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/render.py
+      - voicerender/render_v5.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    stats:
+      files_changed: 29
+      insertions: 4888
+      deletions: 118
+    inspected: true
+    inspected_paths:
+      - MANIFEST.in
+      - README.md
+      - docs/utterplan-v5-integration.md
+      - examples/pauses/audiobook.toml
+      - examples/plans/chapter.utterplan.toml
+      - examples/voices/voice.toml
+      - pyproject.toml
+      - tests/fixtures/utterplan_v5_contract.toml
+      - tests/test_audiocompose_integration.py
+      - tests/test_backends.py
+      - tests/test_cli_v5.py
+      - tests/test_manifest.py
+      - tests/test_render_v5.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pocket.py
+      - voicerender/errors.py
+      - voicerender/inputs/__init__.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/integrations/__init__.py
+      - voicerender/integrations/audiocompose.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/render.py
+      - voicerender/render_v5.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    observed_behavior:
+      Added Utterplan v5 parsing, AudioCompose integration, render-manifest
+      validation, v5 rendering flows, examples, integration documentation, and contract
+      tests.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add support for utterplan v5"
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: 9e71e84c9a1fb22efe643dd18bafafdce5009965
+    source_ref: git:9e71e84c9a1fb22efe643dd18bafafdce5009965
+    short_sha: 9e71e84
+    changed_paths:
+      - .github/workflows/codecov.yml
+      - .github/workflows/pre-commit.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    stats:
+      files_changed: 4
+      insertions: 286
+      deletions: 0
+    inspected: true
+    inspected_paths:
+      - .github/workflows/codecov.yml
+      - .github/workflows/pre-commit.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    observed_behavior:
+      Added CI workflows for tests, pre-commit checks, coverage reporting,
+      and package publishing; no runtime product behavior changed.
+    public_impact: none
+    decision: internal
+    stale: false
+    evidence_subject: "chore: ci"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: c4a2872bd2830ef7eb348688b2194af169bbe6aa
+    source_ref: git:c4a2872bd2830ef7eb348688b2194af169bbe6aa
+    short_sha: c4a2872
+    changed_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/utterplan-v5-integration.md
+      - examples/pauses/audiobook.toml
+      - pyproject.toml
+      - tests/test_audiocompose_integration.py
+      - tests/test_capacity.py
+      - tests/test_cli_v5.py
+      - tests/test_engine_registry.py
+      - tests/test_render_v5.py
+      - tests/test_renderer.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/capacity.py
+      - voicerender/cli.py
+      - voicerender/engines/__init__.py
+      - voicerender/engines/api_probe.py
+      - voicerender/engines/base.py
+      - voicerender/engines/catalog.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/metadata.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/registry.py
+      - voicerender/engines/selection.py
+      - voicerender/engines/supertonicsynth.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/handoff.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/integrations/__init__.py
+      - voicerender/integrations/audiocompose.py
+      - voicerender/lexicons.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/render.py
+      - voicerender/render_v5.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    stats:
+      files_changed: 40
+      insertions: 10572
+      deletions: 1577
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/utterplan-v5-integration.md
+      - examples/pauses/audiobook.toml
+      - pyproject.toml
+      - tests/test_audiocompose_integration.py
+      - tests/test_capacity.py
+      - tests/test_cli_v5.py
+      - tests/test_engine_registry.py
+      - tests/test_render_v5.py
+      - tests/test_renderer.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/capacity.py
+      - voicerender/cli.py
+      - voicerender/engines/__init__.py
+      - voicerender/engines/api_probe.py
+      - voicerender/engines/base.py
+      - voicerender/engines/catalog.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/metadata.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/registry.py
+      - voicerender/engines/selection.py
+      - voicerender/engines/supertonicsynth.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/handoff.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/integrations/__init__.py
+      - voicerender/integrations/audiocompose.py
+      - voicerender/lexicons.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/render.py
+      - voicerender/render_v5.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    observed_behavior:
+      Expanded the engine registry and selection system, added capacity
+      probing and multiple synthesis backends, improved manifest and handoff behavior,
+      and broadened the tested v5 rendering surface.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: prepare first v0.1.0 release"
+    target_entry_id: entry-0005
+    notes: ""

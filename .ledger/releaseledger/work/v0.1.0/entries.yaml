@@ -1,0 +1,179 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.0
+git_base_ref: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+git_base_sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+git_head_ref: c4a2872bd2830ef7eb348688b2194af169bbe6aa
+git_head_sha: c4a2872bd2830ef7eb348688b2194af169bbe6aa
+include_merges: nontrivial
+entries:
+  - kind: internal
+    summary: Added repository licensing and ignore rules
+    status: accepted
+    internal: true
+    source_refs:
+      - git:774f6f28687ae6e7f1b5468725cbae1b7dcffe9f
+    paths: []
+    sources:
+      - git:774f6f28687ae6e7f1b5468725cbae1b7dcffe9f
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added CLI rendering with Piper and Pocket backends plus persistent render storage
+    status: accepted
+    source_refs:
+      - git:fb7faafcdaaac6c934f5f6bff02b35612d1817b2
+    paths:
+      - .codecrate.toml
+      - .gitignore
+      - .ledger/ledger.toml
+      - .ledger/releaseledger/.ledger-project.toml
+      - .ledger/releaseledger/config.toml
+      - .ledger/releaseledger/data/.ledger-project.toml
+      - .ledger/taskledger/.ledger-project.toml
+      - .ledger/taskledger/config.toml
+      - .pre-commit-config.yaml
+      - README.md
+      - docs/Makefile
+      - docs/conf.py
+      - docs/make.bat
+      - docs/make.py
+      - docs/requirements.txt
+      - examples/plans/chapter.voiceplan.toml
+      - examples/voices/piper.toml
+      - examples/voices/pocket-reference.toml
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_renderer.py
+      - voicerender/__init__.py
+      - voicerender/__main__.py
+      - voicerender/cli.py
+      - voicerender/engines/__init__.py
+      - voicerender/engines/base.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pocket.py
+      - voicerender/errors.py
+      - voicerender/models.py
+      - voicerender/py.typed
+      - voicerender/render.py
+      - voicerender/storage.py
+    sources:
+      - git:fb7faafcdaaac6c934f5f6bff02b35612d1817b2
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added Utterplan v5 parsing, AudioCompose integration, and render-manifest validation
+    status: accepted
+    source_refs:
+      - git:264eb9b941d2b2086e092aff11ebebae47ed293c
+    paths:
+      - MANIFEST.in
+      - README.md
+      - docs/utterplan-v5-integration.md
+      - examples/pauses/audiobook.toml
+      - examples/plans/chapter.utterplan.toml
+      - examples/voices/voice.toml
+      - pyproject.toml
+      - tests/fixtures/utterplan_v5_contract.toml
+      - tests/test_audiocompose_integration.py
+      - tests/test_backends.py
+      - tests/test_cli_v5.py
+      - tests/test_manifest.py
+      - tests/test_render_v5.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pocket.py
+      - voicerender/errors.py
+      - voicerender/inputs/__init__.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/integrations/__init__.py
+      - voicerender/integrations/audiocompose.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/render.py
+      - voicerender/render_v5.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    sources:
+      - git:264eb9b941d2b2086e092aff11ebebae47ed293c
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    summary: Added CI, pre-commit, coverage, and package-publishing workflows
+    status: accepted
+    internal: true
+    source_refs:
+      - git:9e71e84c9a1fb22efe643dd18bafafdce5009965
+    paths:
+      - .github/workflows/codecov.yml
+      - .github/workflows/pre-commit.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+    sources:
+      - git:9e71e84c9a1fb22efe643dd18bafafdce5009965
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added engine discovery, capacity probing, synthesis backends, and v5 handoff improvements
+    status: accepted
+    source_refs:
+      - git:c4a2872bd2830ef7eb348688b2194af169bbe6aa
+    paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/utterplan-v5-integration.md
+      - examples/pauses/audiobook.toml
+      - pyproject.toml
+      - tests/test_audiocompose_integration.py
+      - tests/test_capacity.py
+      - tests/test_cli_v5.py
+      - tests/test_engine_registry.py
+      - tests/test_render_v5.py
+      - tests/test_renderer.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/capacity.py
+      - voicerender/cli.py
+      - voicerender/engines/__init__.py
+      - voicerender/engines/api_probe.py
+      - voicerender/engines/base.py
+      - voicerender/engines/catalog.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/metadata.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/registry.py
+      - voicerender/engines/selection.py
+      - voicerender/engines/supertonicsynth.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/handoff.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/integrations/__init__.py
+      - voicerender/integrations/audiocompose.py
+      - voicerender/lexicons.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/render.py
+      - voicerender/render_v5.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    sources:
+      - git:c4a2872bd2830ef7eb348688b2194af169bbe6aa
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
