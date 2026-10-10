@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
 from . import __version__
-from .engines import get_engine, list_engines
+from .engines import (
+    EngineRequest,
+    discover_targets,
+    engine_status,
+    list_engines,
+    resolve_voice,
+)
 from .errors import VoiceRenderError
 from .manifest import MANIFEST_SCHEMA as MANIFEST_SCHEMA_V2
 from .manifest import read_manifest
@@ -48,15 +55,17 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--continue-on-error", action="store_true")
     render.add_argument("--json", action="store_true")
     engines = commands.add_parser("engines", help="Inspect installed synthesis engines")
-    engines.add_argument("action", choices=["list"])
+    engines.add_argument("action", choices=["list", "inspect"])
+    engines.add_argument("engine", nargs="?", help="Engine ID (required for inspect)")
     engines.add_argument("--json", action="store_true")
     voices = commands.add_parser(
         "voices", help="Discover backend voice and model choices"
     )
     voices.add_argument("action", choices=["list"])
-    voices.add_argument("--engine", required=True, choices=["piper", "pocket"])
+    voices.add_argument("--engine", required=True)
     voices.add_argument("--lang")
     voices.add_argument("--offline", action="store_true")
+    voices.add_argument("--refresh", action="store_true")
     voices.add_argument("--json", action="store_true")
     profiles = commands.add_parser("profiles", help="Validate a voice profile")
     profiles.add_argument("action", choices=["validate"])
@@ -72,30 +81,34 @@ def _parser() -> argparse.ArgumentParser:
         help="Verify WAV bytes (verification is also the default)",
     )
     inspect.add_argument("--json", action="store_true")
-    audiojob = commands.add_parser(
-        "audiojob",
-        help="Materialize a verified UtterPlan v5 render as an AudioJob bundle",
+    validate = commands.add_parser(
+        "validate", help="Run no-inference UtterPlan v5 and profile preflight"
     )
-    audiojob.add_argument("plan", type=Path)
-    audiojob.add_argument(
-        "--renders", required=True, type=Path, help="v2 render-manifest.json"
+    validate.add_argument("plan", type=Path)
+    validate.add_argument(
+        "--voice", "--profile", dest="voice", required=True, type=Path
     )
-    audiojob.add_argument(
-        "--pauses", required=True, type=Path, help="Pause policy TOML"
-    )
-    audiojob.add_argument(
-        "--output",
-        required=True,
-        type=Path,
-        help="AudioJob bundle directory (sources are copied)",
-    )
-    audiojob.add_argument("--json", action="store_true")
+    validate.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "validate":
+            from .render_v5 import validate_utterplan
+
+            payload = validate_utterplan(args.plan, profile=args.voice)
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                engine_names = ", ".join(item["id"] for item in payload["engines"])
+                print(
+                    f"Valid UtterPlan v5 {payload['plan_id']}: "
+                    f"{payload['selection']['selected_speech_count']} speech operations; "
+                    f"engines: {engine_names or 'none'}"
+                )
+            return 0
         if args.command == "render":
             selected = args.select.split(",") if args.select is not None else None
             if args.voice is not None:
@@ -131,66 +144,116 @@ def main(argv: list[str] | None = None) -> int:
                     f"failed {payload['failed']} of {payload['selected']} → {result.manifest_path}"
                 )
             return 1 if result.failed_count else 0
-        if args.command == "audiojob":
-            from .integrations.audiocompose import build_audio_job
-
-            job = build_audio_job(
-                args.plan,
-                args.renders,
-                args.pauses,
-            )
-            try:
-                saved_manifest = job.save(args.output)
-            except Exception as exc:
-                raise VoiceRenderError(
-                    f"AudioCompose could not save AudioJob bundle: {exc}"
-                ) from exc
-            payload = {
-                "audiojob_manifest": saved_manifest,
-                "job_id": job.job_id,
-                "items": len(job.items),
-                "speech_clips": sum(
-                    item.__class__.__name__ == "AudioClip" for item in job.items
-                ),
-            }
-            if args.json:
-                print(json.dumps(payload, indent=2))
-            else:
-                print(
-                    f"Wrote AudioJob with {payload['speech_clips']} speech clips → {saved_manifest}"
-                )
-            return 0
         if args.command == "engines":
-            engines = list_engines()
+            if args.action == "list":
+                if args.engine is not None:
+                    raise VoiceRenderError("engines list does not accept an engine ID")
+                engines = list_engines()
+                if args.json:
+                    print(json.dumps(engines, indent=2))
+                else:
+                    for engine in engines:
+                        print(
+                            f"{engine['id']}: {engine['installed_version'] or 'not installed'} "
+                            f"(package: {engine['package']})"
+                        )
+                return 0
+            if args.engine is None:
+                raise VoiceRenderError("engines inspect requires an engine ID")
+            status = engine_status(args.engine)
             if args.json:
-                print(json.dumps(engines, indent=2))
+                print(json.dumps(status, indent=2, default=str))
             else:
-                for engine in engines:
-                    print(
-                        f"{engine['id']}: {engine['installed_version'] or 'not installed'} "
-                        f"(reference audio: {'yes' if engine['reference_audio'] else 'no'})"
-                    )
-            return 0
+                label = "compatible" if status["compatible"] else status["status"]
+                print(f"{status['engine']}: {label}")
+                version = status["distribution_version"] or "(not installed)"
+                print(f"  package: {status['package']} {version}")
+                if status["missing_symbols"]:
+                    print(f"  missing symbols: {', '.join(status['missing_symbols'])}")
+                if status["missing_methods"]:
+                    print(f"  missing methods: {', '.join(status['missing_methods'])}")
+            return 0 if status["compatible"] else 1
         if args.command == "voices":
-            if args.engine == "piper":
-                from .engines.piper import discover_voices
-            else:
-                from .engines.pocket import discover_voices
-            found = discover_voices(language=args.lang, offline=args.offline)
+            found = discover_targets(
+                args.engine,
+                language=args.lang,
+                offline=args.offline,
+                refresh=args.refresh,
+            )
+            targets_payload = [
+                {
+                    "engine": target.engine,
+                    "id": target.id,
+                    "display_name": target.display_name,
+                    "languages": target.languages,
+                    "status": target.status,
+                    "runtime_available": target.runtime_available,
+                    "sample_rate": target.sample_rate,
+                    "voices": target.voices,
+                    "speakers": target.speakers,
+                    "voice_details": [
+                        {
+                            "id": voice.id,
+                            "gender": voice.gender,
+                            "language": voice.language,
+                            "locale": voice.locale,
+                            "language_label": voice.language_label,
+                            "languages": voice.languages,
+                        }
+                        for voice in target.voice_details
+                    ],
+                    "default_voice": target.default_voice,
+                    "qualities": target.qualities,
+                    "aliases": target.aliases,
+                    "capabilities": sorted(target.capabilities),
+                    "metadata": dict(target.metadata),
+                }
+                for target in found
+            ]
             if args.json:
-                print(json.dumps(found, indent=2))
+                print(json.dumps(targets_payload, indent=2, default=str))
             else:
-                for item in found:
-                    names = ", ".join(item.get("voices", ()))
+                for target in found:
+                    names = ", ".join(target.voices)
                     print(
-                        f"{item['engine']}:{item['target_id']}"
+                        f"{target.engine}:{target.id}"
                         + (f" ({names})" if names else "")
+                        + f" [{target.status}]"
                     )
             return 0
         if args.command == "profiles":
             profile = VoiceProfile.load(args.path)
-            for binding in profile.roles.values():
-                get_engine(binding.engine).validate(binding)
+            for role, binding in profile.roles.items():
+                options = dict(binding.options)
+                if binding.reference_audio is not None:
+                    options["voice_source"] = {
+                        "kind": "reference",
+                        "value": str(binding.reference_audio),
+                        "sha256": hashlib.sha256(
+                            binding.reference_audio.read_bytes()
+                        ).hexdigest(),
+                    }
+                _, diagnostics = resolve_voice(
+                    EngineRequest(
+                        engine=binding.engine,
+                        target_id=binding.target_id,
+                        language=profile.default_language or "en-us",
+                        voice=binding.voice,
+                        speaker=binding.speaker,
+                        options=options,
+                    )
+                )
+                probe = engine_status(binding.engine)
+                if not probe["compatible"]:
+                    raise VoiceRenderError(
+                        f"Role {role!r} has an incompatible engine API: {probe['status']}"
+                    )
+                errors = [item for item in diagnostics if item.severity == "error"]
+                if errors:
+                    details = "; ".join(
+                        f"{item.code}: {item.message}" for item in errors
+                    )
+                    raise VoiceRenderError(f"Role {role!r} is invalid: {details}")
             payload = {
                 "valid": True,
                 "name": profile.name,

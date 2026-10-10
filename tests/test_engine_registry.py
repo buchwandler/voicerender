@@ -1,0 +1,330 @@
+"""Registry and public API-probe tests; optional SDKs remain mocked and lazy."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+import pytest
+
+from voicerender.engines.registry import (
+    discover_targets,
+    engine_status,
+    get_adapter,
+    list_engines,
+)
+
+ENGINE_IDS = {"inflect", "kitten", "kokoro", "piper", "pocket", "supertonic"}
+PACKAGES = {
+    "inflect": "inflectsynth",
+    "kitten": "kittensynth",
+    "kokoro": "pykokoro",
+    "piper": "pipersynth",
+    "pocket": "pocketsynth",
+    "supertonic": "supertonicsynth",
+}
+
+ADAPTER_MODULES = {
+    "inflect": "voicerender.engines.inflectsynth",
+    "kitten": "voicerender.engines.kittensynth",
+    "kokoro": "voicerender.engines.kokoro",
+    "piper": "voicerender.engines.pipersynth",
+    "pocket": "voicerender.engines.pocketsynth",
+    "supertonic": "voicerender.engines.supertonicsynth",
+}
+
+
+def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
+    script = r"""
+import builtins
+blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "supertonicsynth"}
+seen = []
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name.split(".", 1)[0] in blocked:
+        seen.append(name)
+        raise AssertionError(f"optional SDK imported: {name}")
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+import voicerender
+from voicerender.engines import list_engines
+assert {item["id"] for item in list_engines()} == blocked_to_ids
+assert not seen
+"""
+    # Keep the subprocess isolated from SDKs that may already be imported by pytest.
+    script = script.replace(
+        "blocked_to_ids",
+        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'supertonic'}",
+    )
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _fake_package(package: str) -> ModuleType:
+    module = ModuleType(package)
+    module.__version__ = "0.1.0"
+    module.__file__ = f"/fake/{package}/__init__.py"
+
+    owner_methods = {
+        "PiperVoice": ("from_pretrained", "synthesize", "close"),
+        "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
+        "KokoroSynthesizer": ("prepare", "synthesize", "close"),
+        "PocketRuntime": (
+            "from_resolved",
+            "prepare_voice",
+            "synthesize",
+            "close",
+            "measure_request",
+        ),
+        "BundleAssetManager": ("resolve_bundle", "list_bundles"),
+        "KittenVoice": (
+            "synthesize_prepared",
+            "from_pretrained",
+            "from_local",
+            "close",
+        ),
+        "SupertonicRuntime": (
+            "from_pretrained",
+            "measure_request",
+            "synthesize",
+            "close",
+        ),
+        "InflectVoice": (
+            "from_pretrained",
+            "from_local",
+            "synthesize_prepared",
+            "measure_prepared",
+            "close",
+        ),
+    }
+    symbols = {
+        "PiperVoice",
+        "VoiceAssetManager",
+        "SynthesisRequest",
+        "SynthesisResult",
+        "SynthesisConfig",
+        "LinguisticToken",
+        "PronunciationOverride",
+        "VoiceLevelConfig",
+        "SynthesisInputTooLongError",
+        "KokoroSynthesizer",
+        "ShortSentenceConfig",
+        "PocketRuntime",
+        "GenerationConfig",
+        "BundleAssetManager",
+        "VoicePromptInfo",
+        "PreparedVoice",
+        "RequestMeasure",
+        "discover_bundles",
+        "inspect_voice_prompt",
+        "list_voice_prompts",
+        "KittenVoice",
+        "discover_models",
+        "runtime_identity",
+        "SupertonicRuntime",
+        "AtomicSynthesisResult",
+        "DiscoveredModel",
+        "InflectVoice",
+        "DescribedVoice",
+        "request_api_contract",
+        "capacity_api_contract",
+    }
+    for name in symbols:
+        if name in owner_methods:
+            value = type(
+                name,
+                (),
+                {
+                    method: staticmethod(lambda *args, **kwargs: None)
+                    for method in owner_methods[name]
+                },
+            )
+        elif name.endswith("Error"):
+            value = type(name, (Exception,), {})
+        else:
+            value = lambda *args, **kwargs: None
+        setattr(module, name, value)
+
+    module._probe_discovery_calls = []
+
+    def forbidden_discovery(*args, **kwargs):
+        module._probe_discovery_calls.append((args, kwargs))
+        raise AssertionError("API probes must not discover or load models")
+
+    for name in (
+        "discover_models",
+        "discover_bundles",
+        "list_voice_prompts",
+        "inspect_voice_prompt",
+    ):
+        if name in symbols:
+            setattr(module, name, forbidden_discovery)
+    module.REQUEST_API_VERSION = 1
+    module.CAPACITY_API_VERSION = 1
+    module.request_api_contract = lambda: {"version": 1}
+    module.capacity_api_contract = lambda: {"supports_known_maximum": True}
+    return module
+
+
+def test_registry_lists_six_engines_without_probing() -> None:
+    listed = list_engines()
+    assert {item["id"] for item in listed} == ENGINE_IDS
+    assert {item["package"] for item in listed} == set(PACKAGES.values())
+    assert all("installed_version" in item for item in listed)
+
+
+@pytest.mark.parametrize(("engine", "package"), sorted(PACKAGES.items()))
+def test_all_engine_probes_use_public_api_without_loading_models(
+    monkeypatch: pytest.MonkeyPatch, engine: str, package: str
+) -> None:
+    import importlib
+
+    fake = _fake_package(package)
+    monkeypatch.setitem(sys.modules, package, fake)
+    original = importlib.import_module
+    calls: list[str] = []
+
+    def fake_import(name: str, package_arg: str | None = None):
+        if name == package:
+            calls.append(name)
+            return fake
+        return original(name, package_arg)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    adapter = get_adapter(engine)
+    probe = adapter.probe_api()
+    assert probe.compatible, probe
+    assert probe.status == "ready"
+    assert calls
+    status = engine_status(engine)
+    assert status["compatible"] is True
+    assert fake._probe_discovery_calls == []
+
+
+@pytest.mark.parametrize("engine", sorted(ENGINE_IDS))
+def test_all_adapters_discover_fake_catalogs_without_model_downloads(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    from importlib import import_module
+
+    from voicerender.engines.catalog import SynthesisTarget
+
+    adapter_module = import_module(ADAPTER_MODULES[engine])
+    if engine == "piper":
+        fake = _fake_package(PACKAGES[engine])
+
+        class FakeVoiceAssetManager:
+            def __init__(self, *, offline: bool = False) -> None:
+                self.offline = offline
+
+            def list_voices(self, *, language: str | None, refresh: bool):
+                return (
+                    SimpleNamespace(
+                        id="piper-demo",
+                        name="Piper demo",
+                        language_code=language or "en-US",
+                        language_family="en",
+                        sample_rate=22050,
+                        quality="medium",
+                    ),
+                )
+
+        fake.VoiceAssetManager = FakeVoiceAssetManager
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    elif engine == "pocket":
+        fake = _fake_package(PACKAGES[engine])
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="pocket-demo",
+                sample_rate=24000,
+                metadata={
+                    "display_name": "Pocket demo",
+                    "language": "en-US",
+                    "profiles": {"int8": {}},
+                    "predefined_voice_names": ["speaker-a"],
+                    "default_voice": "speaker-a",
+                },
+            ),
+        )
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    else:
+        target = SynthesisTarget(
+            engine=engine,
+            id="demo-model",
+            display_name="Demo model",
+            languages=("en-us",),
+        )
+        helper_name = {
+            "kitten": "_catalog_targets",
+            "kokoro": "_discover_targets",
+            "supertonic": "_target_catalog",
+            "inflect": "_target_catalog",
+        }[engine]
+        monkeypatch.setattr(
+            adapter_module, helper_name, lambda *args, **kwargs: (target,)
+        )
+
+    targets = discover_targets(engine, language="en-US")
+    assert len(targets) == 1
+    assert targets[0].engine == engine
+    assert targets[0].id in {"piper-demo", "pocket-demo", "demo-model"}
+
+
+@pytest.mark.parametrize("engine", sorted(ENGINE_IDS))
+def test_all_adapters_resolve_requests_with_fake_optional_sdks(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    from importlib import import_module
+
+    from voicerender.engines.selection import EngineRequest
+
+    if engine in {"inflect", "supertonic"}:
+        fake = _fake_package(PACKAGES[engine])
+
+        class FakeConfig:
+            def __init__(self, **values) -> None:
+                defaults = {
+                    "speed": 1.0,
+                    "steps": 5,
+                    "seed": 0,
+                    "variation": 0.667,
+                    "mode": "off",
+                }
+                defaults.update(values)
+                self.__dict__.update(defaults)
+
+            def validated(self):
+                return self
+
+        fake.DEFAULT_MODEL = "demo-model"
+        fake.DEFAULT_VOICE = "demo-voice"
+        fake.GenerationConfig = FakeConfig
+        fake.SynthesisConfig = FakeConfig
+        fake.VoiceLevelConfig = FakeConfig
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+        adapter_module = import_module(ADAPTER_MODULES[engine])
+        monkeypatch.setattr(adapter_module, "_target_catalog", lambda **kwargs: ())
+
+    request = EngineRequest(
+        engine=engine,
+        target_id="demo-model",
+        language="en-US",
+        voice="demo-voice",
+        options={"speed": 2.0} if engine == "piper" else {},
+    )
+    selection, diagnostics = get_adapter(engine).resolve(request)
+
+    assert not diagnostics
+    assert selection.engine == engine
+    assert selection.target_id == "demo-model"
+    if engine == "piper":
+        assert selection.options["length_scale"] == 0.5

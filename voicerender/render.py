@@ -231,7 +231,7 @@ def render(
     rendered = reused = failed = 0
 
     with _exclusive_run(out):
-        prior: dict[str, Any] = {}
+        prior: dict[tuple[str | None, str | None, str | None], Any] = {}
         if resume and not force and manifest_path.is_file():
             try:
                 previous = json.loads(manifest_path.read_text(encoding="utf-8"))

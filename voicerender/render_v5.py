@@ -5,32 +5,56 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
+from dataclasses import asdict, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 import soundfile as sf
 
-from .engines import get_engine
-from .engines.base import SynthesisRequest
-from .errors import ArtifactError, PlanError, ProfileError
+from .capacity import CAPACITY_SCHEMA, CapacityContext
+from .engines import get_adapter, open_session, resolve_voice, synthesize
+from .engines.base import (
+    PronunciationSpan,
+    SpeechRequest,
+    SpeechToken,
+    SpeechWordTiming,
+)
+from .engines.selection import EngineRequest
+from .errors import (
+    ArtifactError,
+    EngineApiIncompatibleError,
+    EngineSelectionError,
+    EngineUnavailableError,
+    PlanError,
+    ProfileError,
+    RenderEventCallbackError,
+    UnsupportedPlanSemanticsError,
+)
+from .events import RenderEvent, RenderEventCallback, RenderEventKind
 from .inputs.utterplan_v5 import (
     RenderSelection,
+    SourceOperationKind,
     UtterPlanV5,
+    classify_source_operation,
     load_utterplan_v5,
     lower_directives,
     resolve_logical_voice,
     select_segments,
+    source_operation_record,
 )
 from .manifest import (
     EDGE_POLICY,
+    ENGINE_IDENTITY_SCHEMA,
     MANIFEST_FILENAME,
     MANIFEST_ID_ALGORITHM,
     MANIFEST_SCHEMA,
+    NUMERIC_COMPOSITION_SCHEMA,
     read_manifest,
     resolve_bundle_artifact,
     seal_manifest,
@@ -42,8 +66,23 @@ from .render import _exclusive_run, _identity
 from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
 
 V5_RENDER_ALGORITHM = "voicerender.utterplan-v5-direct.v1"
-CACHE_KEY_SCHEMA = "voicerender.acoustic-cache-key.v2"
-SYNTHESIS_SEMANTICS_SCHEMA = "voicerender.synthesis-semantics.v1"
+CACHE_KEY_SCHEMA = "voicerender.acoustic-cache-key.v3"
+SYNTHESIS_SEMANTICS_SCHEMA = "voicerender.synthesis-semantics.v2"
+
+
+def _emit_event(
+    callback: RenderEventCallback | None,
+    kind: RenderEventKind,
+    **fields: Any,
+) -> None:
+    if callback is None:
+        return
+    event = RenderEvent(kind=kind, **fields)
+    try:
+        callback(event)
+    except Exception as exc:
+        raise RenderEventCallbackError(kind.value, exc) from exc
+
 
 try:
     _VERSION = version("voicerender")
@@ -64,30 +103,112 @@ def _selection_data(selection: RenderSelection) -> dict[str, Any]:
     return data
 
 
-def _has_semantic_effect(value: Any) -> bool:
-    if value is None or value is False:
+def _valid_transition_duration(value: Any) -> bool:
+    if isinstance(value, bool):
         return False
-    if isinstance(value, str):
-        return bool(value)
-    if isinstance(value, Mapping):
-        return any(_has_semantic_effect(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return bool(value)
-    return True
+    try:
+        if isinstance(value, (int, float)):
+            seconds = float(value)
+        elif isinstance(value, str):
+            match = re.fullmatch(
+                r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(ms|s)?\s*",
+                value,
+                re.IGNORECASE,
+            )
+            if match is None:
+                return False
+            seconds = float(match.group(1))
+            if match.group(2) and match.group(2).lower() == "ms":
+                seconds /= 1000.0
+        else:
+            return False
+    except (OverflowError, ValueError):
+        return False
+    return math.isfinite(seconds) and seconds >= 0
 
 
-def _preflight_document_semantics(plan: UtterPlanV5) -> None:
+def _preflight_document_semantics(
+    plan: UtterPlanV5, profile: VoiceProfile
+) -> dict[str, Any]:
     document = (plan.metadata or {}).get("document", {})
     semantics = document.get("semantics", {}) if isinstance(document, Mapping) else {}
     if not isinstance(semantics, Mapping):
         raise PlanError("UtterPlan document.semantics must be a table")
-    unsupported = sorted(
-        key for key, value in semantics.items() if _has_semantic_effect(value)
+
+    unknown = set(semantics).difference(
+        {"voice_bindings", "prosody_transitions", "requires"}
     )
-    if unsupported:
-        raise PlanError(
-            "Unsupported UtterPlan document semantics: " + ", ".join(unsupported)
+    if unknown:
+        raise UnsupportedPlanSemanticsError(
+            "Unsupported UtterPlan document semantics: " + ", ".join(sorted(unknown)),
+            details={"semantics": sorted(unknown)},
         )
+
+    voice_bindings = semantics.get("voice_bindings", {})
+    if not isinstance(voice_bindings, Mapping):
+        raise PlanError("UtterPlan document.semantics.voice_bindings must be a table")
+    invalid_bindings = []
+    for role, binding in voice_bindings.items():
+        if role not in profile.roles or binding != "renderer-owned-choice":
+            invalid_bindings.append(str(role))
+    if invalid_bindings:
+        raise UnsupportedPlanSemanticsError(
+            "Unsupported UtterPlan voice binding metadata: "
+            + ", ".join(sorted(invalid_bindings)),
+            details={"roles": sorted(invalid_bindings)},
+        )
+
+    transitions = semantics.get("prosody_transitions", {})
+    if not isinstance(transitions, Mapping):
+        raise PlanError(
+            "UtterPlan document.semantics.prosody_transitions must be a table"
+        )
+    unknown_transition_fields = set(transitions).difference(
+        {"enabled", "same_voice_only", "rate", "pitch", "volume"}
+    )
+    if unknown_transition_fields:
+        raise UnsupportedPlanSemanticsError(
+            "Unsupported prosody transition fields: "
+            + ", ".join(sorted(unknown_transition_fields)),
+            details={"fields": sorted(unknown_transition_fields)},
+        )
+    for name in ("enabled", "same_voice_only"):
+        if name in transitions and not isinstance(transitions[name], bool):
+            raise PlanError(
+                f"UtterPlan document.semantics.prosody_transitions.{name} must be boolean"
+            )
+    for name in ("rate", "pitch", "volume"):
+        if (
+            name in transitions
+            and transitions[name] is not None
+            and not _valid_transition_duration(transitions[name])
+        ):
+            raise PlanError(
+                f"UtterPlan document.semantics.prosody_transitions.{name} "
+                "must be a finite non-negative duration"
+            )
+
+    requirements = semantics.get("requires", {})
+    if not isinstance(requirements, Mapping):
+        raise PlanError("UtterPlan document.semantics.requires must be a table")
+    unknown_requirements = set(requirements).difference({"extensions"})
+    if unknown_requirements:
+        raise UnsupportedPlanSemanticsError(
+            "Unsupported UtterPlan document requirements: "
+            + ", ".join(sorted(unknown_requirements)),
+            details={"requirements": sorted(unknown_requirements)},
+        )
+    extensions = requirements.get("extensions", [])
+    if not isinstance(extensions, (list, tuple)) or any(
+        not isinstance(item, str) or not item.strip() for item in extensions
+    ):
+        raise PlanError("UtterPlan required extensions must be non-empty strings")
+    if extensions:
+        raise UnsupportedPlanSemanticsError(
+            "Unsupported required UtterPlan extensions: " + ", ".join(extensions),
+            details={"extensions": list(extensions)},
+        )
+    return dict(semantics)
 
 
 def _safe_target(bundle: Path, relative_path: str) -> Path:
@@ -120,7 +241,9 @@ def _pcm16(path: Path) -> bool:
         return False
     try:
         with sf.SoundFile(path) as wav:
-            return wav.format == "WAV" and wav.channels == 1 and wav.subtype == "PCM_16"
+            return bool(
+                wav.format == "WAV" and wav.channels == 1 and wav.subtype == "PCM_16"
+            )
     except (OSError, RuntimeError):
         return False
 
@@ -168,11 +291,22 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
 
 
 def _timing_spans(
-    values: Iterable[Mapping[str, Any]], *, sample_rate: int, frames: int
+    values: Iterable[Mapping[str, Any] | SpeechWordTiming],
+    *,
+    sample_rate: int,
+    frames: int,
 ) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
     previous_end = 0
     for index, value in enumerate(values):
+        if isinstance(value, SpeechWordTiming):
+            value = {
+                "start_frame": value.start_sample,
+                "end_frame": value.end_sample,
+                "text": value.text,
+                "text_start": value.char_start,
+                "text_end": value.char_end,
+            }
         if not isinstance(value, Mapping):
             raise ArtifactError(f"Engine timing entry {index} must be an object")
         if "start_frame" in value and "end_frame" in value:
@@ -293,7 +427,7 @@ def _audio_record(relative_path: str, info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_manifest(path: Path, document: dict[str, Any]) -> None:
-    document["complete"] = bool(document.get("segments")) and all(
+    document["complete"] = all(
         entry.get("status") in {"rendered", "reused"}
         for entry in document.get("segments", [])
     )
@@ -330,6 +464,13 @@ def _entry_for(
         "language": segment.language,
         "resolved_voice": {
             "engine": identity["engine"],
+            "engine_api_version": identity["engine_api_version"],
+            "engine_api_expected_version": identity["engine_api_expected_version"],
+            "engine_api_contract": identity["engine_api_contract"],
+            "engine_identity": {
+                "schema": ENGINE_IDENTITY_SCHEMA,
+                "sha256": "sha256:" + digest(identity["engine_identity"]),
+            },
             "model": _model_label(identity),
             "model_asset_sha256": (
                 "sha256:" + identity["model_asset_sha256"]
@@ -349,6 +490,7 @@ def _entry_for(
         "synthesis_semantics_sha256": semantics_hash,
         "acoustic_cache_key": "sha256:" + key,
         "semantic_lowering": {
+            "composition_schema": NUMERIC_COMPOSITION_SCHEMA,
             "native_directives": _directive_items(native),
             "composition_directives": _directive_items(composition),
             "unsupported_directives": [],
@@ -374,19 +516,107 @@ def _entry_for(
     }
 
 
-def render_utterplan_v5(
+def _resolve_segment_selection(
+    binding: Any,
+    profile: VoiceProfile,
+    language: str,
+) -> Any:
+    options = dict(profile.backend_defaults.get(binding.engine, {}))
+    options.update(binding.options)
+    if binding.reference_audio is not None:
+        reference = Path(binding.reference_audio).expanduser().resolve()
+        if not reference.is_file():
+            raise ProfileError(f"Reference audio is missing: {reference}")
+        options["voice_source"] = {
+            "kind": "reference",
+            "value": str(reference),
+            "sha256": file_hash(reference),
+        }
+    request = EngineRequest(
+        engine=binding.engine,
+        target_id=binding.target_id,
+        language=language,
+        voice=binding.voice,
+        speaker=binding.speaker,
+        options=options,
+    )
+    selection, diagnostics = resolve_voice(request)
+    errors = [
+        diagnostic
+        for diagnostic in diagnostics
+        if getattr(diagnostic, "severity", None) == "error"
+    ]
+    if errors:
+        raise EngineSelectionError(
+            "; ".join(f"{item.code}: {item.message}" for item in errors),
+            engine=binding.engine,
+            target_id=selection.target_id,
+            details={"diagnostics": [item.as_dict() for item in errors]},
+        )
+    if binding.model_revision is not None:
+        selection = replace(
+            selection,
+            metadata={
+                **dict(selection.metadata),
+                "model_revision": binding.model_revision,
+            },
+        )
+    return selection
+
+
+def _speech_request(segment: Any, selection: Any) -> SpeechRequest:
+    tokens = tuple(
+        SpeechToken(
+            start=int(token["start"]),
+            end=int(token["end"]),
+            text=segment.text[int(token["start"]) : int(token["end"])],
+            pos=token.get("pos"),
+            tag=token.get("tag"),
+            lemma=token.get("lemma"),
+            morph=token.get("morph"),
+            language=segment.language,
+        )
+        for token in segment.tokens
+    )
+    pronunciation = segment.directives.get("pronunciation")
+    overrides: tuple[PronunciationSpan, ...] = ()
+    if isinstance(pronunciation, Mapping):
+        overrides = (
+            PronunciationSpan(
+                start=0,
+                end=len(segment.text),
+                phonemes=pronunciation["phonemes"],
+                language=segment.language,
+                alphabet=pronunciation.get("alphabet", "ipa"),
+            ),
+        )
+    return SpeechRequest(
+        id=segment.source.locator,
+        text=segment.text,
+        language=segment.language,
+        voice=selection.voice,
+        speaker=selection.speaker,
+        pronunciation_overrides=overrides,
+        tokens=tokens,
+        options=selection.options,
+    )
+
+
+def _capacity_context(request: SpeechRequest) -> CapacityContext:
+    return CapacityContext(
+        linguistic_token_ranges=tuple(
+            (token.start, token.end) for token in request.tokens
+        ),
+        planned_semantics=True,
+    )
+
+
+def validate_utterplan(
     plan: UtterPlanV5 | str | Path,
     *,
     profile: VoiceProfile | str | Path,
-    output_dir: str | Path,
-    cache_dir: str | Path | None = None,
-    take: int | None = None,
-    select: Iterable[str] | str | None = None,
-    resume: bool = True,
-    force: bool = False,
-    fail_fast: bool = True,
-) -> RenderResult:
-    """Synthesize source-addressed v5 segments without importing AudioCompose."""
+) -> dict[str, Any]:
+    """Run structural, profile, engine, semantic, and capacity preflight only."""
     parsed = load_utterplan_v5(plan) if isinstance(plan, (str, Path)) else plan
     loaded_profile = (
         VoiceProfile.load(profile) if isinstance(profile, (str, Path)) else profile
@@ -395,8 +625,132 @@ def render_utterplan_v5(
         raise PlanError("plan must be an UtterPlanV5 value or path")
     if not isinstance(loaded_profile, VoiceProfile):
         raise ProfileError("profile must be a VoiceProfile value or path")
-    _preflight_document_semantics(parsed)
-    selection = select_segments(parsed, take=take, select=select)
+    semantics = _preflight_document_semantics(parsed, loaded_profile)
+    selection = select_segments(parsed)
+    unsupported = [
+        segment.source.locator
+        for segment in selection.segments
+        if classify_source_operation(segment) is SourceOperationKind.UNSUPPORTED
+    ]
+    if unsupported:
+        raise PlanError(
+            "Unsupported/non-renderable UtterPlan source operation(s): "
+            + ", ".join(unsupported)
+        )
+
+    engines: dict[str, dict[str, Any]] = {}
+    for segment in selection.speech_segments:
+        role = resolve_logical_voice(segment, loaded_profile)
+        binding = loaded_profile.roles[role]
+        adapter = get_adapter(binding.engine)
+        probe = adapter.probe_api()
+        if not probe.compatible:
+            details: dict[str, object] = {"probe": asdict(probe)}
+            if probe.status == "package_missing":
+                raise EngineUnavailableError(
+                    f"Engine {adapter.id!r} runtime package is unavailable",
+                    engine=adapter.id,
+                    native_error_type=probe.error_type,
+                    details=details,
+                )
+            raise EngineApiIncompatibleError(
+                f"Engine {adapter.id!r} public synthesis API is incompatible",
+                engine=adapter.id,
+                engine_version=probe.distribution_version,
+                native_error_type=probe.error_type,
+                details=details,
+            )
+        engine_selection = _resolve_segment_selection(
+            binding, loaded_profile, segment.language
+        )
+        capabilities = adapter.capabilities()
+        lower_directives(segment, capabilities)
+        request = _speech_request(segment, engine_selection)
+        adapter.canonical_synthesis_identity(engine_selection)
+        engines[adapter.id] = {
+            "package": adapter.package_name,
+            "version": adapter.version() or probe.distribution_version,
+            "api_version": probe.api_version,
+            "capacity_measurement": capabilities.supports_request_measurement,
+        }
+        if not request.text.strip():
+            raise PlanError(f"Speech operation {segment.source.locator} has empty text")
+
+    return {
+        "valid": True,
+        "plan_id": parsed.plan_id,
+        "source_file_sha256": "sha256:" + parsed.file_sha256,
+        "selection": _selection_data(selection),
+        "source_operations": [
+            source_operation_record(segment) for segment in selection.segments
+        ],
+        "engines": [{"id": engine, **engines[engine]} for engine in sorted(engines)],
+        "document_semantics": semantics,
+    }
+
+
+def render_utterplan_v5(
+    plan: UtterPlanV5 | str | Path,
+    *,
+    profile: VoiceProfile | str | Path,
+    output_dir: str | Path,
+    cache_dir: str | Path | None = None,
+    selection: RenderSelection | None = None,
+    take: int | None = None,
+    select: Iterable[str] | str | None = None,
+    resume: bool = True,
+    force: bool = False,
+    fail_fast: bool = True,
+    on_event: RenderEventCallback | None = None,
+) -> RenderResult:
+    """Synthesize source-addressed UtterPlan v5 speech artifacts."""
+    parsed = load_utterplan_v5(plan) if isinstance(plan, (str, Path)) else plan
+    loaded_profile = (
+        VoiceProfile.load(profile) if isinstance(profile, (str, Path)) else profile
+    )
+    if not isinstance(parsed, UtterPlanV5):
+        raise PlanError("plan must be an UtterPlanV5 value or path")
+    if not isinstance(loaded_profile, VoiceProfile):
+        raise ProfileError("profile must be a VoiceProfile value or path")
+    _emit_event(
+        on_event,
+        RenderEventKind.PREFLIGHT_STARTED,
+        plan_id=parsed.plan_id,
+    )
+    document_semantics = _preflight_document_semantics(parsed, loaded_profile)
+    provided_selection = selection
+    if provided_selection is None:
+        selection = select_segments(parsed, take=take, select=select)
+    else:
+        if take is not None or select is not None:
+            raise PlanError("Use selection or take/select, not both")
+        if not isinstance(provided_selection, RenderSelection):
+            raise PlanError("selection must be a RenderSelection value")
+        if provided_selection.kind == "all":
+            expected_selection = select_segments(parsed)
+        elif provided_selection.kind == "take":
+            expected_selection = select_segments(parsed, take=provided_selection.take)
+        elif provided_selection.kind == "locators":
+            expected_selection = select_segments(
+                parsed, select=provided_selection.locators
+            )
+        else:
+            raise PlanError(
+                f"Unknown render selection kind: {provided_selection.kind!r}"
+            )
+        if provided_selection != expected_selection:
+            raise PlanError("selection does not match the supplied UtterPlan v5")
+        selection = provided_selection
+    unsupported = [
+        segment.source.locator
+        for segment in selection.segments
+        if classify_source_operation(segment) is SourceOperationKind.UNSUPPORTED
+    ]
+    if unsupported:
+        raise PlanError(
+            "Unsupported/non-renderable UtterPlan source operation(s): "
+            + ", ".join(unsupported)
+        )
     out = Path(output_dir).expanduser().resolve()
     cache = (
         Path(cache_dir).expanduser().resolve()
@@ -408,32 +762,90 @@ def render_utterplan_v5(
 
     prepared: list[dict[str, Any]] = []
     identities: dict[str, dict[str, Any]] = {}
-    for segment in selection.segments:
+    for segment in selection.speech_segments:
         role = resolve_logical_voice(segment, loaded_profile)
         binding = loaded_profile.roles[role]
-        adapter = get_engine(binding.engine)
-        adapter.validate(binding)
-        identity = identities.get(role)
-        if identity is None:
-            identity = _identity(
-                binding,
-                engine_version=adapter.version(),
-                algorithm=V5_RENDER_ALGORITHM,
+        adapter = get_adapter(binding.engine)
+        probe = adapter.probe_api()
+        if not probe.compatible:
+            probe_details: dict[str, object] = {"probe": asdict(probe)}
+            if probe.status == "package_missing":
+                raise EngineUnavailableError(
+                    f"Engine {adapter.id!r} runtime package is unavailable",
+                    engine=adapter.id,
+                    native_error_type=probe.error_type,
+                    details=probe_details,
+                )
+            raise EngineApiIncompatibleError(
+                f"Engine {adapter.id!r} public synthesis API is incompatible",
+                engine=adapter.id,
+                engine_version=probe.distribution_version,
+                native_error_type=probe.error_type,
+                details=probe_details,
             )
-            identities[role] = identity
-        native, composition = lower_directives(segment, adapter.capabilities)
-        projection = {
+        engine_selection = _resolve_segment_selection(
+            binding, loaded_profile, segment.language
+        )
+        engine_version = adapter.version() or probe.distribution_version
+        identity = _identity(
+            binding,
+            engine_version=engine_version,
+            algorithm=V5_RENDER_ALGORITHM,
+        )
+        identity.update(
+            {
+                "engine": adapter.id,
+                "engine_version": engine_version,
+                "target_id": engine_selection.target_id,
+                "model_revision": (
+                    engine_selection.metadata.get("model_revision")
+                    or engine_selection.metadata.get("source_revision")
+                    or binding.model_revision
+                ),
+                "voice": engine_selection.voice,
+                "speaker": engine_selection.speaker,
+                "engine_api_version": probe.api_version,
+                "engine_api_expected_version": probe.expected_api_version,
+                "engine_api_contract": probe.contract_source,
+                "engine_identity": dict(
+                    adapter.canonical_synthesis_identity(engine_selection)
+                ),
+            }
+        )
+        identities.setdefault(role, identity)
+        capabilities = adapter.capabilities()
+        native, composition = lower_directives(segment, capabilities)
+        speech_request = _speech_request(segment, engine_selection)
+        request_semantics = {
+            "tokens": [asdict(token) for token in speech_request.tokens],
+            "pronunciation_overrides": [
+                asdict(span) for span in speech_request.pronunciation_overrides
+            ],
+            "whole_request_phonemes": speech_request.whole_request_phonemes,
+        }
+        semantics_projection = {
             "schema": SYNTHESIS_SEMANTICS_SCHEMA,
             "text": segment.text,
             "language": segment.language,
             "native_directives": native,
+            "composition_schema": NUMERIC_COMPOSITION_SCHEMA,
+            "composition_directives": composition,
+            "request": request_semantics,
         }
-        semantics_hash = _versioned_hash(projection)
+        semantics_hash = _versioned_hash(semantics_projection)
+        acoustic_projection = {
+            "schema": "voicerender.acoustic-request.v1",
+            "text": speech_request.text,
+            "language": speech_request.language,
+            "native_directives": native,
+            "request": request_semantics,
+        }
         key = digest(
             {
                 "schema": CACHE_KEY_SCHEMA,
                 "binding": identity,
-                "synthesis_semantics": projection,
+                "acoustic_request": acoustic_projection,
+                "capacity_schema": CAPACITY_SCHEMA,
                 "edge_policy": EDGE_POLICY,
                 "output": {"format": "WAV", "encoding": "PCM_16"},
             }
@@ -444,6 +856,8 @@ def render_utterplan_v5(
                 "role": role,
                 "binding": binding,
                 "adapter": adapter,
+                "selection": engine_selection,
+                "speech_request": speech_request,
                 "identity": identity,
                 "native": native,
                 "composition": composition,
@@ -451,6 +865,13 @@ def render_utterplan_v5(
                 "semantics_hash": semantics_hash,
             }
         )
+
+    _emit_event(
+        on_event,
+        RenderEventKind.PREFLIGHT_FINISHED,
+        plan_id=parsed.plan_id,
+        selected_count=len(selection.speech_segments),
+    )
 
     profile_identity = _versioned_hash(
         {role: identities[role] for role in sorted(identities)}
@@ -488,14 +909,19 @@ def render_utterplan_v5(
             "effective_profile_sha256": profile_identity,
         },
         "selection": selection_data,
+        "source_operations": [
+            source_operation_record(segment) for segment in selection.segments
+        ],
         "edge_policy": EDGE_POLICY,
-        "complete": False,
+        "complete": not prepared,
         "segments": [
             {key: value for key, value in entry.items() if key != "_relative_path"}
             for entry in entries
         ],
     }
     manifest_path = out / MANIFEST_FILENAME
+    if document_semantics:
+        document["document_semantics"] = document_semantics
     rendered = reused = failed = 0
     with _exclusive_run(out):
         if manifest_path.is_symlink():
@@ -522,10 +948,20 @@ def render_utterplan_v5(
                 segment = item["segment"]
                 relative_path = entry.pop("_relative_path")
                 entry["audio"] = None
-                target = _safe_target(out, relative_path)
                 key = item["key"]
                 cache_wav = cache / f"{key}.wav"
+                _emit_event(
+                    on_event,
+                    RenderEventKind.SEGMENT_STARTED,
+                    plan_id=parsed.plan_id,
+                    locator=segment.source.locator,
+                    role=item["role"],
+                    engine=item["identity"]["engine"],
+                    status="pending",
+                )
+                completion_event: RenderEventKind | None = None
                 try:
+                    target = _safe_target(out, relative_path)
                     _assert_reference_unchanged(item["binding"], item["identity"])
                     old = prior.get((segment.source.locator, "sha256:" + key))
                     if not force and old is not None:
@@ -550,6 +986,7 @@ def render_utterplan_v5(
                             timing=old["timing"],
                         )
                         reused += 1
+                        completion_event = RenderEventKind.SEGMENT_REUSED
                     else:
                         cached = None if force else _read_cache(cache, key)
                         if cached is not None:
@@ -567,31 +1004,37 @@ def render_utterplan_v5(
                                 timing=timing,
                             )
                             reused += 1
+                            completion_event = RenderEventKind.SEGMENT_REUSED
                         else:
                             identity_key = digest(item["identity"])
                             if identity_key not in sessions:
                                 _assert_reference_unchanged(
                                     item["binding"], item["identity"]
                                 )
+                                _emit_event(
+                                    on_event,
+                                    RenderEventKind.ENGINE_OPEN_STARTED,
+                                    plan_id=parsed.plan_id,
+                                    role=item["role"],
+                                    engine=item["identity"]["engine"],
+                                )
                                 sessions[identity_key] = opened.enter_context(
-                                    item["adapter"].open(item["binding"])
+                                    open_session(item["selection"])
                                 )
-                            request = SynthesisRequest(
-                                request_id=segment.source.locator,
-                                text=segment.text,
-                                language=segment.language,
-                                directives=item["native"],
-                            )
+                                _emit_event(
+                                    on_event,
+                                    RenderEventKind.ENGINE_OPEN_FINISHED,
+                                    plan_id=parsed.plan_id,
+                                    role=item["role"],
+                                    engine=item["identity"]["engine"],
+                                )
+                            request = item["speech_request"]
                             session = sessions[identity_key]
-                            capabilities = item["adapter"].capabilities
-                            if capabilities.supports_synthesis_request:
-                                result = session.synthesize_request(request)
-                            else:
-                                result = session.synthesize(
-                                    request_id=request.request_id,
-                                    text=request.text,
-                                    language=request.language,
-                                )
+                            result = synthesize(
+                                session,
+                                request,
+                                capacity=_capacity_context(request),
+                            )
                             info = atomic_wav(
                                 cache_wav, result.audio, result.sample_rate
                             )
@@ -624,6 +1067,9 @@ def render_utterplan_v5(
                                 timing=timing,
                             )
                             rendered += 1
+                            completion_event = RenderEventKind.SEGMENT_RENDERED
+                except RenderEventCallbackError:
+                    raise
                 except Exception as exc:
                     entry.update(
                         status="failed",
@@ -637,14 +1083,42 @@ def render_utterplan_v5(
                         if key_name != "_relative_path"
                     }
                     _write_manifest(manifest_path, document)
+                    _emit_event(
+                        on_event,
+                        RenderEventKind.SEGMENT_FAILED,
+                        plan_id=parsed.plan_id,
+                        locator=segment.source.locator,
+                        role=item["role"],
+                        engine=item["identity"]["engine"],
+                        status="failed",
+                        error_type=type(exc).__name__,
+                        error_code=getattr(exc, "code", None),
+                    )
                     if fail_fast:
                         raise
+                    continue
                 document["segments"][index] = {
                     key_name: value
                     for key_name, value in entry.items()
                     if key_name != "_relative_path"
                 }
                 _write_manifest(manifest_path, document)
+                if completion_event is not None:
+                    _emit_event(
+                        on_event,
+                        completion_event,
+                        plan_id=parsed.plan_id,
+                        locator=segment.source.locator,
+                        role=item["role"],
+                        engine=item["identity"]["engine"],
+                        status=(
+                            "reused"
+                            if completion_event is RenderEventKind.SEGMENT_REUSED
+                            else "rendered"
+                        ),
+                        rendered_count=rendered,
+                        reused_count=reused,
+                    )
         verification_failure: ArtifactError | None = None
         for entry in document["segments"]:
             if entry["status"] not in {"rendered", "reused"}:
@@ -659,8 +1133,29 @@ def render_utterplan_v5(
                 )
                 failed += 1
                 verification_failure = exc
+                _emit_event(
+                    on_event,
+                    RenderEventKind.SEGMENT_FAILED,
+                    plan_id=parsed.plan_id,
+                    locator=entry["source"]["locator"],
+                    role=entry["logical_voice"],
+                    engine=entry["resolved_voice"]["engine"],
+                    status="failed",
+                    error_type=type(exc).__name__,
+                    error_code=getattr(exc, "code", None),
+                )
         document["complete"] = failed == 0
         _write_manifest(manifest_path, document)
+        _emit_event(
+            on_event,
+            RenderEventKind.RENDER_COMPLETED,
+            plan_id=parsed.plan_id,
+            status="completed" if failed == 0 else "failed",
+            rendered_count=rendered,
+            reused_count=reused,
+            failed_count=failed,
+            selected_count=len(selection.speech_segments),
+        )
         if verification_failure is not None and fail_fast:
             raise verification_failure
     return RenderResult(
@@ -668,5 +1163,31 @@ def render_utterplan_v5(
         rendered_count=rendered,
         reused_count=reused,
         failed_count=failed,
-        selected_count=len(selection.segments),
+        selected_count=len(selection.speech_segments),
+    )
+
+
+def render_utterplan(
+    plan: UtterPlanV5 | str | Path,
+    *,
+    profile: VoiceProfile | str | Path,
+    output_dir: str | Path,
+    cache_dir: str | Path | None = None,
+    selection: RenderSelection | None = None,
+    resume: bool = True,
+    force: bool = False,
+    fail_fast: bool = True,
+    on_event: RenderEventCallback | None = None,
+) -> RenderResult:
+    """Render a selected UtterPlan v5 using the frozen standalone API."""
+    return render_utterplan_v5(
+        plan,
+        profile=profile,
+        output_dir=output_dir,
+        cache_dir=cache_dir,
+        selection=selection,
+        resume=resume,
+        force=force,
+        fail_fast=fail_fast,
+        on_event=on_event,
     )

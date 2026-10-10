@@ -7,18 +7,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 
 try:
     import tomllib
 except ImportError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..errors import PlanError, ProfileError
+from ..errors import (
+    PlanError,
+    ProfileError,
+    UnsupportedSynthesisFeatureError,
+)
 from ..models import RenderSegment, SourceRef, VoiceProfile
 
 PLAN_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -385,6 +391,37 @@ class UtterPlanV5:
         return "sha256:" + self.file_sha256
 
 
+class SourceOperationKind(str, Enum):
+    SPEECH = "speech"
+    EXTERNAL_AUDIO = "external_audio"
+    UNSUPPORTED = "unsupported"
+
+
+def classify_source_operation(segment: RenderSegment) -> SourceOperationKind:
+    """Classify one source segment without resolving media or opening an engine."""
+    if "audio" in segment.directives:
+        return SourceOperationKind.EXTERNAL_AUDIO
+    if segment.text.strip():
+        return SourceOperationKind.SPEECH
+    return SourceOperationKind.UNSUPPORTED
+
+
+def source_operation_record(segment: RenderSegment) -> dict[str, Any]:
+    """Return the stable manifest record for a selected source operation."""
+    kind = classify_source_operation(segment)
+    source = {
+        "locator": segment.source.locator,
+        "flow_index": segment.source.flow_index,
+        "segment_index": segment.source.segment_index,
+        "flow_hash": segment.source.flow_hash,
+        "semantic_segment_hash": segment.semantic_segment_hash,
+    }
+    result: dict[str, Any] = {"source": source, "kind": kind.value}
+    if kind is SourceOperationKind.EXTERNAL_AUDIO:
+        result["audio_directive"] = _plain(segment.directives["audio"])
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class RenderSelection:
     kind: str
@@ -393,11 +430,21 @@ class RenderSelection:
     locators: tuple[str, ...] = ()
     is_full_plan: bool = False
 
+    @property
+    def speech_segments(self) -> tuple[RenderSegment, ...]:
+        return tuple(
+            segment
+            for segment in self.segments
+            if classify_source_operation(segment) is SourceOperationKind.SPEECH
+        )
+
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "kind": self.kind,
             "order": "source",
-            "selected_count": len(self.segments),
+            "selected_count": len(self.speech_segments),
+            "selected_source_count": len(self.segments),
+            "selected_speech_count": len(self.speech_segments),
             "is_full_plan": self.is_full_plan,
         }
         if self.take is not None:
@@ -454,7 +501,9 @@ def _parse(
             unsupported = set(raw_segment).difference(SEGMENT_KEYS)
             if unsupported:
                 raise PlanError(f"Unknown {where} fields: {sorted(unsupported)}")
-            text = _nonempty(raw_segment.get("text"), f"{where}.text")
+            text = raw_segment.get("text")
+            if not isinstance(text, str):
+                raise PlanError(f"{where}.text must be a string")
             segment_language = _nonempty(
                 raw_segment.get("language", language), f"{where}.language"
             )
@@ -522,7 +571,7 @@ def _parse(
         flows.append(FlowUnit(flow_index, flow_hash, tuple(segments)))
 
     if not flows or not any(flow.segments for flow in flows):
-        raise PlanError("UtterPlan v5 must contain at least one speech segment")
+        raise PlanError("UtterPlan v5 must contain at least one source segment")
     document_data = data.get("document", {})
     if not isinstance(document_data, Mapping):
         raise PlanError("plan.document must be a table")
@@ -640,7 +689,7 @@ def select_segments(
             is_full_plan=len(selected) == len(all_segments),
         )
     if not selection.segments:
-        raise PlanError("No speech segments selected")
+        raise PlanError("No source segments selected")
     return selection
 
 
@@ -661,17 +710,136 @@ def resolve_logical_voice(segment: RenderSegment, profile: VoiceProfile) -> str:
     return role
 
 
+_SSMD_RATE_FACTORS = {
+    "very-slow": 0.65,
+    "slow": 0.80,
+    "moderate": 0.90,
+    "normal": 1.00,
+    "brisk": 1.10,
+    "fast": 1.25,
+    "very-fast": 1.50,
+}
+_SSMD_PITCH_PERCENTAGES = {
+    "very-low": -20.0,
+    "low": -12.0,
+    "moderate-low": -6.0,
+    "normal": 0.0,
+    "moderate-high": 6.0,
+    "high": 12.0,
+    "very-high": 20.0,
+}
+_SSMD_VOLUME_DB = {
+    "silent": -60.0,
+    "x-soft": -12.0,
+    "soft": -6.0,
+    "medium": 0.0,
+    "loud": 6.0,
+    "x-loud": 12.0,
+    "0": -60.0,
+    "1": -12.0,
+    "2": -6.0,
+    "3": 0.0,
+    "4": 6.0,
+    "5": 12.0,
+}
+
+
+def _ssmd_rate_factor(value: Any) -> float:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        natural = _SSMD_RATE_FACTORS.get(normalized)
+        if natural is not None:
+            return natural
+        match = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)%", normalized)
+        if match is not None:
+            percentage = float(match.group(2))
+            sign = match.group(1)
+            factor = (
+                1.0 + percentage / 100.0
+                if sign == "+"
+                else 1.0 - percentage / 100.0
+                if sign == "-"
+                else percentage / 100.0
+            )
+            if math.isfinite(factor) and factor > 0:
+                return factor
+    raise ValueError(f"unsupported rate value: {value!r}")
+
+
+def _ssmd_pitch_semitones(value: Any) -> float:
+    percentage: float | None = None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        percentage = _SSMD_PITCH_PERCENTAGES.get(normalized)
+        if percentage is None:
+            match = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)%", normalized)
+            if match is not None:
+                magnitude = float(match.group(2))
+                percentage = -magnitude if match.group(1) == "-" else magnitude
+    if percentage is not None:
+        ratio = 1.0 + percentage / 100.0
+        if math.isfinite(ratio) and ratio > 0:
+            return 12.0 * math.log2(ratio)
+    raise ValueError(f"unsupported pitch value: {value!r}")
+
+
+def _ssmd_volume_db(value: Any) -> float:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _SSMD_VOLUME_DB:
+            return _SSMD_VOLUME_DB[normalized]
+        match = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)db", normalized)
+        if match is not None:
+            decibels = float(match.group(1))
+            if math.isfinite(decibels):
+                return decibels
+    raise ValueError(f"unsupported volume value: {value!r}")
+
+
+def _unsupported_feature(
+    feature: str,
+    value: Any,
+    segment: RenderSegment,
+    capabilities: Any,
+) -> None:
+    raise UnsupportedSynthesisFeatureError(
+        f"Unsupported UtterPlan semantic {feature!r} at {segment.source.locator}",
+        engine=getattr(capabilities, "id", None),
+        request_id=segment.source.locator,
+        details={"feature": feature, "value": repr(value)},
+    )
+
+
+def _lower_prosody(
+    value: Mapping[str, Any], segment: RenderSegment, capabilities: Any
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    converters = {
+        "rate": ("tempo", "factor", _ssmd_rate_factor),
+        "pitch": ("pitch_shift", "semitones", _ssmd_pitch_semitones),
+        "volume": ("gain", "db", _ssmd_volume_db),
+    }
+    for field, (operation, amount_name, convert) in converters.items():
+        authored = value.get(field)
+        if authored is None:
+            continue
+        try:
+            amount = convert(authored)
+        except (TypeError, ValueError, OverflowError):
+            _unsupported_feature(f"prosody.{field}", authored, segment, capabilities)
+        output[operation] = {amount_name: amount}
+    return output
+
+
 def lower_directives(
     segment: RenderSegment, capabilities: Any
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Classify segment directives or reject semantics the selected backend cannot honor."""
-    native_names = frozenset(getattr(capabilities, "native_semantics", ()))
-    composition_names = frozenset(getattr(capabilities, "composition_semantics", ()))
+    """Lower supported request semantics or fail before engine inference."""
     native: dict[str, Any] = {}
     composition: dict[str, Any] = {}
     unsupported: list[str] = []
     for name, value in segment.directives.items():
-        if name == "voice":  # logical role selection was already resolved separately
+        if name == "voice":  # Logical role routing is resolved before this phase.
             if isinstance(value, Mapping):
                 unsupported.extend(
                     f"voice.{key}" for key in set(value).difference({"reference"})
@@ -679,15 +847,51 @@ def lower_directives(
             elif not isinstance(value, str):
                 unsupported.append("voice")
             continue
-        if name in native_names:
-            native[name] = _plain(value)
-        elif name in composition_names:
-            composition[name] = _plain(value)
+        if name == "pronunciation":
+            alphabet = (
+                value.get("alphabet", "ipa") if isinstance(value, Mapping) else None
+            )
+            supported_alphabets = frozenset(
+                getattr(capabilities, "pronunciation_alphabets", ())
+            )
+            if (
+                getattr(capabilities, "supports_pronunciation_overrides", False)
+                and alphabet in supported_alphabets
+            ):
+                native[name] = _plain(value)
+            else:
+                unsupported.append(name)
+            continue
+        if name == "prosody":
+            composition.update(_lower_prosody(value, segment, capabilities))
+            continue
+        if name == "extensions":
+            # v0.1 has no registered extension handlers; never imply these were honored.
+            unsupported.extend(
+                f"extensions.{item.get('name', 'unknown')}"
+                for item in value
+                if isinstance(item, Mapping)
+            )
+            continue
+        unsupported.append(name)
+
+    if segment.tokens:
+        if getattr(capabilities, "supports_linguistic_tokens", False):
+            native["linguistic_tokens"] = [
+                {
+                    **dict(_plain(token)),
+                    "text": segment.text[token["start"] : token["end"]],
+                }
+                for token in segment.tokens
+            ]
         else:
-            unsupported.append(name)
+            unsupported.append("tokens")
     if unsupported:
-        raise PlanError(
-            f"Unsupported UtterPlan directives at {segment.source.locator}: "
-            f"{', '.join(sorted(unsupported))}"
+        raise UnsupportedSynthesisFeatureError(
+            f"Unsupported UtterPlan semantics at {segment.source.locator}: "
+            f"{', '.join(sorted(unsupported))}",
+            engine=getattr(capabilities, "id", None),
+            request_id=segment.source.locator,
+            details={"features": sorted(unsupported)},
         )
     return native, composition

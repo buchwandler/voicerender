@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -20,9 +19,14 @@ from voicerender import (
     render_plan,
 )
 from voicerender.cli import main
-from voicerender.engines import get_engine, list_engines, register_engine
-from voicerender.engines.base import EngineCapabilities, SynthesisOutput
-from voicerender.engines import _ADAPTERS
+from voicerender.engines import _legacy_adapters
+from voicerender.engines.api_probe import EngineApiProbe
+from voicerender.engines.base import (
+    EngineCapabilities,
+    EngineSelection,
+    SynthesisOutput,
+)
+from voicerender.engines.registry import _ADAPTERS as _REQUEST_ADAPTERS
 
 
 class FakeEngine:
@@ -61,7 +65,7 @@ class FakeEngine:
 @pytest.fixture
 def mock_engine(monkeypatch):
     adapter = FakeEngine()
-    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+    monkeypatch.setitem(_legacy_adapters, adapter.id, adapter)
     return adapter
 
 
@@ -146,7 +150,7 @@ def test_interruption_is_resumable(tmp_path, mock_engine):
 
 def test_corrupt_cache_is_not_reused(tmp_path, mock_engine):
     a = tmp_path / "a"
-    first = render(segments(), profile=profile(), output_dir=a, take=1)
+    render(segments(), profile=profile(), output_dir=a, take=1)
     cache = tmp_path / ".voicerender-cache"
     key = read_manifest(a)["segments"][0]["synthesis_key"]
     (cache / f"{key}.wav").write_bytes(b"bad")
@@ -211,19 +215,50 @@ def test_selection_validation(tmp_path, mock_engine):
         )
 
 
-def test_profile_validation_and_load(tmp_path):
+def test_profile_validation_and_load(tmp_path, monkeypatch):
     path = tmp_path / "p.toml"
     path.write_text(
         'schema = "voicerender.voice-profile.v1"\nname = "p"\n[roles.narrator]\nengine = "piper"\ntarget_id = "amy"\n'
     )
     loaded = VoiceProfile.load(path)
     assert loaded.roles["narrator"].target_id == "amy"
+
+    class SelectionAdapter:
+        def probe_api(self):
+            return EngineApiProbe(
+                engine="piper",
+                package="pipersynth",
+                compatible=True,
+                status="ready",
+                expected_api_version=1,
+                api_version=1,
+                contract_source="explicit",
+            )
+
+        def resolve(self, request):
+            return (
+                EngineSelection(
+                    engine=request.engine,
+                    target_id=request.target_id,
+                    language=request.language,
+                    voice=request.voice,
+                    speaker=request.speaker,
+                    options=request.options,
+                ),
+                (),
+            )
+
+        def validate_selection(self, selection):
+            return ()
+
+    monkeypatch.setitem(_REQUEST_ADAPTERS, "piper", SelectionAdapter())
     assert main(["profiles", "validate", str(path)]) == 0
     path.write_text(
         'schema = "voicerender.voice-profile.v1"\nname = "p"\n[roles.narrator]\nengine = "piper"\ntarget_id = "amy"\nreference_audio = "reference.wav"\n'
     )
-    with pytest.raises(ProfileError, match="does not support"):
-        VoiceProfile.load(path)
+    assert VoiceProfile.load(path).roles["narrator"].reference_audio == (
+        tmp_path / "reference.wav"
+    )
 
 
 def test_plan_load_and_cli_inspect(tmp_path, mock_engine):

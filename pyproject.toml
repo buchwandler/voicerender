@@ -18,11 +18,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+kitten = ["kittensynth[cpu]>=0.1.1,<0.2"]
+kokoro = ["pykokoro>=0.10.2,<0.11"]
 piper = ["pipersynth>=0.2.1,<0.3"]
 pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
-dev = ["pytest>=8", "build>=1.2", "setuptools-scm>=9.2"]
-audiocompose = ["audiocompose>=0.2"]
-
+supertonic = ["supertonicsynth[cpu]>=0.1.2,<0.2"]
+dev = [
+  "build>=1.2",
+  "mypy>=1.13",
+  "pytest>=8",
+  "ruff>=0.12",
+  "setuptools-scm>=9.2",
+  "twine>=6",
+]
 [project.scripts]
 voicerender = "voicerender.cli:main"
 
@@ -35,8 +44,31 @@ exclude = ["tests*", "examples*"]
 voicerender = ["py.typed", "schemas/*.json"]
 
 [tool.setuptools_scm]
-fallback_version = "0.1.0"
+fallback_version = "0+unknown"
 version_file = "voicerender/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+
+[tool.ruff]
+extend-exclude = ["02_audiocompose_voicerender_manual_pipeline_implementation_brief.md"]
+
+[tool.mypy]
+# Current NumPy stubs use type statements introduced in Python 3.12.
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = [
+  "inflectsynth",
+  "kittensynth",
+  "pipersynth",
+  "pocketsynth",
+  "pykokoro",
+  "soundfile",
+  "supertonicsynth",
+  "tomli",
+  "tomllib",
+]
+ignore_missing_imports = true

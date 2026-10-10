@@ -115,6 +115,8 @@ def test_selection_uses_flat_source_order_and_exact_take():
         "kind": "locators",
         "order": "source",
         "selected_count": 2,
+        "selected_source_count": 2,
+        "selected_speech_count": 2,
         "is_full_plan": False,
         "locators": ["f000000.s000", "f000000.s001"],
     }
@@ -204,11 +206,16 @@ def test_role_without_logical_voice_requires_default_or_sole_role(tmp_path):
     assert resolve_logical_voice(segment, one_role) == "narrator"
 
 
-def test_unimplemented_v5_directives_are_not_silently_dropped():
+def test_v5_token_support_and_prosody_composition_are_explicit():
     plan = load_utterplan_v5(FIXTURES / "utterplan_v5_contract.toml")
-    with pytest.raises(PlanError, match="Unsupported UtterPlan directives.*prosody"):
-        lower_directives(plan.segments[0], EngineCapabilities())
-    assert lower_directives(plan.segments[1], EngineCapabilities()) == ({}, {})
+    capabilities = EngineCapabilities(supports_linguistic_tokens=True)
+
+    native, composition = lower_directives(plan.segments[0], capabilities)
+    assert native["linguistic_tokens"][0]["text"] == "Hello."
+    assert composition == {"tempo": {"factor": 0.8}}
+    next_native, next_composition = lower_directives(plan.segments[1], capabilities)
+    assert next_native["linguistic_tokens"][0]["text"] == "Next."
+    assert next_composition == {}
 
 
 def test_typed_synthesis_request_has_explicit_source_semantics():

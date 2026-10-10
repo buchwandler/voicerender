@@ -13,13 +13,36 @@ from .errors import PlanError, ProfileError
 try:
     import tomllib
 except ImportError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 
 SCHEMA_PLAN = "utterplan.voiceplan.v1"
 SCHEMA_PROFILE = "voicerender.voice-profile.v1"
 SCHEMA_MANIFEST = "voicerender.render-manifest.v1"
 SCHEMA_MANIFEST_V2 = "voicerender.render-manifest.v2"
 SCHEMA_VOICE_CONFIG = "voicerender.voice-config.v1"
+
+
+class ModelDiscoveryError(ProfileError):
+    """A model catalog could not be inspected or contained invalid choices."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "engine.catalog_unavailable",
+        installed_version: str | None = None,
+        distribution_version: str | None = None,
+        module_version: str | None = None,
+        module_path: str | None = None,
+        missing_dependency: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.installed_version = installed_version
+        self.distribution_version = distribution_version
+        self.module_version = module_version
+        self.module_path = module_path
+        self.missing_dependency = missing_dependency
 
 
 def _mapping(value: Any, what: str, error: type[ValueError]) -> Mapping[str, Any]:
@@ -101,7 +124,8 @@ class RenderSegment:
     def __post_init__(self) -> None:
         if not isinstance(self.source, SourceRef):
             raise PlanError("render segment source must be a SourceRef")
-        _nonempty(self.text, "segment.text", PlanError)
+        if not isinstance(self.text, str):
+            raise PlanError("segment.text must be a string")
         _nonempty(self.language, "segment.language", PlanError)
         if self.logical_voice is not None:
             _nonempty(self.logical_voice, "segment.logical_voice", PlanError)
@@ -157,10 +181,6 @@ class VoiceBinding:
             reference = (base_dir / Path(reference).expanduser()).resolve()
         if reference is not None and voice is not None:
             raise ProfileError("Choose either voice or reference_audio for a role")
-        if reference is not None and engine != "pocket":
-            raise ProfileError(
-                f"Engine {engine!r} does not support reference_audio in this MVP"
-            )
         speaker = data.get("speaker")
         if speaker is not None and (
             isinstance(speaker, bool) or not isinstance(speaker, (str, int))
@@ -338,12 +358,25 @@ class VoicePlan:
                 raise PlanError(
                     f"Unsupported speech metadata in segment {index}: {sorted(unknown)}; do not drop semantics"
                 )
+            segment_id = _nonempty(item.get("id"), f"segments[{index}].id", PlanError)
+            text = _nonempty(item.get("text"), f"segments[{index}].text", PlanError)
+            scope_id = _nonempty(
+                item.get("scope_id", "default"),
+                f"segments[{index}].scope_id",
+                PlanError,
+            )
+            role = _nonempty(
+                item.get("role", "narrator"), f"segments[{index}].role", PlanError
+            )
+            language = _nonempty(
+                item.get("language", "en-US"), f"segments[{index}].language", PlanError
+            )
             segment = SpeechSegment(
-                id=item.get("id"),
-                scope_id=item.get("scope_id", "default"),
-                text=item.get("text"),
-                role=item.get("role", "narrator"),
-                language=item.get("language", "en-US"),
+                id=segment_id,
+                scope_id=scope_id,
+                text=text,
+                role=role,
+                language=language,
             )
             identity = (segment.scope_id, segment.id)
             if identity in seen:
@@ -373,3 +406,94 @@ class RenderResult:
             "failed": self.failed_count,
             "selected": self.selected_count,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInfo:
+    """Engine-neutral model projection retained for adapter selection helpers."""
+
+    id: str
+    source: str
+    languages: tuple[str, ...]
+    voices: tuple[str, ...]
+    default_voice: str
+    qualities: tuple[str, ...]
+    g2p_backend: str | None
+    lexicons: tuple[str, ...] | None
+    frontend: str
+    status: str
+    experimental: bool
+    runtime_available: bool
+    redistribution_allowed: bool
+    distribution_id: str | None
+    provider: str | None
+    distribution_provider: str | None
+    engine: str
+    sample_rate: int | None
+    max_tokens: int | None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_target(cls, target: Any) -> ModelInfo:
+        metadata = dict(target.metadata)
+        voices = tuple(target.voices)
+        lexicons = metadata.get("lexicons")
+        return cls(
+            id=target.id,
+            source=str(metadata.get("source") or target.engine),
+            languages=tuple(target.languages),
+            voices=voices,
+            default_voice=str(target.default_voice or (voices[0] if voices else "")),
+            qualities=tuple(target.qualities),
+            g2p_backend=metadata.get("g2p_backend"),
+            lexicons=tuple(lexicons) if lexicons is not None else None,
+            frontend=str(metadata.get("frontend") or ""),
+            status=target.status,
+            experimental=bool(metadata.get("experimental", False)),
+            runtime_available=bool(target.runtime_available),
+            redistribution_allowed=bool(metadata.get("redistribution_allowed", False)),
+            distribution_id=metadata.get("distribution_id"),
+            provider=metadata.get("provider"),
+            distribution_provider=metadata.get("distribution_provider"),
+            engine=target.engine,
+            sample_rate=target.sample_rate or metadata.get("sample_rate"),
+            max_tokens=metadata.get("max_tokens"),
+            metadata=metadata,
+        )
+
+
+def language_matches(requested: str, declared: tuple[str, ...]) -> bool:
+    """Match normalized language tags with base-language fallback."""
+    normalized = requested.strip().lower().replace("_", "-")
+    base = normalized.partition("-")[0]
+    return any(
+        normalized == item.strip().lower().replace("_", "-")
+        or base == item.strip().lower().replace("_", "-").partition("-")[0]
+        for item in declared
+    )
+
+
+def get_model_info(
+    model_id: str,
+    *,
+    offline: bool = False,
+    refresh: bool = False,
+    preference: str = "auto",
+    engine: str | None = None,
+) -> tuple[ModelInfo, Any]:
+    """Resolve one target using the VoiceRender engine registry."""
+    from .engines.registry import discover_targets, normalize_engine_id
+
+    engine_id = normalize_engine_id(engine or "kokoro")
+    targets = discover_targets(
+        engine_id,
+        offline=offline,
+        refresh=refresh,
+        preference=preference,
+    )
+    for target in targets:
+        if target.id == model_id or model_id in target.aliases:
+            return ModelInfo.from_target(target), targets
+    raise ModelDiscoveryError(
+        f"Unknown {engine_id} model {model_id!r}.", code=f"{engine_id}.model_not_found"
+    )

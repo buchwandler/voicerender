@@ -1,48 +1,68 @@
-"""Registry of engine adapters; runtime packages are imported lazily."""
+"""VoiceRender engine APIs and the legacy batch-render adapter registry."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import importlib
+from typing import Any
 
 from ..errors import ProfileError
-from .piper import PiperAdapter
-from .pocket import PocketAdapter
+from .registry import (
+    discover_targets,
+    engine_status,
+    get_adapter,
+    list_engines,
+    open_session,
+    register_adapter,
+    resolve_voice,
+    synthesize,
+)
+from .selection import EngineRequest
 
-if TYPE_CHECKING:
-    from .base import EngineAdapter
-
-_ADAPTERS: dict[str, EngineAdapter] = {
-    "piper": PiperAdapter(),
-    "pocket": PocketAdapter(),
+# The original VoicePlan renderer remains temporarily available, but its two
+# adapters are separate from the request-centric registry used by public APIs.
+_LEGACY_ENGINES = {
+    "piper": ("voicerender.engines.piper", "PiperAdapter"),
+    "pocket": ("voicerender.engines.pocket", "PocketAdapter"),
 }
+_legacy_adapters: dict[str, Any] = {}
 
 
-def register_engine(adapter: EngineAdapter) -> None:
-    """Allow third-party backends without importing Readio."""
-    if not adapter.id or adapter.id in _ADAPTERS:
+def register_engine(adapter: Any) -> None:
+    """Register an adapter for the transitional VoicePlan renderer."""
+    if (
+        not adapter.id
+        or adapter.id in _legacy_adapters
+        or adapter.id in _LEGACY_ENGINES
+    ):
         raise ProfileError(f"Invalid or already registered engine: {adapter.id!r}")
-    _ADAPTERS[adapter.id] = adapter
+    _legacy_adapters[adapter.id] = adapter
 
 
-def get_engine(name: str) -> EngineAdapter:
+def get_engine(name: str) -> Any:
+    """Return a legacy renderer adapter, importing its implementation lazily."""
+    if name in _legacy_adapters:
+        return _legacy_adapters[name]
     try:
-        return _ADAPTERS[name]
+        module_name, class_name = _LEGACY_ENGINES[name]
     except KeyError as exc:
         raise ProfileError(
-            f"Unknown engine {name!r}; available: {', '.join(sorted(_ADAPTERS))}"
+            f"Unknown legacy engine {name!r}; available: {', '.join(sorted(_LEGACY_ENGINES))}"
         ) from exc
+    adapter = getattr(importlib.import_module(module_name), class_name)()
+    _legacy_adapters[name] = adapter
+    return adapter
 
 
-def list_engines() -> list[dict[str, object]]:
-    return [
-        {
-            "id": name,
-            "package": engine.package,
-            "installed_version": engine.version(),
-            "reference_audio": engine.capabilities.supports_reference_audio,
-        }
-        for name, engine in sorted(_ADAPTERS.items())
-    ]
-
-
-__all__ = ["get_engine", "list_engines", "register_engine"]
+__all__ = [
+    "EngineRequest",
+    "discover_targets",
+    "engine_status",
+    "get_adapter",
+    "get_engine",
+    "list_engines",
+    "open_session",
+    "register_adapter",
+    "register_engine",
+    "resolve_voice",
+    "synthesize",
+]

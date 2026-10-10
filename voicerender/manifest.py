@@ -17,6 +17,8 @@ MANIFEST_SCHEMA = "voicerender.render-manifest.v2"
 MANIFEST_FILENAME = "render-manifest.json"
 MANIFEST_ID_ALGORITHM = "voicerender-manifest-id.v1"
 EDGE_POLICY = "preserved-unmeasured-v1"
+NUMERIC_COMPOSITION_SCHEMA = "voicerender.numeric-composition.v1"
+ENGINE_IDENTITY_SCHEMA = "voicerender.engine-identity.v1"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TOP_LEVEL = {
@@ -30,6 +32,8 @@ _TOP_LEVEL = {
     "edge_policy",
     "complete",
     "segments",
+    "source_operations",
+    "document_semantics",
 }
 _SEGMENT_FIELDS = {
     "source",
@@ -104,12 +108,19 @@ def validate_manifest_document(
 ) -> dict[str, Any]:
     """Validate the closed v2 shape and all cross-field invariants."""
     doc = _mapping(value, "root")
-    _keys(doc, _TOP_LEVEL, "root")
+    optional_root_fields = {"source_operations", "document_semantics"}
+    _keys(
+        doc,
+        (_TOP_LEVEL - optional_root_fields) | (set(doc) & optional_root_fields),
+        "root",
+    )
     if doc["schema"] != MANIFEST_SCHEMA:
         raise ArtifactError(f"Unsupported render-manifest schema: {doc['schema']!r}")
     if doc["manifest_id_algorithm"] != MANIFEST_ID_ALGORITHM:
         raise ArtifactError("Unsupported manifest identity algorithm")
     _sha(doc["manifest_id"], "manifest_id")
+    if "document_semantics" in doc:
+        _mapping(doc["document_semantics"], "document_semantics")
 
     source = _mapping(doc["source"], "source")
     _keys(source, {"kind", "plan_id", "plan_file_sha256", "schema_version"}, "source")
@@ -129,7 +140,16 @@ def validate_manifest_document(
     _sha(profile["effective_profile_sha256"], "profile.effective_profile_sha256")
 
     selection = _mapping(doc["selection"], "selection")
+    extended_selection = (
+        "selected_source_count" in selection or "selected_speech_count" in selection
+    )
+    if extended_selection != ("source_operations" in doc):
+        raise ArtifactError(
+            "Manifest source operation records and selection counts must be provided together"
+        )
     required_selection = {"kind", "order", "selected_count", "is_full_plan"}
+    if extended_selection:
+        required_selection.update({"selected_source_count", "selected_speech_count"})
     kind = selection.get("kind")
     if kind == "take":
         required_selection.add("take")
@@ -138,15 +158,39 @@ def validate_manifest_document(
     _keys(selection, required_selection, "selection")
     if kind not in {"all", "take", "locators"} or selection["order"] != "source":
         raise ArtifactError("Manifest selection kind/order is invalid")
-    count = _integer(selection["selected_count"], "selection.selected_count", minimum=1)
+    count = _integer(
+        selection["selected_count"],
+        "selection.selected_count",
+        minimum=0 if extended_selection else 1,
+    )
+    if extended_selection:
+        source_count = _integer(
+            selection["selected_source_count"],
+            "selection.selected_source_count",
+            minimum=1,
+        )
+        speech_count = _integer(
+            selection["selected_speech_count"],
+            "selection.selected_speech_count",
+            minimum=0,
+        )
+        if count != speech_count:
+            raise ArtifactError(
+                "Manifest selection.selected_count must equal selected_speech_count"
+            )
+    else:
+        source_count = count
+        speech_count = count
     if not isinstance(selection["is_full_plan"], bool):
         raise ArtifactError("Manifest selection.is_full_plan must be boolean")
     if kind == "take":
         _integer(selection["take"], "selection.take", minimum=1)
     if kind == "locators":
         locators = selection["locators"]
-        if not isinstance(locators, list) or len(locators) != count:
-            raise ArtifactError("Manifest selection.locators must match selected_count")
+        if not isinstance(locators, list) or len(locators) != source_count:
+            raise ArtifactError(
+                "Manifest selection.locators must match selected_source_count"
+            )
         for locator in locators:
             _nonempty(locator, "selection.locators[]")
         if len(set(locators)) != len(locators):
@@ -199,22 +243,56 @@ def validate_manifest_document(
         _nonempty(entry["language"], f"{where}.language")
 
         voice = _mapping(entry["resolved_voice"], f"{where}.resolved_voice")
+        voice_fields = {
+            "engine",
+            "model",
+            "model_asset_sha256",
+            "voice",
+            "speaker",
+            "model_revision",
+            "reference_audio_sha256",
+            "effective_binding_sha256",
+        }
+        optional_voice_fields = {
+            "engine_api_version",
+            "engine_api_expected_version",
+            "engine_api_contract",
+            "engine_identity",
+        }
         _keys(
             voice,
-            {
-                "engine",
-                "model",
-                "model_asset_sha256",
-                "voice",
-                "speaker",
-                "model_revision",
-                "reference_audio_sha256",
-                "effective_binding_sha256",
-            },
+            voice_fields | (optional_voice_fields & set(voice)),
             f"{where}.resolved_voice",
         )
         _nonempty(voice["engine"], f"{where}.resolved_voice.engine")
         _nonempty(voice["model"], f"{where}.resolved_voice.model")
+        for api_field in ("engine_api_version", "engine_api_expected_version"):
+            if api_field in voice and voice[api_field] is not None:
+                _integer(
+                    voice[api_field], f"{where}.resolved_voice.{api_field}", minimum=1
+                )
+        if voice.get("engine_api_contract") is not None:
+            _nonempty(
+                voice["engine_api_contract"],
+                f"{where}.resolved_voice.engine_api_contract",
+            )
+        if "engine_identity" in voice:
+            engine_identity = _mapping(
+                voice["engine_identity"], f"{where}.resolved_voice.engine_identity"
+            )
+            _keys(
+                engine_identity,
+                {"schema", "sha256"},
+                f"{where}.resolved_voice.engine_identity",
+            )
+            if engine_identity["schema"] != ENGINE_IDENTITY_SCHEMA:
+                raise ArtifactError(
+                    f"Manifest {where}.resolved_voice.engine_identity has an unknown schema"
+                )
+            _sha(
+                engine_identity["sha256"],
+                f"{where}.resolved_voice.engine_identity.sha256",
+            )
         for nullable_string in ("voice", "model_revision"):
             if voice[nullable_string] is not None:
                 _nonempty(
@@ -240,11 +318,20 @@ def validate_manifest_document(
         _sha(entry["acoustic_cache_key"], f"{where}.acoustic_cache_key")
 
         lowering = _mapping(entry["semantic_lowering"], f"{where}.semantic_lowering")
-        _keys(
-            lowering,
-            {"native_directives", "composition_directives", "unsupported_directives"},
-            f"{where}.semantic_lowering",
-        )
+        lowering = _mapping(entry["semantic_lowering"], f"{where}.semantic_lowering")
+        lowering_fields = {
+            "native_directives",
+            "composition_directives",
+            "unsupported_directives",
+        }
+        if "composition_schema" in lowering:
+            lowering_fields.add("composition_schema")
+        _keys(lowering, lowering_fields, f"{where}.semantic_lowering")
+        if lowering.get("composition_schema") not in {
+            None,
+            NUMERIC_COMPOSITION_SCHEMA,
+        }:
+            raise ArtifactError(f"Manifest {where} composition schema is unsupported")
         for field in (
             "native_directives",
             "composition_directives",
@@ -418,13 +505,102 @@ def validate_manifest_document(
                 raise ArtifactError(
                     f"Manifest {where} pending entry cannot contain audio or error"
                 )
+    source_operation_locators: list[str] = []
+    if "source_operations" in doc:
+        raw_operations = doc["source_operations"]
+        if not isinstance(raw_operations, list) or len(raw_operations) != source_count:
+            raise ArtifactError(
+                "Manifest source_operations length must match selected_source_count"
+            )
+        speech_sources: list[dict[str, Any]] = []
+        previous_source_address: tuple[int, int] | None = None
+        for index, raw_operation in enumerate(raw_operations):
+            where = f"source_operations[{index}]"
+            operation = _mapping(raw_operation, where)
+            operation_kind = operation.get("kind")
+            expected_fields = {"source", "kind"}
+            if operation_kind == "external_audio":
+                expected_fields.add("audio_directive")
+            _keys(operation, expected_fields, where)
+            if operation_kind not in {"speech", "external_audio"}:
+                raise ArtifactError(f"Manifest {where}.kind is unsupported")
+            source_ref = _mapping(operation["source"], f"{where}.source")
+            _keys(
+                source_ref,
+                {
+                    "locator",
+                    "flow_index",
+                    "segment_index",
+                    "flow_hash",
+                    "semantic_segment_hash",
+                },
+                f"{where}.source",
+            )
+            locator = _nonempty(source_ref["locator"], f"{where}.source.locator")
+            flow_index = _integer(
+                source_ref["flow_index"], f"{where}.source.flow_index"
+            )
+            segment_index = _integer(
+                source_ref["segment_index"], f"{where}.source.segment_index"
+            )
+            address = (flow_index, segment_index)
+            if (
+                previous_source_address is not None
+                and address <= previous_source_address
+            ):
+                raise ArtifactError(
+                    "Manifest source operations must remain in source order"
+                )
+            previous_source_address = address
+            if locator != f"f{flow_index:06d}.s{segment_index:03d}":
+                raise ArtifactError(f"Manifest {where} source locator is not canonical")
+            if locator in source_operation_locators:
+                raise ArtifactError(
+                    f"Manifest contains duplicate source locator {locator}"
+                )
+            source_operation_locators.append(locator)
+            _sha(source_ref["flow_hash"], f"{where}.source.flow_hash")
+            _sha(
+                source_ref["semantic_segment_hash"],
+                f"{where}.source.semantic_segment_hash",
+            )
+            if operation_kind == "speech":
+                speech_sources.append(source_ref)
+            else:
+                audio_directive = _mapping(
+                    operation["audio_directive"], f"{where}.audio_directive"
+                )
+                allowed_audio_keys = {
+                    "src",
+                    "alt_text",
+                    "clip_begin",
+                    "clip_end",
+                    "speed",
+                    "repeat_duration",
+                    "repeat_count",
+                    "sound_level",
+                    "description",
+                }
+                if set(audio_directive).difference(allowed_audio_keys):
+                    raise ArtifactError(
+                        f"Manifest {where}.audio_directive has unknown fields"
+                    )
+                _nonempty(audio_directive.get("src"), f"{where}.audio_directive.src")
+        if len(speech_sources) != speech_count:
+            raise ArtifactError(
+                "Manifest source operation speech count does not match selection"
+            )
+        if speech_sources != [entry["source"] for entry in entries]:
+            raise ArtifactError(
+                "Manifest speech entries do not match ordered speech source operations"
+            )
+    else:
+        source_operation_locators = [entry["source"]["locator"] for entry in entries]
     if doc["complete"] != all_rendered:
         raise ArtifactError("Manifest complete must agree with final segment statuses")
-    if kind == "locators" and selection["locators"] != [
-        entry["source"]["locator"] for entry in entries
-    ]:
+    if kind == "locators" and selection["locators"] != source_operation_locators:
         raise ArtifactError(
-            "Manifest selection.locators do not match source-ordered segments"
+            "Manifest selection.locators do not match source-ordered operations"
         )
     if verify_identity and manifest_id(doc) != doc["manifest_id"]:
         raise ArtifactError("Manifest identity mismatch")
@@ -511,7 +687,7 @@ def read_manifest(path: str | Path, *, verify_audio: bool = True) -> dict[str, A
 
 
 def validate_manifest_source(document: dict[str, Any], plan: Any) -> None:
-    """Reject a stale manifest join before a consumer materializes its audio."""
+    """Reject a stale or inexact manifest join before consumers use its audio."""
     source = document["source"]
     if source["plan_id"] != plan.plan_id:
         raise ArtifactError("Manifest plan_id does not match the supplied UtterPlan")
@@ -519,3 +695,56 @@ def validate_manifest_source(document: dict[str, Any], plan: Any) -> None:
         raise ArtifactError(
             "Manifest exact source-file hash does not match the supplied plan"
         )
+    if not hasattr(plan, "flows"):
+        return
+
+    from .inputs.utterplan_v5 import (
+        SourceOperationKind,
+        select_segments,
+        source_operation_record,
+    )
+
+    selection = document["selection"]
+    if selection["kind"] == "take":
+        expected = select_segments(plan, take=selection["take"])
+    elif selection["kind"] == "locators":
+        expected = select_segments(plan, select=selection["locators"])
+    else:
+        expected = select_segments(plan)
+    expected_selection = expected.as_dict()
+    selection_fields = (
+        "kind",
+        "order",
+        "selected_count",
+        "selected_source_count",
+        "selected_speech_count",
+        "is_full_plan",
+        "take",
+        "locators",
+    )
+    for field in selection_fields:
+        if field in selection and selection[field] != expected_selection.get(field):
+            raise ArtifactError(
+                f"Manifest selection.{field} does not match the supplied UtterPlan"
+            )
+    expected_operations = [source_operation_record(item) for item in expected.segments]
+    actual_operations = document.get("source_operations")
+    if actual_operations is not None:
+        if actual_operations != expected_operations:
+            raise ArtifactError(
+                "Manifest source operations do not match the supplied UtterPlan selection"
+            )
+    else:
+        if any(
+            item["kind"] != SourceOperationKind.SPEECH.value
+            for item in expected_operations
+        ):
+            raise ArtifactError(
+                "Legacy manifest cannot verify a selection containing non-speech operations"
+            )
+        expected_speech_sources = [item["source"] for item in expected_operations]
+        actual_speech_sources = [entry["source"] for entry in document["segments"]]
+        if actual_speech_sources != expected_speech_sources:
+            raise ArtifactError(
+                "Manifest speech entries do not match the supplied UtterPlan selection"
+            )

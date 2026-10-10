@@ -26,6 +26,65 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install quality tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Run quality checks
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy --strict voicerender
+          python -m compileall -q voicerender
+
+  engine-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [kokoro, piper, pocket, kitten, supertonic, inflect]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install engine extra and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[${{ matrix.extra }}]" pytest
+      - name: Run API and adapter contracts without model downloads
+        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py
+
+  exact-released-set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the pinned released engine set
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pip install -e . \
+            "pykokoro==0.10.2" \
+            "pipersynth==0.2.1" \
+            "pocketsynth[cpu]==0.2.5" \
+            "kittensynth[cpu]==0.1.1" \
+            "supertonicsynth[cpu]==0.1.2" \
+            "inflectsynth[cpu]==0.1.1"
+      - name: Run released-set compatibility contracts
+        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py
+
   lower-bounds:
     runs-on: ubuntu-latest
     steps:
@@ -56,8 +115,33 @@ jobs:
           python-version: "3.12"
       - name: Build wheel and sdist
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build twine
           python -m build --outdir "$RUNNER_TEMP/dist"
+          python -m twine check "$RUNNER_TEMP"/dist/*
+      - name: Verify SCM fallback for an untagged source archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/voicerender-source-archive" "$RUNNER_TEMP/fallback-dist"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/voicerender-source-archive"
+          python -m build --wheel \
+            --outdir "$RUNNER_TEMP/fallback-dist" \
+            "$RUNNER_TEMP/voicerender-source-archive"
+          python - "$RUNNER_TEMP/fallback-dist" <<'PY'
+          import sys
+          from email import policy
+          from email.parser import Parser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheel = next(Path(sys.argv[1]).glob("voicerender-*.whl"))
+          with ZipFile(wheel) as archive:
+              metadata_name = next(
+                  name for name in archive.namelist() if name.endswith("METADATA")
+              )
+              metadata = Parser(policy=policy.default).parsestr(
+                  archive.read(metadata_name).decode("utf-8")
+              )
+          assert metadata["Version"] == "0+unknown", metadata["Version"]
+          PY
       - name: Verify package contents
         run: |
           python - <<'PY'
@@ -90,6 +174,20 @@ jobs:
                   for value in metadata.get_all("Requires-Dist", [])
               }
               assert {"numpy", "soundfile"} <= requirements
+              base_requirements = set()
+              for value in metadata.get_all("Requires-Dist", []):
+                  requirement = Requirement(value)
+                  if (
+                      requirement.marker is None
+                      or requirement.marker.evaluate({"extra": ""})
+                  ):
+                      base_requirements.add(requirement.name.lower())
+              engine_sdks = {
+                  "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
+                  "pocketsynth", "supertonicsynth",
+              }
+              assert not engine_sdks & base_requirements
+              assert not {"audiocompose", "readio"} & {name.lower() for name in requirements}
 
           with tarfile.open(sdist, "r:gz") as archive:
               names = archive.getnames()
@@ -100,15 +198,39 @@ jobs:
           python -m venv "$RUNNER_TEMP/voicerender-wheel-venv"
           "$RUNNER_TEMP/voicerender-wheel-venv/bin/python" -m pip install \
             "$RUNNER_TEMP"/dist/voicerender-*.whl
-      - name: Run installed smoke checks
+      - name: Run installed base smoke checks
+        working-directory: ${{ runner.temp }}
         run: |
           VENV="$RUNNER_TEMP/voicerender-wheel-venv"
-          "$VENV/bin/python" -c \
-            "import importlib.metadata as m; import voicerender; assert m.version('voicerender') == voicerender.__version__"
+          "$VENV/bin/python" - <<'PY'
+          import importlib.metadata as metadata
+          import importlib.resources as resources
+          import sys
+
+          import voicerender
+          from voicerender import list_engines
+
+          assert metadata.version("voicerender") == voicerender.__version__
+          assert resources.files("voicerender").joinpath("py.typed").is_file()
+          assert resources.files("voicerender").joinpath("schemas/render-manifest-v2.schema.json").is_file()
+          assert len(list_engines()) == 6
+          assert not any(
+              name.split(".", 1)[0] in {
+                  "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
+                  "pocketsynth", "supertonicsynth",
+              }
+              for name in sys.modules
+          )
+          PY
           "$VENV/bin/voicerender" --version
           "$VENV/bin/voicerender" engines list --json
-          "$VENV/bin/voicerender" profiles validate examples/voices/voice.toml
-
+      - name: Smoke-test the installed Piper extra
+        working-directory: ${{ runner.temp }}
+        run: |
+          VENV="$RUNNER_TEMP/voicerender-wheel-venv"
+          WHEEL="$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name 'voicerender-*.whl' -print -quit)"
+          "$VENV/bin/python" -m pip install "${WHEEL}[piper]"
+          "$VENV/bin/voicerender" engines inspect piper
   docs:
     runs-on: ubuntu-latest
     steps:
