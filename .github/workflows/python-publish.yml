@@ -43,53 +43,36 @@ jobs:
           from pathlib import Path
 
           from packaging.requirements import Requirement
-          from packaging.version import Version
 
-          def has_range(requirements, name, minimum, maximum):
-              minimum_version = Version(minimum)
-              maximum_version = Version(maximum)
-              return any(
-                  requirement.name == name
-                  and any(
-                      spec.operator == ">=" and Version(spec.version) == minimum_version
-                      for spec in requirement.specifier
-                  )
-                  and any(
-                      spec.operator == "<" and Version(spec.version) == maximum_version
-                      for spec in requirement.specifier
-                  )
-                  for requirement in requirements
-              )
           tag_version = os.environ["RELEASE_TAG"].removeprefix("v")
           artifacts = list(Path("dist").iterdir())
           wheels = [path for path in artifacts if path.suffix == ".whl"]
           sdists = [path for path in artifacts if path.name.endswith(".tar.gz")]
           assert len(wheels) == 1, wheels
           assert len(sdists) == 1, sdists
-          wheel_version = re.match(r"utterplan-([^-]+)-", wheels[0].name).group(1)
-          sdist_version = re.match(r"utterplan-([^-]+)\.tar\.gz$", sdists[0].name).group(1)
-          assert wheel_version == tag_version, (wheel_version, tag_version)
-          assert sdist_version == tag_version, (sdist_version, tag_version)
+          wheel_match = re.fullmatch(r"voicerender-([^-]+)-[^-]+-[^-]+-[^-]+\.whl", wheels[0].name)
+          sdist_match = re.fullmatch(r"voicerender-([^-]+)\.tar\.gz", sdists[0].name)
+          assert wheel_match is not None, wheels[0]
+          assert sdist_match is not None, sdists[0]
+          assert wheel_match.group(1) == tag_version, (wheel_match.group(1), tag_version)
+          assert sdist_match.group(1) == tag_version, (sdist_match.group(1), tag_version)
 
           with zipfile.ZipFile(wheels[0]) as archive:
               metadata_name = next(name for name in archive.namelist() if name.endswith("METADATA"))
               metadata = Parser(policy=policy.default).parsestr(
                   archive.read(metadata_name).decode("utf-8")
               )
+              assert metadata["Name"] == "voicerender"
+              assert metadata["Version"] == tag_version
               requirements = [
                   Requirement(value) for value in metadata.get_all("Requires-Dist", [])
               ]
-              assert has_range(requirements, "phrasplit", "0.3.9", "0.4")
-              assert has_range(requirements, "ssmd", "0.9.3", "0.10")
-              assert has_range(requirements, "spokenform", "0.4.3", "0.5")
+              requirement_names = {requirement.name for requirement in requirements}
+              assert {"numpy", "soundfile"} <= requirement_names
               names = set(archive.namelist())
               expected = {
-                  "utterplan/py.typed",
-                  "utterplan/utterplan.schema.json",
-                  "utterplan/schemas/v1.schema.json",
-                  "utterplan/schemas/v2.schema.json",
-                  "utterplan/schemas/v3.schema.json",
-                  "utterplan/schemas/v4.schema.json",
+                  "voicerender/py.typed",
+                  "voicerender/schemas/render-manifest-v2.schema.json",
               }
               assert expected <= names
           PY
