@@ -63,6 +63,8 @@ def _plan(
     prosody=False,
     pronunciation=False,
     tokens=False,
+    replacement=False,
+    linguistic_tokens=None,
     document_semantics=None,
 ):
     document_semantics = document_semantics or {}
@@ -109,11 +111,47 @@ def _plan(
             pronunciation_value = {"phonemes": "həˈləʊ", "alphabet": "ipa"}
             segment["pronunciation"] = pronunciation_value
             directives["pronunciation"] = pronunciation_value
-        if tokens and index == 0 and text:
+        if linguistic_tokens and index == 0:
+            raw_tokens = {
+                "span": [[token["start"], token["end"]] for token in linguistic_tokens]
+            }
+            projection["tokens"] = []
+            for field in ("pos", "tag", "lemma", "morph"):
+                values = [token.get(field) for token in linguistic_tokens]
+                present = [(token_index, value) for token_index, value in enumerate(values) if value]
+                if present:
+                    raw_tokens[field] = (
+                        [[token_index, value] for token_index, value in present]
+                        if field in {"lemma", "morph"} or len(present) != len(values)
+                        else [value for _, value in present]
+                    )
+            segment["token"] = raw_tokens
+            projection["tokens"] = [
+                {
+                    "start": token["start"],
+                    "end": token["end"],
+                    "lemma": token.get(
+                        "lemma", text[token["start"] : token["end"]].casefold()
+                    ),
+                    **{
+                        field: token[field]
+                        for field in ("pos", "tag", "morph")
+                        if token.get(field)
+                    },
+                }
+                for token in linguistic_tokens
+            ]
+        elif tokens and index == 0 and text:
             segment["token"] = {"span": [[0, len(text)]]}
             projection["tokens"] = [
                 {"start": 0, "end": len(text), "lemma": text.casefold()}
             ]
+        if replacement and index == 0 and text:
+            segment["replacement"] = {
+                "span": [[0, len(text)]],
+                "source": ["unprepared source"],
+                "kind": [[0, "structured"]],
+            }
         if directives:
             projection["directives"] = directives
         if pause_after is not None and index == len(operations) - 1:
@@ -420,6 +458,77 @@ def test_pause_changes_semantic_identity_but_not_acoustic_cache_and_text_invalid
     )
     assert third.rendered_count == 1
     assert len(adapter.calls) == 2
+
+
+def test_replacement_provenance_preserves_text_and_acoustic_cache_identity(
+    tmp_path, monkeypatch
+):
+    adapter = _FakeAdapter()
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+    profile = _profile()
+    cache = tmp_path / "replacement-cache"
+    text = "Readable replacement."
+    plain = _plan([text], file_hash="d" * 64)
+    annotated = _plan([text], file_hash="e" * 64, replacement=True)
+
+    assert annotated.plan_id == plain.plan_id
+    assert annotated.segments[0].text == text
+    assert annotated.segments[0].semantic_segment_hash == plain.segments[0].semantic_segment_hash
+
+    first = render_utterplan_v5(
+        plain,
+        profile=profile,
+        output_dir=tmp_path / "plain-replacement",
+        cache_dir=cache,
+    )
+    second = render_utterplan_v5(
+        annotated,
+        profile=profile,
+        output_dir=tmp_path / "annotated-replacement",
+        cache_dir=cache,
+    )
+    first_entry = read_manifest(first.manifest_path)["segments"][0]
+    second_entry = read_manifest(second.manifest_path)["segments"][0]
+
+    assert second_entry["acoustic_cache_key"] == first_entry["acoustic_cache_key"]
+    assert second.reused_count == 1
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0].text == text
+    assert "replacement" not in adapter.calls[0].options
+
+
+def test_linguistic_token_columns_reach_the_speech_request(tmp_path, monkeypatch):
+    adapter = _FakeAdapter(tokens=True)
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+    plan = _plan(
+        ["I live here."],
+        linguistic_tokens=[
+            {
+                "start": 2,
+                "end": 6,
+                "pos": "VERB",
+                "tag": "VBP",
+                "lemma": "live",
+                "morph": "Tense=Pres|VerbForm=Fin",
+            }
+        ],
+    )
+
+    render_utterplan_v5(
+        plan,
+        profile=_profile(),
+        output_dir=tmp_path / "linguistic-token-render",
+        cache_dir=tmp_path / "linguistic-token-cache",
+    )
+
+    token = adapter.calls[0].tokens[0]
+    assert (token.start, token.end, token.text) == (2, 6, "live")
+    assert (token.pos, token.tag, token.lemma, token.morph) == (
+        "VERB",
+        "VBP",
+        "live",
+        "Tense=Pres|VerbForm=Fin",
+    )
 
 
 def test_corrupt_shared_cache_wav_is_not_reused(tmp_path, monkeypatch):

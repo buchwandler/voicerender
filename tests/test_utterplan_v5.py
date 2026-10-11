@@ -149,6 +149,44 @@ def test_v5_unknown_schema_fields_and_bad_flow_hash_fail_closed():
         parse_utterplan_v5(data, file_sha256="a" * 64)
 
 
+
+def test_replacement_provenance_is_validated_but_discarded_from_render_segments():
+    plain_data = _synthetic_plan()
+    plain = parse_utterplan_v5(plain_data, file_sha256="a" * 64)
+
+    data = _synthetic_plan()
+    data["flow"][0]["segment"][0]["replacement"] = {
+        "span": [[0, 4]],
+        "source": ["Flow"],
+        "kind": [[0, "structured"]],
+        "rule": [[0, "test-rule"]],
+    }
+    annotated = parse_utterplan_v5(data, file_sha256="a" * 64)
+
+    assert annotated.plan_id == plain.plan_id
+    assert annotated.flows[0].flow_hash == plain.flows[0].flow_hash
+    assert annotated.segments[0].semantic_segment_hash == plain.segments[0].semantic_segment_hash
+    assert annotated.segments[0].text == plain.segments[0].text
+    assert not hasattr(annotated.segments[0], "replacements")
+
+
+def test_replacement_provenance_rejects_bad_columns_cardinality_bounds_and_sparse_indexes():
+    invalid_values = (
+        ({"span": [[0, 4]], "source": ["Flow"], "extra": []}, "Unknown"),
+        ({"span": [[0, 4]], "source": []}, "equal lengths"),
+        ({"span": [[0, 999]], "source": ["Flow"]}, "outside segment text"),
+        (
+            {"span": [[0, 4]], "source": ["Flow"], "kind": [[1, "structured"]]},
+            "ascending",
+        ),
+    )
+    for replacement, message in invalid_values:
+        data = _synthetic_plan()
+        data["flow"][0]["segment"][0]["replacement"] = replacement
+        with pytest.raises(PlanError, match=message):
+            parse_utterplan_v5(data, file_sha256="a" * 64)
+
+
 def test_voice_toml_merges_backend_defaults_before_role_options(tmp_path):
     path = tmp_path / "voice.toml"
     path.write_text(

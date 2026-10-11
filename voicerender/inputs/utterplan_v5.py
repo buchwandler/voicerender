@@ -62,6 +62,7 @@ SEGMENT_KEYS = {
     "heading",
     "token",
     *DIRECTIVE_KEYS,
+    "replacement",
 }
 PAUSE_CLASSES = {
     "none",
@@ -302,6 +303,48 @@ def _tokens(raw: Any, text: str, path: str) -> tuple[dict[str, Any], ...]:
     return tuple(output)
 
 
+def _replacements(raw: Any, text: str, path: str) -> None:
+    if not isinstance(raw, Mapping):
+        raise PlanError(f"{path} must be a replacement table")
+    unknown = set(raw).difference({"span", "source", "kind", "rule"})
+    if unknown:
+        raise PlanError(f"Unknown {path} columns: {sorted(unknown)}")
+    spans = raw.get("span")
+    sources = raw.get("source")
+    if not isinstance(spans, list) or not isinstance(sources, list):
+        raise PlanError(f"{path}.span and {path}.source are required arrays")
+    if len(spans) != len(sources):
+        raise PlanError(f"{path}.span and {path}.source must have equal lengths")
+    for index, span in enumerate(spans):
+        if (
+            not isinstance(span, list)
+            or len(span) != 2
+            or any(type(value) is not int for value in span)
+        ):
+            raise PlanError(f"{path}.span[{index}] must be an integer [start, end] pair")
+        start, end = span
+        if start < 0 or end < start or end > len(text):
+            raise PlanError(f"{path}.span[{index}] is outside segment text")
+    if any(not isinstance(source, str) for source in sources):
+        raise PlanError(f"{path}.source values must be strings")
+    for field in ("kind", "rule"):
+        if field not in raw:
+            continue
+        entries = raw[field]
+        if not isinstance(entries, list) or any(
+            not isinstance(entry, list) or len(entry) != 2 for entry in entries
+        ):
+            raise PlanError(f"{path}.{field} must be sparse [replacement_index, value] pairs")
+        values = _column_values(
+            entries,
+            field=field,
+            count=len(spans),
+            path=f"{path}.{field}",
+        )
+        if any(not value for value in values.values()):
+            raise PlanError(f"{path}.{field} values must be non-empty strings")
+
+
 def _segment_projection(segment: RenderSegment) -> dict[str, Any]:
     result: dict[str, Any] = {
         "text": segment.text,
@@ -509,6 +552,8 @@ def _parse(
             )
             directives = _directives(raw_segment, where)
             tokens = _tokens(raw_segment.get("token"), text, f"{where}.token")
+            if "replacement" in raw_segment:
+                _replacements(raw_segment["replacement"], text, f"{where}.replacement")
             markers_raw = raw_segment.get("marker", [])
             if not isinstance(markers_raw, list) or any(
                 not isinstance(marker, str) or not marker for marker in markers_raw
