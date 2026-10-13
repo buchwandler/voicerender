@@ -16,7 +16,7 @@ Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `supertonic`,
 
 ## CLI workflow
 
-A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed:
+A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
 
 ```bash
 voicerender engines list
@@ -52,6 +52,32 @@ voicerender profile refresh narration.renderprofile.toml \
 ```
 
 The shared RenderProfile workflow rejects reference-audio bindings because this execution path does not define a portable reference-audio contract.
+
+## SSMDBook RenderPlan collections from UtterPlan
+
+For a book, [UtterPlan](https://pypi.org/project/utterplan/) can project already-saved
+chapter plans into one RenderPlan variant per RenderProfile. It does not call
+VoiceRender or preflight during projection. The collection index
+`renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned
+workspace metadata, not RenderPlan artifacts; VoiceRender consumes the individual
+`.renderplan.toml` files through its unchanged single-plan workflow.
+
+```bash
+utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
+  --profile narration.renderprofile.toml
+
+voicerender preflight \
+  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+  -o chapter-0005.preflight.toml
+voicerender render \
+  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+  --preflight chapter-0005.preflight.toml \
+  --out-dir renders/chapter-0005
+```
+
+Repeat the ordinary preflight/render flow for each selected plan. Different profile
+identities produce distinct UtterPlan variant directories, while each individual
+RenderPlan retains the same shared contract and exact request semantics.
 
 ## Python API
 
