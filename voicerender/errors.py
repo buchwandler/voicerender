@@ -159,3 +159,9 @@ class EngineBackendError(EngineSynthesisError):
 
 class ArtifactError(VoiceRenderError, RuntimeError):
     """Corrupt or invalid WAV or cache artifact."""
+
+    code = "artifact.invalid"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code or type(self).code

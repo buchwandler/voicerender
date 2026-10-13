@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from renderplan import (
     PreflightCheck,
@@ -20,6 +21,7 @@ from renderplan import (
     ReplanRequest,
     SpeechArtifact,
     SpeechItem,
+    load_manifest,
     load_plan,
     load_preflight,
     save_manifest,
@@ -47,14 +49,18 @@ _CACHE_SCHEMA = "voicerender.renderplan-cache.v1"
 class RenderPlanResult:
     manifest: RenderManifest
     manifest_path: Path
+    planned_count: int
+    selected_count: int
+    available_count: int
     rendered_count: int
     reused_count: int
+    selection_complete: bool
     error: str | None = None
     fresh_preflight: PreflightReport | None = None
 
     @property
     def failed(self) -> bool:
-        return self.error is not None or not self.manifest.complete
+        return self.error is not None or not self.selection_complete
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +92,13 @@ def render_renderplan(
     cache_dir: str | Path | None = None,
     force: bool = False,
     recheck_report_path: str | Path | None = None,
+    speech_numbers: Collection[int] | None = None,
 ) -> RenderPlanResult:
-    """Render one WAV per SpeechItem, returning a complete or valid partial manifest."""
+    """Render selected speech items, retaining verified artifacts from prior runs."""
     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
     if not isinstance(parsed_plan, RenderPlan):
         raise PlanError("render input must be a RenderPlan")
+    selected_items = _select_speech_items(parsed_plan, speech_numbers)
     report = (
         load_preflight(preflight) if isinstance(preflight, (str, Path)) else preflight
     )
@@ -119,7 +127,6 @@ def render_renderplan(
                 f"Speech occurrence {key} does not have a matching OK preflight check"
             )
 
-    prepared = tuple(_prepare_speech(item) for item in parsed_plan.speech)
     out = Path(output_dir).expanduser().resolve()
     cache = (
         Path(cache_dir).expanduser().resolve()
@@ -132,23 +139,41 @@ def render_renderplan(
     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
     producer = Producer(name="voicerender", version=_voicerender_version())
 
-    artifacts: list[SpeechArtifact] = []
+    artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
     rendered = reused = 0
     failure: _RenderFailure | None = None
     with _exclusive_render(out):
         cache.mkdir(parents=True, exist_ok=True)
+        artifact_map = _load_existing_artifacts(
+            parsed_plan, out, manifest_path, report_id, force=force
+        )
+        selected_keys = {
+            (item.number, item.segment_id or item.computed_id())
+            for item in selected_items
+        }
+        if not force:
+            reused = sum(key in artifact_map for key in selected_keys)
+        pending_items = tuple(
+            item
+            for item in selected_items
+            if force
+            or (item.number, item.segment_id or item.computed_id()) not in artifact_map
+        )
+        prepared = tuple(_prepare_speech(item) for item in pending_items)
+        current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
         _persist_manifest(
             parsed_plan,
             manifest_path,
             report_id,
-            artifacts,
-            complete=False,
+            current_artifacts,
+            complete=len(current_artifacts) == len(parsed_plan.speech),
             producer=producer,
         )
         with ExitStack() as opened:
             sessions: dict[str, EngineSession | _OpenFailure] = {}
             for current in prepared:
                 item = current.item
+                key = (item.number, current.segment_id)
                 target = out / item.wav
                 try:
                     cached = None if force else _read_cache(cache, current.cache_key)
@@ -163,7 +188,7 @@ def render_renderplan(
                                 session = opened.enter_context(
                                     open_session(current.selection)
                                 )
-                            except Exception as exc:  # noqa: BLE001 - Renderer setup must become a partial-render result.
+                            except Exception as exc:  # noqa: BLE001 - Renderer setup becomes a partial-render result.
                                 session = _OpenFailure(exc)
                             sessions[current.session_key] = session
                         if isinstance(session, _OpenFailure):
@@ -238,46 +263,168 @@ def render_renderplan(
                         raise ArtifactError(
                             f"Materialized WAV failed integrity validation: {target}"
                         )
-                    artifacts.append(
-                        SpeechArtifact(
-                            segment_number=item.number,
-                            segment_id=current.segment_id,
-                            wav=item.wav,
-                            sha256=f"sha256:{final_info['sha256']}",
-                            frames=int(final_info["frames"]),
-                            sample_rate=int(final_info["sample_rate"]),
-                            channels=int(final_info["channels"]),
-                        )
+                    artifact_map[key] = SpeechArtifact(
+                        segment_number=item.number,
+                        segment_id=current.segment_id,
+                        wav=item.wav,
+                        sha256=f"sha256:{final_info['sha256']}",
+                        frames=int(final_info["frames"]),
+                        sample_rate=int(final_info["sample_rate"]),
+                        channels=int(final_info["channels"]),
                     )
+                    current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
                     _persist_manifest(
                         parsed_plan,
                         manifest_path,
                         report_id,
-                        artifacts,
-                        complete=False,
+                        current_artifacts,
+                        complete=len(current_artifacts) == len(parsed_plan.speech),
                         producer=producer,
                     )
-                except Exception as exc:  # noqa: BLE001 - Artifact and backend failures persist a valid partial manifest.
+                except Exception as exc:  # noqa: BLE001 - Persist a valid cumulative partial manifest.
                     failure = _RenderFailure(str(exc) or "Render failed")
                     break
 
-        complete = failure is None and len(artifacts) == len(parsed_plan.speech)
+        current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
         manifest = _persist_manifest(
             parsed_plan,
             manifest_path,
             report_id,
-            artifacts,
-            complete=complete,
+            current_artifacts,
+            complete=len(current_artifacts) == len(parsed_plan.speech),
             producer=producer,
         )
+
+    selected_complete = all(
+        (item.number, item.segment_id or item.computed_id()) in artifact_map
+        for item in selected_items
+    )
     return RenderPlanResult(
         manifest=manifest,
         manifest_path=manifest_path,
+        planned_count=len(parsed_plan.speech),
+        selected_count=len(selected_items),
+        available_count=len(manifest.speech),
         rendered_count=rendered,
         reused_count=reused,
+        selection_complete=selected_complete,
         error=failure.message if failure is not None else None,
         fresh_preflight=failure.fresh_preflight if failure is not None else None,
     )
+
+
+def _select_speech_items(
+    plan: RenderPlan, speech_numbers: Collection[int] | None
+) -> tuple[SpeechItem, ...]:
+    if speech_numbers is None:
+        return cast(tuple[SpeechItem, ...], plan.speech)
+    try:
+        requested = tuple(speech_numbers)
+    except TypeError as exc:
+        raise PlanError(
+            "speech_numbers must be a collection of positive integers"
+        ) from exc
+    if not requested:
+        raise PlanError("speech_numbers selection must not be empty")
+    if any(type(number) is not int or number <= 0 for number in requested):
+        raise PlanError("speech_numbers must contain only positive integers")
+    requested_set = set(requested)
+    planned_numbers = {item.number for item in plan.speech}
+    unknown = requested_set - planned_numbers
+    if unknown:
+        raise PlanError(
+            f"speech_numbers contains unknown plan occurrence(s): {sorted(unknown)}"
+        )
+    return tuple(item for item in plan.speech if item.number in requested_set)
+
+
+def _load_existing_artifacts(
+    plan: RenderPlan,
+    output_dir: Path,
+    manifest_path: Path,
+    plan_id: str,
+    *,
+    force: bool,
+) -> dict[tuple[int, str], SpeechArtifact]:
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return {}
+    if manifest_path.is_symlink():
+        if not force:
+            raise ArtifactError(
+                "Existing render manifest must not be a symlink",
+                code="artifact.invalid",
+            )
+        _reset_owned_artifacts(output_dir)
+        return {}
+    try:
+        manifest = load_manifest(manifest_path)
+        if manifest.render_plan_id != plan_id:
+            if not force:
+                raise ArtifactError(
+                    "Stale render output belongs to a different RenderPlan; use --force to reset it",
+                    code="output.stale_plan",
+                )
+            _reset_owned_artifacts(output_dir)
+            return {}
+        manifest.validate_against(plan)
+        expected = {
+            (item.number, item.segment_id or item.computed_id()): item
+            for item in plan.speech
+        }
+        verified: dict[tuple[int, str], SpeechArtifact] = {}
+        for artifact in manifest.speech:
+            key = (artifact.segment_number, artifact.segment_id)
+            if key in verified or key not in expected:
+                raise ArtifactError(
+                    "Existing render manifest has duplicate or unknown speech entries"
+                )
+            item = expected[key]
+            if artifact.wav != item.wav:
+                raise ArtifactError(
+                    "Existing render manifest WAV name does not match the plan"
+                )
+            metadata = {
+                "sha256": artifact.sha256.removeprefix("sha256:"),
+                "frames": artifact.frames,
+                "sample_rate": artifact.sample_rate,
+                "channels": artifact.channels,
+            }
+            if verified_wav(output_dir / artifact.wav, metadata):
+                verified[key] = artifact
+        return verified
+    except ArtifactError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        if not force:
+            raise ArtifactError(
+                f"Existing render manifest is invalid: {exc}", code="artifact.invalid"
+            ) from exc
+        _reset_owned_artifacts(output_dir)
+        return {}
+
+
+def _reset_owned_artifacts(output_dir: Path) -> None:
+    """Remove only VoiceRender's well-known chapter output files."""
+    for child in output_dir.iterdir():
+        owned = child.name in {RENDER_MANIFEST_FILENAME, "preflight.toml"} or bool(
+            re.fullmatch(r"\d{6,}\.wav", child.name)
+        )
+        if not owned:
+            continue
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.exists():
+            raise ArtifactError(f"Cannot reset owned artifact directory: {child}")
+
+
+def _ordered_artifacts(
+    plan: RenderPlan, artifacts: dict[tuple[int, str], SpeechArtifact]
+) -> list[SpeechArtifact]:
+    return [
+        artifacts[(item.number, item.segment_id or item.computed_id())]
+        for item in plan.speech
+        if (item.number, item.segment_id or item.computed_id()) in artifacts
+    ]
 
 
 def _prepare_speech(item: SpeechItem) -> _PreparedSpeech:

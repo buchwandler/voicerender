@@ -59,8 +59,7 @@ For a book, [UtterPlan](https://pypi.org/project/utterplan/) can project already
 chapter plans into one RenderPlan variant per RenderProfile. It does not call
 VoiceRender or preflight during projection. The collection index
 `renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned
-workspace metadata, not RenderPlan artifacts; VoiceRender consumes the individual
-`.renderplan.toml` files through its unchanged single-plan workflow.
+workspace metadata, not RenderPlan artifacts. VoiceRender can consume the ordered index through `render-book`; the direct single-plan workflow remains available.
 
 ```bash
 utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
@@ -78,6 +77,54 @@ voicerender render \
 Repeat the ordinary preflight/render flow for each selected plan. Different profile
 identities produce distinct UtterPlan variant directories, while each individual
 RenderPlan retains the same shared contract and exact request semantics.
+
+### Render the variant with VoiceRender
+
+Render the chapters from the ordered set directly. The variant value is the exact directory name created by UtterPlan, including its profile fingerprint:
+
+```bash
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5-17 \
+  --cache-dir .voicerender-cache \
+  --json
+```
+
+Omit `--chapters` to select every chapter. For speech QC, select exactly one source chapter and a one-based range of RenderPlan speech numbers; whole-chapter preflight still runs, but only the selected speech is synthesized:
+
+```bash
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5 --speech 50-60
+
+# A later window adds verified WAVs to the same chapter manifest.
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5 --speech 61-70
+
+# Omit --speech to finish the chapter, reusing valid artifacts from both windows.
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" --chapters 5
+```
+
+A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, `--force`, and `--json` support alternate roots, deliberate reset, and automation.
+
+By default, output is kept separate from the RenderPlan inputs:
+
+```text
+Novel.ssmdbook/
+├── renderplan/<variant>/                 # input plans and renderplan-set.toml
+└── voicerender/<variant>/
+    ├── voicerender-report.toml            # atomic book-level outcomes
+    ├── .voicerender-cache/
+    └── chapter-0005/
+        ├── preflight.toml                 # whole-chapter preflight
+        ├── render-manifest.toml            # cumulative verified artifacts
+        ├── 000001.wav
+        └── ...
+```
+
+The chapter directories use the set's chapter IDs, while `--chapters` selects by source chapter number. The exact variant name is retained under both roots. Existing manual `preflight`/`render` commands above remain available for individual plans.
 
 ## Python API
 

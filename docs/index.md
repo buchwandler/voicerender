@@ -23,12 +23,40 @@ The RenderPlan renderer preserves request order and identity: one speech item be
 
 The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
 
-
 For book-level projection, UtterPlan owns the `renderplan-set.toml` collection index
-and per-invocation report; they are workspace metadata, not inputs to VoiceRender.
-VoiceRender continues to preflight and render each individual `.renderplan.toml` file.
+and its per-invocation report as workspace metadata. VoiceRender's `render-book`
+command consumes the ordered set and renders its individual `.renderplan.toml` files;
+the direct single-plan preflight/render commands remain available.
 See [UtterPlan](https://pypi.org/project/utterplan/) and the shared
 [RenderPlan](https://pypi.org/project/renderplan/) package.
+
+## Book-level rendering
+
+After UtterPlan has written `renderplan-set.toml`, render the exact variant named in the set directory. By default, VoiceRender writes under `<book>/voicerender/<variant>/`, leaving the input plans under `<book>/renderplan/<variant>/`:
+
+```bash
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5-17 --json
+```
+
+Omit `--chapters` to select all indexed chapters. For a speech QC window, select one source chapter and one-based speech numbers. Whole-chapter preflight is still performed; successful selected WAVs remain in the chapter manifest and can be accumulated by later invocations:
+
+```bash
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5 --speech 50-60
+
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5 --speech 61-70
+
+# Resume the chapter to full completion using its verified partial artifacts.
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" --chapters 5
+```
+
+A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter; each chapter directory contains its `preflight.toml`, cumulative `render-manifest.toml`, and numbered WAVs. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
 
 ## Engine integration
 

@@ -11,6 +11,7 @@ from typing import Any
 from renderplan import load_manifest, load_plan
 
 from . import __version__
+from .book import BookRenderError, BookRenderResult, render_book
 from .engines.registry import (
     discover_targets,
     engine_status,
@@ -110,6 +111,24 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--force", action="store_true")
     render.add_argument("--json", action="store_true")
 
+    book_render = commands.add_parser(
+        "render-book", help="Render selected chapters from a RenderPlan variant"
+    )
+    book_render.add_argument(
+        "book", type=Path, help="book workspace or its chapters/ directory"
+    )
+    book_render.add_argument(
+        "--variant", required=True, help="exact RenderPlan variant directory name"
+    )
+    book_render.add_argument("--chapters", default="all", metavar="SELECTOR")
+    book_render.add_argument("--speech", default="all", metavar="SELECTOR")
+    book_render.add_argument("--renderplan-root", type=Path)
+    book_render.add_argument("--output-root", type=Path)
+    book_render.add_argument("--cache-dir", type=Path)
+    book_render.add_argument("--force", action="store_true")
+    book_render.add_argument("--fail-fast", action="store_true")
+    book_render.add_argument("--json", action="store_true")
+
     inspect = commands.add_parser(
         "inspect-manifest", help="Verify a render manifest and its WAVs"
     )
@@ -186,6 +205,46 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
         ),
         "error": result.error,
     }
+
+
+def _print_book_result(result: BookRenderResult) -> None:
+    request = result.request
+    print("VoiceRender book render")
+    print(f"  workspace:   {request.workspace}")
+    print(f"  variant:     {request.variant_name}")
+    print(f"  renderplans: {request.renderplan_variant_dir}")
+    print(f"  output:      {request.output_variant_dir}")
+    print(f"  chapters:    {request.chapter_selector}")
+    print(f"  selected:    {result.requested}")
+    for outcome in result.outcomes:
+        print(f"[{outcome.index}/{result.requested}] {outcome.id}")
+        if outcome.status == "failed":
+            print("       FAILED")
+            print(
+                f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
+            )
+        elif outcome.status == "skipped":
+            print("       skipped after an earlier chapter failure")
+        else:
+            if request.speech_selector.strip().casefold() != "all":
+                print(
+                    f"       speech: {outcome.selected_speech} of "
+                    f"{outcome.planned_speech} selected"
+                )
+            print(f"       rendered: {outcome.rendered} new, {outcome.reused} reused")
+            state = "complete" if outcome.manifest_complete else "partial"
+            print(
+                f"       chapter state: {state} "
+                f"({outcome.available_speech}/{outcome.planned_speech} available)"
+            )
+            if outcome.manifest is not None:
+                print(f"       manifest: {outcome.manifest}")
+    print("VoiceRender summary")
+    print(f"  requested: {result.requested}")
+    print(f"  complete:  {result.full_chapters}")
+    print(f"  partial:   {result.partial_chapters}")
+    print(f"  failed:    {result.failed}")
+    print(f"  skipped:   {result.skipped}")
 
 
 def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
@@ -372,6 +431,37 @@ def main(argv: list[str] | None = None) -> int:
                 fresh = result.fresh_preflight
                 return 2 if fresh is not None and fresh.status == "replan" else 1
             return 0
+
+        if args.command == "render-book":
+            try:
+                book_result = render_book(
+                    args.book,
+                    variant=args.variant,
+                    chapters=args.chapters,
+                    speech=args.speech,
+                    renderplan_root=args.renderplan_root,
+                    output_root=args.output_root,
+                    cache_dir=args.cache_dir,
+                    force=args.force,
+                    fail_fast=args.fail_fast,
+                )
+            except (BookRenderError, OSError, ValueError, TypeError) as exc:
+                error_code = getattr(exc, "code", "workspace.invalid")
+                payload = {
+                    "error": str(exc),
+                    "code": error_code,
+                    "exit_code": 2,
+                }
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if args.json:
+                print(json.dumps(book_result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                _print_book_result(book_result)
+            return book_result.exit_code
 
         if args.command == "inspect-manifest":
             payload, valid = _inspect_manifest(args.manifest)

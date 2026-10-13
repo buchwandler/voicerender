@@ -21,15 +21,27 @@ def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() ->
         capture_output=True,
         text=True,
     ).stdout.casefold()
+    book_help = subprocess.run(
+        [sys.executable, "-m", "voicerender", "render-book", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.casefold()
 
     assert "preflight" in root_help
     assert "renderplan" in root_help
+    assert "render-book" in root_help
     assert "utterplan" not in root_help
     assert "--preflight" in render_help
     assert "--out-dir" in render_help
     assert "--voice" not in render_help
     assert "--take" not in render_help
     assert "--profile" not in render_help
+    assert "--variant" in book_help
+    assert "--chapters" in book_help
+    assert "--speech" in book_help
+    assert "utterplan" not in book_help
 
 
 def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
@@ -46,8 +58,13 @@ class RejectLegacyPlanner(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, RejectLegacyPlanner())
 import voicerender
+import voicerender.book
+import voicerender.cli
 assert callable(voicerender.preflight_render_plan)
 assert callable(voicerender.render_renderplan)
+args = voicerender.cli.build_parser().parse_args(['render-book', 'book', '--variant', 'variant'])
+assert args.command == 'render-book'
+assert not any(name.split('.', 1)[0].casefold() == 'utterplan' for name in sys.modules)
 assert not any(name.startswith('voicerender.inputs.utterplan') for name in sys.modules)
 """
     subprocess.run(

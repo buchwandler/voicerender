@@ -12,11 +12,17 @@ from renderplan import (
     CapacityConstraint,
     PreflightReport,
     RenderPlan,
+    RenderPlanSet,
+    RenderPlanSetChapter,
+    RenderProfile,
+    RoleProfile,
     SourceSpan,
     SpeechItem,
     load_manifest,
     load_preflight,
     save_plan,
+    save_profile,
+    save_renderplan_set,
 )
 
 from voicerender.engines.api_probe import EngineApiProbe
@@ -32,7 +38,7 @@ from voicerender.engines.base import (
 )
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
-from voicerender.errors import PlanError
+from voicerender.errors import ArtifactError, PlanError
 from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_render import render_renderplan
 from voicerender.storage import wav_info
@@ -518,3 +524,309 @@ def test_cli_creates_and_validates_shared_renderprofile(
     assert code == 1
     assert "must not overwrite" in refresh_error
     assert profile_path.read_bytes() == original
+
+
+def test_partial_speech_windows_keep_original_numbers_and_merge_manifest_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan(*(f"speech {number}" for number in range(1, 61)))
+    report = _report(adapter, plan, tmp_path)
+    adapter.synthesized_texts.clear()
+    output = tmp_path / "chapter"
+    cache = tmp_path / "cache"
+
+    first = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        speech_numbers=range(1, 21),
+    )
+    assert not first.failed
+    assert first.selection_complete
+    assert first.selected_count == 20
+    assert first.available_count == 20
+    assert not first.manifest.complete
+    assert (output / "000001.wav").is_file()
+    assert (output / "000020.wav").is_file()
+    assert not (output / "000021.wav").exists()
+
+    second = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        speech_numbers=range(50, 61),
+    )
+    assert not second.failed
+    assert second.selection_complete
+    assert second.rendered_count == 11
+    assert not second.manifest.complete
+    assert [artifact.segment_number for artifact in second.manifest.speech] == [
+        *range(1, 21),
+        *range(50, 61),
+    ]
+    assert [f"{number:06d}.wav" for number in range(50, 61)] == [
+        artifact.wav
+        for artifact in second.manifest.speech
+        if artifact.segment_number >= 50
+    ]
+    assert adapter.synthesized_texts == [
+        f"speech {number}" for number in range(1, 21)
+    ] + [f"speech {number}" for number in range(50, 61)]
+
+
+def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan(*(f"speech {number}" for number in range(1, 6)))
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "chapter"
+    cache = tmp_path / "cache"
+
+    partial = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        speech_numbers=range(1, 3),
+    )
+    assert not partial.failed
+    assert not partial.manifest.complete
+    initial_synthesized = list(adapter.synthesized_texts)
+
+    full = render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
+    assert not full.failed
+    assert full.selection_complete
+    assert full.manifest.complete
+    assert full.planned_count == full.available_count == 5
+    assert full.reused_count == 2
+    assert full.rendered_count == 3
+    assert len(adapter.synthesized_texts) == len(initial_synthesized) + 3
+
+    open_count = adapter.open_count
+    reused = render_renderplan(
+        plan, preflight=report, output_dir=output, cache_dir=cache
+    )
+    assert not reused.failed
+    assert reused.manifest.complete
+    assert reused.rendered_count == 0
+    assert reused.reused_count == 5
+    assert adapter.open_count == open_count
+
+
+def test_corrupt_manifest_output_wav_is_dropped_and_regenerated_from_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("first", "second")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "chapter"
+    cache = tmp_path / "cache"
+    first = render_renderplan(
+        plan, preflight=report, output_dir=output, cache_dir=cache
+    )
+    assert first.manifest.complete
+    synthesized = list(adapter.synthesized_texts)
+    (output / "000001.wav").write_bytes(b"corrupt output")
+
+    resumed = render_renderplan(
+        plan, preflight=report, output_dir=output, cache_dir=cache
+    )
+    assert not resumed.failed
+    assert resumed.manifest.complete
+    assert resumed.rendered_count == 0
+    assert resumed.reused_count == 2
+    assert adapter.synthesized_texts == synthesized
+    loaded = load_manifest(resumed.manifest_path)
+    loaded.validate_against(plan)
+    assert wav_info(output / "000001.wav")["frames"] > 0
+
+
+def test_stale_plan_requires_force_and_force_resets_only_owned_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    old_plan = _plan("old plan")
+    old_report = _report(adapter, old_plan, tmp_path)
+    output = tmp_path / "chapter"
+    cache = tmp_path / "cache"
+    old = render_renderplan(
+        old_plan, preflight=old_report, output_dir=output, cache_dir=cache
+    )
+    (output / "preflight.toml").write_text("old preflight", encoding="utf-8")
+    (output / "keep.txt").write_text("user data", encoding="utf-8")
+    (output / "voice-note.wav").write_text("user data", encoding="utf-8")
+
+    new_plan = _plan("new plan")
+    new_report = _report(adapter, new_plan, tmp_path)
+    with pytest.raises(ArtifactError) as stale:
+        render_renderplan(
+            new_plan, preflight=new_report, output_dir=output, cache_dir=cache
+        )
+    assert stale.value.code == "output.stale_plan"
+    assert load_manifest(old.manifest_path).render_plan_id == old_plan.plan_id
+
+    forced = render_renderplan(
+        new_plan,
+        preflight=new_report,
+        output_dir=output,
+        cache_dir=cache,
+        force=True,
+    )
+    assert not forced.failed
+    assert forced.manifest.render_plan_id == new_plan.plan_id
+    assert (output / "keep.txt").read_text(encoding="utf-8") == "user data"
+    assert (output / "voice-note.wav").read_text(encoding="utf-8") == "user data"
+    assert not (output / "preflight.toml").exists()
+
+
+def test_force_rerenders_only_selected_speech_and_keeps_unselected_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("first", "second")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "chapter"
+    cache = tmp_path / "cache"
+    render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
+    second_bytes = (output / "000002.wav").read_bytes()
+    before = list(adapter.synthesized_texts)
+
+    forced = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        force=True,
+        speech_numbers={1},
+    )
+    assert not forced.failed
+    assert forced.manifest.complete
+    assert forced.selected_count == 1
+    assert forced.rendered_count == 1
+    assert forced.reused_count == 0
+    assert len(adapter.synthesized_texts) == len(before) + 1
+    assert (output / "000002.wav").read_bytes() == second_bytes
+
+
+@pytest.mark.parametrize("selection", [(), (0,), (-1,), (3,), (True,)])
+def test_invalid_speech_selection_fails_before_output_or_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selection: tuple[int, ...],
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("first", "second")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "invalid-selection"
+
+    with pytest.raises(PlanError, match="speech_numbers"):
+        render_renderplan(
+            plan,
+            preflight=report,
+            output_dir=output,
+            speech_numbers=selection,
+        )
+    assert adapter.synthesized_texts == []
+    assert not output.exists()
+
+
+def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    adapter = _install(monkeypatch)
+    profile = RenderProfile(
+        roles={"narrator": RoleProfile(language="en-US", binding=dict(_BINDING))},
+        default_role="narrator",
+    ).with_identity()
+    profile_id = profile.profile_id or profile.computed_id()
+    plan = replace(
+        _plan("speech one", "speech two", "speech three"),
+        render_profile_id=profile_id,
+        plan_id=None,
+    ).with_identity()
+
+    workspace = tmp_path / "integration-book"
+    fingerprint = profile_id.removeprefix("sha256:")[:12]
+    variant = f"narration--{fingerprint}"
+    variant_dir = workspace / "renderplan" / variant
+    variant_dir.mkdir(parents=True)
+    save_profile(profile, variant_dir / "renderprofile.toml")
+    plan_name = "chapter-0001.renderplan.toml"
+    save_plan(plan, variant_dir / plan_name)
+    chapter = RenderPlanSetChapter(
+        id="chapter-0001",
+        source_number=1,
+        source="../../chapter-0001.md",
+        utterplan="../../utterplan/chapter-0001.toml",
+        source_plan_id=plan.source_plan_id,
+        renderplan=plan_name,
+        render_plan_id=plan.plan_id or plan.computed_id(),
+    )
+    renderplan_set = RenderPlanSet(
+        variant="narration",
+        profile_fingerprint=fingerprint,
+        producer_version="test",
+        manifest="../../book.json",
+        utterplan_dir="../../utterplan",
+        profile_id=profile_id,
+        snapshot="renderprofile.toml",
+        source_profile="../../narration.renderprofile.toml",
+        chapters=(chapter,),
+    )
+    save_renderplan_set(variant_dir / "renderplan-set.toml", renderplan_set)
+
+    from voicerender.cli import main
+
+    output_root = tmp_path / "integration-output"
+    cache_dir = tmp_path / "integration-cache"
+
+    def invoke(*selection: str) -> dict[str, Any]:
+        args = [
+            "render-book",
+            str(workspace),
+            "--variant",
+            variant,
+            "--output-root",
+            str(output_root),
+            "--cache-dir",
+            str(cache_dir),
+            *selection,
+            "--json",
+        ]
+        assert main(args) == 0
+        return json.loads(capsys.readouterr().out)
+
+    first = invoke("--chapters", "1", "--speech", "1")
+    assert first["items"][0]["status"] == "partial"
+    assert first["items"][0]["manifest_complete"] is False
+    assert (output_root / variant / "chapter-0001" / "000001.wav").is_file()
+    assert adapter.synthesized_texts == ["speech one"]
+
+    second = invoke("--chapters", "1", "--speech", "3")
+    assert second["items"][0]["status"] == "partial"
+    assert second["items"][0]["available_speech"] == 2
+    assert adapter.synthesized_texts == ["speech one", "speech three"]
+
+    completed = invoke("--chapters", "1")
+    assert completed["items"][0]["status"] == "complete"
+    assert completed["items"][0]["manifest_complete"] is True
+    assert completed["items"][0]["rendered"] == 1
+    assert completed["items"][0]["reused"] == 2
+    assert adapter.synthesized_texts == ["speech one", "speech three", "speech two"]
+    manifest_path = output_root / variant / "chapter-0001" / "render-manifest.toml"
+    manifest = load_manifest(manifest_path)
+    assert manifest.complete
+    assert [item.wav for item in manifest.speech] == [
+        "000001.wav",
+        "000002.wav",
+        "000003.wav",
+    ]
+    open_count = adapter.open_count
+
+    reused = invoke("--chapters", "1")
+    assert reused["items"][0]["status"] == "reused"
+    assert adapter.open_count == open_count
