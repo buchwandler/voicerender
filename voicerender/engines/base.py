@@ -8,6 +8,8 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from renderplan import CapacityConstraint
+
 from .api_probe import EngineApiProbe
 
 if TYPE_CHECKING:
@@ -202,6 +204,18 @@ class EngineSession(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class RenderProfileFragment:
+    """Engine-derived facts needed to seed a shared RenderProfile role."""
+
+    binding: Mapping[str, Any]
+    token_fields: tuple[str, ...]
+    frontend: str
+    pronunciation: str
+    renderer_capacity: CapacityConstraint | None = None
+    planner_capacity: CapacityConstraint | None = None
+
+
 class EngineAdapter(Protocol):
     """Discovery, target resolution, and session opening for one synthesis engine."""
 
@@ -222,6 +236,12 @@ class EngineAdapter(Protocol):
 
     def capabilities(self) -> EngineCapabilities:
         """Return the synthesis features supported by this adapter."""
+        ...
+
+    def renderprofile_fragment(
+        self, selection: EngineSelection
+    ) -> RenderProfileFragment:
+        """Describe engine-derived binding, semantics, and capacity facts."""
         ...
 
     def discover(
@@ -414,6 +434,7 @@ __all__ = [
     "EngineSelection",
     "EngineSession",
     "PronunciationSpan",
+    "RenderProfileFragment",
     "RenderedSpeech",
     "RequestMeasure",
     "SpeechRequest",

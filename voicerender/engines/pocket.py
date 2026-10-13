@@ -97,7 +97,7 @@ class PocketAdapter:
             def synthesize_request(self, request: SynthesisRequest) -> SynthesisOutput:
                 if request.directives:
                     raise EngineError(
-                        "Pocket does not support per-segment UtterPlan directives"
+                        "Pocket does not support per-item planner directives"
                     )
                 return self.synthesize(
                     request_id=request.request_id,

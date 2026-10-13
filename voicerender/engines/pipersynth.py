@@ -27,6 +27,7 @@ from .base import (
     EngineSelection,
     PronunciationSpan,
     RenderedSpeech,
+    RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
     SpeechToken,
@@ -41,6 +42,7 @@ from .metadata import (
     normalize_language_key,
     normalize_locale_tag,
 )
+from .profiles import make_renderprofile_fragment
 
 PIPER_RENDER_OPTIONS = frozenset(
     {
@@ -65,9 +67,9 @@ class PiperTargetRequiredError(ValueError):
 
     def __init__(self, language: str) -> None:
         super().__init__(
-            "piper.voice_required: Piper needs a voice bundle target. Supply --model <bundle-id>, "
-            "--voice <bundle-id>, or bind the role to a semantic Piper voice reference. Discover bundle IDs "
-            f"with `voicerender voices list --engine piper --lang {language}`."
+            "piper.voice_required: Piper needs a voice bundle target ID. Discover available targets "
+            f"with `voicerender voices list --engine piper --lang {language}`, then bind the selected "
+            "target to a RenderProfile role."
         )
 
 
@@ -376,6 +378,16 @@ class PiperSynthEngineAdapter:
             supports_qualities=True,
             supports_live=True,
             supports_timestamps=False,
+        )
+
+    def renderprofile_fragment(
+        self, selection: EngineSelection
+    ) -> RenderProfileFragment:
+        return make_renderprofile_fragment(
+            self,
+            selection,
+            frontend="pipersynth",
+            pronunciation="pipersynth.ipa",
         )
 
     def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:

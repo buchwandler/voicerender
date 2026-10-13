@@ -1,2 +1,3 @@
-include docs/utterplan-v5-integration.md
+include docs/index.md
 recursive-include examples *.toml
+include examples/README.md

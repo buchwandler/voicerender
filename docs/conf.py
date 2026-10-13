@@ -7,14 +7,14 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(".."))
-sys.path.insert(0, os.path.abspath("../pykokoro"))
+DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(DOCS_DIR, "..")))
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = "pykokoro"
-copyright = "2025, Holger Nahrstaedt"
-author = "Holger Nahrstaedt"
+project = "VoiceRender"
+copyright = "2026, VoiceRender contributors"
+author = "VoiceRender contributors"
 
 # -- General configuration ---------------------------------------------------
 

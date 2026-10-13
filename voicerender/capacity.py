@@ -410,7 +410,7 @@ def _candidate_boundaries(
                 boundary.position,
                 priority,
                 f"semantic_{boundary.kind}",
-                "utterplan",
+                "planner",
                 semantic_boundary_id=boundary.semantic_boundary_id,
                 origin=boundary.origin,
             )
@@ -456,8 +456,8 @@ def _candidate_boundaries(
 
     token_priority = 4 if planned else 3
     for token_start, token_end in capacity.linguistic_token_ranges:
-        add(token_start, token_priority, "token_edge", "utterplan")
-        add(token_end, token_priority, "token_edge", "utterplan")
+        add(token_start, token_priority, "token_edge", "planner")
+        add(token_end, token_priority, "token_edge", "planner")
     for token in request.tokens:
         add(token.start, token_priority, "token_edge", "request.tokens")
         add(token.end, token_priority, "token_edge", "request.tokens")
@@ -491,9 +491,9 @@ def _candidate_boundaries(
 def _prefer_candidate(candidate: CapacityBoundary, current: CapacityBoundary) -> bool:
     if candidate.priority != current.priority:
         return candidate.priority < current.priority
-    if candidate.source == "utterplan" and current.source != "utterplan":
+    if candidate.source == "planner" and current.source != "planner":
         return True
-    if current.source == "utterplan" and candidate.source != "utterplan":
+    if current.source == "planner" and candidate.source != "planner":
         return False
     return (candidate.kind, candidate.semantic_boundary_id or "") < (
         current.kind,

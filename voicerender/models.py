@@ -18,7 +18,6 @@ except ImportError:  # pragma: no cover - Python 3.10
 SCHEMA_PLAN = "utterplan.voiceplan.v1"
 SCHEMA_PROFILE = "voicerender.voice-profile.v1"
 SCHEMA_MANIFEST = "voicerender.render-manifest.v1"
-SCHEMA_MANIFEST_V2 = "voicerender.render-manifest.v2"
 SCHEMA_VOICE_CONFIG = "voicerender.voice-config.v1"
 
 

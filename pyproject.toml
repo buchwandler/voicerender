@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voicerender"
 dynamic = ["version"]
-description = "Resumable multi-engine speech synthesis and reference-voice rendering"
+description = "Shared RenderPlan preflight and resumable multi-engine speech synthesis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -15,6 +15,7 @@ dependencies = [
   "numpy>=1.23",
   "soundfile>=0.12",
   "tomli>=2; python_version < '3.11'",
+  "renderplan>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -41,7 +42,7 @@ include = ["voicerender*"]
 exclude = ["tests*", "examples*"]
 
 [tool.setuptools.package-data]
-voicerender = ["py.typed", "schemas/*.json"]
+voicerender = ["py.typed"]
 
 [tool.setuptools_scm]
 fallback_version = "0+unknown"
@@ -52,7 +53,10 @@ testpaths = ["tests"]
 
 
 [tool.ruff]
-extend-exclude = ["02_audiocompose_voicerender_manual_pipeline_implementation_brief.md"]
+extend-exclude = [
+  "02_audiocompose_voicerender_manual_pipeline_implementation_brief.md",
+  "03_voicerender_renderplan_preflight_and_execution_brief.md",
+]
 
 [tool.mypy]
 # Current NumPy stubs use type statements introduced in Python 3.12.
@@ -68,6 +72,8 @@ module = [
   "pykokoro",
   "soundfile",
   "supertonicsynth",
+  "renderplan",
+  "renderplan.*",
   "tomli",
   "tomllib",
 ]

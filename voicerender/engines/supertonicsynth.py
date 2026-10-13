@@ -24,6 +24,7 @@ from .base import (
     EngineCapabilities,
     EngineSelection,
     RenderedSpeech,
+    RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
     distribution_version,
@@ -37,6 +38,7 @@ from .metadata import (
     normalize_language_key,
     normalize_locale_tag,
 )
+from .profiles import make_renderprofile_fragment
 
 ENGINE_ID = "supertonic"
 PACKAGE_NAME = "supertonicsynth"
@@ -406,6 +408,18 @@ class SupertonicSynthEngineAdapter:
             supports_qualities=False,
             supports_voice_level_calibration=True,
             supports_request_measurement=True,
+        )
+
+    def renderprofile_fragment(
+        self, selection: EngineSelection
+    ) -> RenderProfileFragment:
+        return make_renderprofile_fragment(
+            self,
+            selection,
+            frontend="supertonicsynth",
+            pronunciation="unsupported",
+            capacity_key="max_input_tokens",
+            capacity_metric="model_tokens",
         )
 
     def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:

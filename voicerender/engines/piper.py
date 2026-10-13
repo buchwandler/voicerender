@@ -113,7 +113,7 @@ class PiperAdapter:
             def synthesize_request(self, request: SynthesisRequest) -> SynthesisOutput:
                 if request.directives:
                     raise EngineError(
-                        "Piper does not support per-segment UtterPlan directives"
+                        "Piper does not support per-item planner directives"
                     )
                 return self.synthesize(
                     request_id=request.request_id,

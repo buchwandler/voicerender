@@ -159,7 +159,7 @@ jobs:
           sdist = next(artifacts.glob("voicerender-*.tar.gz"))
           expected = {
               "voicerender/py.typed",
-              "voicerender/schemas/render-manifest-v2.schema.json",
+              "voicerender/renderplan_render.py",
           }
 
           with ZipFile(wheel) as archive:
@@ -187,6 +187,7 @@ jobs:
                   "pocketsynth", "supertonicsynth",
               }
               assert not engine_sdks & base_requirements
+              assert "utterplan" not in base_requirements
               assert not {"audiocompose", "readio"} & {name.lower() for name in requirements}
 
           with tarfile.open(sdist, "r:gz") as archive:
@@ -212,12 +213,12 @@ jobs:
 
           assert metadata.version("voicerender") == voicerender.__version__
           assert resources.files("voicerender").joinpath("py.typed").is_file()
-          assert resources.files("voicerender").joinpath("schemas/render-manifest-v2.schema.json").is_file()
+          assert resources.files("voicerender").joinpath("renderplan_render.py").is_file()
           assert len(list_engines()) == 6
           assert not any(
               name.split(".", 1)[0] in {
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
-                  "pocketsynth", "supertonicsynth",
+                  "pocketsynth", "supertonicsynth", "utterplan",
               }
               for name in sys.modules
           )
@@ -244,4 +245,4 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r docs/requirements.txt
       - name: Build documentation
-        run: sphinx-build -W --keep-going -D master_doc=utterplan-v5-integration -b html docs docs/_build/html
+        run: sphinx-build -W --keep-going -D master_doc=index -b html docs docs/_build/html

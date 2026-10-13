@@ -181,7 +181,7 @@ def test_planned_capacity_prefers_semantic_clause_and_records_provenance() -> No
     assert split == {
         "reason": "model_capacity",
         "boundary_kind": "semantic_clause",
-        "source": "utterplan",
+        "source": "planner",
         "semantic_boundary_id": "semantic-boundary-000004",
         "origin": "phrasplit",
     }
@@ -224,7 +224,7 @@ def test_planned_capacity_uses_independent_linguistic_token_ranges() -> None:
     assert rendered.manifest["requests"][0]["split"] == {
         "reason": "model_capacity",
         "boundary_kind": "token_edge",
-        "source": "utterplan",
+        "source": "planner",
     }
     assert "".join(child.text for child in session.calls) == request.text
 

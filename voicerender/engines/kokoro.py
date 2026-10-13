@@ -29,6 +29,7 @@ from .base import (
     EngineSelection,
     PronunciationSpan,
     RenderedSpeech,
+    RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
     SpeechToken,
@@ -39,6 +40,7 @@ from .base import (
 )
 from .catalog import SynthesisTarget, TargetVoice
 from .metadata import normalize_language_key
+from .profiles import make_renderprofile_fragment
 from .registry import normalize_engine_id
 
 logger = logging.getLogger(__name__)
@@ -504,6 +506,19 @@ class PyKokoroEngineAdapter:
             supports_timestamps=True,
             supports_voice_level_calibration=True,
             supports_request_measurement=True,
+        )
+
+    def renderprofile_fragment(
+        self, selection: EngineSelection
+    ) -> RenderProfileFragment:
+        return make_renderprofile_fragment(
+            self,
+            selection,
+            token_fields=("span", "pos", "tag"),
+            frontend="pykokoro",
+            pronunciation="pykokoro.ipa",
+            capacity_key="max_tokens",
+            capacity_metric="model_tokens",
         )
 
     def discover(self, request: Any) -> tuple[SynthesisTarget, ...]:

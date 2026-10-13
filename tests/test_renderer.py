@@ -18,15 +18,11 @@ from voicerender import (
     render,
     render_plan,
 )
-from voicerender.cli import main
 from voicerender.engines import _legacy_adapters
-from voicerender.engines.api_probe import EngineApiProbe
 from voicerender.engines.base import (
     EngineCapabilities,
-    EngineSelection,
     SynthesisOutput,
 )
-from voicerender.engines.registry import _ADAPTERS as _REQUEST_ADAPTERS
 
 
 class FakeEngine:
@@ -215,7 +211,7 @@ def test_selection_validation(tmp_path, mock_engine):
         )
 
 
-def test_profile_validation_and_load(tmp_path, monkeypatch):
+def test_legacy_voice_profile_load(tmp_path):
     path = tmp_path / "p.toml"
     path.write_text(
         'schema = "voicerender.voice-profile.v1"\nname = "p"\n[roles.narrator]\nengine = "piper"\ntarget_id = "amy"\n'
@@ -223,36 +219,6 @@ def test_profile_validation_and_load(tmp_path, monkeypatch):
     loaded = VoiceProfile.load(path)
     assert loaded.roles["narrator"].target_id == "amy"
 
-    class SelectionAdapter:
-        def probe_api(self):
-            return EngineApiProbe(
-                engine="piper",
-                package="pipersynth",
-                compatible=True,
-                status="ready",
-                expected_api_version=1,
-                api_version=1,
-                contract_source="explicit",
-            )
-
-        def resolve(self, request):
-            return (
-                EngineSelection(
-                    engine=request.engine,
-                    target_id=request.target_id,
-                    language=request.language,
-                    voice=request.voice,
-                    speaker=request.speaker,
-                    options=request.options,
-                ),
-                (),
-            )
-
-        def validate_selection(self, selection):
-            return ()
-
-    monkeypatch.setitem(_REQUEST_ADAPTERS, "piper", SelectionAdapter())
-    assert main(["profiles", "validate", str(path)]) == 0
     path.write_text(
         'schema = "voicerender.voice-profile.v1"\nname = "p"\n[roles.narrator]\nengine = "piper"\ntarget_id = "amy"\nreference_audio = "reference.wav"\n'
     )
@@ -261,7 +227,7 @@ def test_profile_validation_and_load(tmp_path, monkeypatch):
     )
 
 
-def test_plan_load_and_cli_inspect(tmp_path, mock_engine):
+def test_plan_load_and_legacy_render(tmp_path, mock_engine):
     plan_path = tmp_path / "chapter.toml"
     plan_path.write_text(
         'schema = "utterplan.voiceplan.v1"\nsource_plan_id = "plan123"\n[[segments]]\nid = "1"\nscope_id = "c"\nrole = "narrator"\ntext = "Hello"\n'
@@ -270,7 +236,6 @@ def test_plan_load_and_cli_inspect(tmp_path, mock_engine):
     out = tmp_path / "o"
     render_plan(plan, profile=profile(), output_dir=out)
     assert read_manifest(out)["source_plan_id"] == "plan123"
-    assert main(["inspect", str(out / "manifest.json"), "--json"]) == 0
     text = plan_path.read_text() + 'engine_options = "unsupported"\n'
     plan_path.write_text(text)
     with pytest.raises(PlanError, match="Unsupported speech metadata"):

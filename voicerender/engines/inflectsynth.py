@@ -26,6 +26,7 @@ from .base import (
     EngineDiagnostic,
     EngineSelection,
     RenderedSpeech,
+    RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
     distribution_version,
@@ -39,6 +40,7 @@ from .metadata import (
     normalize_language_key,
     normalize_locale_tag,
 )
+from .profiles import make_renderprofile_fragment
 
 ENGINE_ID = "inflect"
 PACKAGE_NAME = "inflectsynth"
@@ -565,6 +567,18 @@ class InflectSynthEngineAdapter:
             supports_timestamps=False,
             supports_voice_level_calibration=True,
             supports_request_measurement=supports_measurement,
+        )
+
+    def renderprofile_fragment(
+        self, selection: EngineSelection
+    ) -> RenderProfileFragment:
+        return make_renderprofile_fragment(
+            self,
+            selection,
+            frontend="inflectsynth",
+            pronunciation="unsupported",
+            capacity_key="max_input_tokens",
+            capacity_metric="model_tokens",
         )
 
     def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:

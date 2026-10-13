@@ -72,7 +72,7 @@ jobs:
               names = set(archive.namelist())
               expected = {
                   "voicerender/py.typed",
-                  "voicerender/schemas/render-manifest-v2.schema.json",
+                  "voicerender/renderplan_render.py",
               }
               assert expected <= names
           PY

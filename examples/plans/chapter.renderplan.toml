@@ -1,0 +1,39 @@
+format = "renderplan"
+plan_id = "sha256:246425faea21d13797a8bd8b28b4804a37a6c81f5f9f53f9d61342b0d1e34864"
+render_profile_id = "sha256:525856299523199f450d4955fede32f6392aa6bbbcb88dd54ad094feb0278e47"
+schema_version = 1
+source_plan_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[producer]
+name = "voicerender-example"
+version = "1.0"
+
+[[flow]]
+kind = "speech"
+language = "en-US"
+number = 1
+planning_level = "sentence"
+preflight_required = true
+role = "narrator"
+segment_id = "sha256:b78059ef7d18a997ea09ae78877fc4a001d894cf154ef329161772454dad9de3"
+semantic_end = "none"
+split_reason = "policy"
+text = "A small shared RenderPlan example."
+wav = "000001.wav"
+
+[flow.binding]
+renderer = "piper"
+target_id = "en_US-amy-medium"
+voice = "en_US-amy-medium"
+
+[flow.binding.options]
+
+[flow.binding.renderer_metadata]
+frontend = "pipersynth"
+pronunciation = "pipersynth.ipa"
+source_revision = "c10ece1aade47bb51c153c893d14e5bf8e5b7117"
+
+[[flow.source]]
+end = 34
+locator = "example.chapter.s000"
+start = 0

@@ -20,6 +20,7 @@ from .base import (
     EngineCapabilities,
     EngineSelection,
     RenderedSpeech,
+    RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
     distribution_version,
@@ -31,6 +32,7 @@ from .metadata import (
     normalize_language_key,
     normalize_locale_tag,
 )
+from .profiles import make_renderprofile_fragment
 
 DEFAULT_KITTEN_MODEL = "nano-0.8-int8"
 DEFAULT_KITTEN_VOICE = "Jasper"
@@ -270,6 +272,16 @@ class KittenSynthEngineAdapter:
             supports_timestamps=False,
             supports_voice_level_calibration=False,
             supports_request_measurement=False,
+        )
+
+    def renderprofile_fragment(
+        self, selection: EngineSelection
+    ) -> RenderProfileFragment:
+        return make_renderprofile_fragment(
+            self,
+            selection,
+            frontend="kittensynth",
+            pronunciation="unsupported",
         )
 
     def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:

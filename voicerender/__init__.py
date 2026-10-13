@@ -1,6 +1,14 @@
-"""VoiceRender: standalone, resumable speech synthesis to reusable WAV segments."""
+"""VoiceRender: request-level speech synthesis with shared RenderPlan contracts."""
 
 from importlib.metadata import PackageNotFoundError, version
+
+from renderplan import (
+    PreflightReport,
+    RenderManifest,
+    RenderPlan,
+    RenderProfile,
+    SpeechItem,
+)
 
 from .engines.api_probe import EngineApiProbe
 from .engines.base import (
@@ -11,6 +19,7 @@ from .engines.base import (
     EngineSession,
     PronunciationSpan,
     RenderedSpeech,
+    RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
     SpeechToken,
@@ -42,13 +51,6 @@ from .errors import (
     VoiceRenderError,
 )
 from .events import RenderEvent, RenderEventCallback, RenderEventKind
-from .handoff import (
-    load_source_plan,
-    read_render_manifest,
-    validate_manifest_source,
-    verify_render_manifest,
-)
-from .inputs.utterplan_v5 import RenderSelection, UtterPlanV5, select_segments
 from .models import (
     RenderResult,
     SpeechSegment,
@@ -57,8 +59,16 @@ from .models import (
     VoicePlan,
     VoiceProfile,
 )
+from .preflight import preflight_render_plan
 from .render import render, render_plan
-from .render_v5 import render_utterplan, render_utterplan_v5, validate_utterplan
+from .renderplan_render import RenderPlanResult, render_renderplan
+from .renderprofile import (
+    create_render_profile,
+    load_render_profile,
+    refresh_render_profile,
+    save_render_profile,
+    validate_render_profile,
+)
 
 try:
     __version__ = version("voicerender")
@@ -83,16 +93,22 @@ __all__ = [
     "EngineSynthesisError",
     "EngineUnavailableError",
     "PlanError",
+    "PreflightReport",
     "ProfileError",
     "PronunciationSpan",
     "RenderEvent",
     "RenderEventCallback",
     "RenderEventCallbackError",
     "RenderEventKind",
+    "RenderManifest",
+    "RenderPlan",
+    "RenderPlanResult",
+    "RenderProfile",
+    "RenderProfileFragment",
     "RenderResult",
-    "RenderSelection",
     "RenderedSpeech",
     "RequestMeasure",
+    "SpeechItem",
     "SpeechRequest",
     "SpeechSegment",
     "SpeechToken",
@@ -101,27 +117,25 @@ __all__ = [
     "TargetVoice",
     "UnsupportedPlanSemanticsError",
     "UnsupportedSynthesisFeatureError",
-    "UtterPlanV5",
     "VoiceBinding",
     "VoiceConfig",
     "VoicePlan",
     "VoiceProfile",
     "VoiceRenderError",
     "__version__",
+    "create_render_profile",
     "discover_targets",
     "engine_status",
     "list_engines",
-    "load_source_plan",
+    "load_render_profile",
     "open_session",
-    "read_render_manifest",
+    "preflight_render_plan",
+    "refresh_render_profile",
     "render",
     "render_plan",
-    "render_utterplan",
-    "render_utterplan_v5",
+    "render_renderplan",
     "resolve_voice",
-    "select_segments",
+    "save_render_profile",
     "synthesize",
-    "validate_manifest_source",
-    "validate_utterplan",
-    "verify_render_manifest",
+    "validate_render_profile",
 ]

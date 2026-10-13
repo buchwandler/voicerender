@@ -17,7 +17,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install coverage pytest pytest-cov
           python -m pip install -e ".[dev]"
-          python -m pytest --cov=utterplan --cov-report=xml --junitxml=junit.xml
+          python -m pytest --cov=voicerender --cov-report=xml --junitxml=junit.xml
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:

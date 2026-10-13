@@ -1,0 +1,36 @@
+default_role = "narrator"
+format = "renderprofile"
+profile_id = "sha256:525856299523199f450d4955fede32f6392aa6bbbcb88dd54ad094feb0278e47"
+schema_version = 1
+
+[pauses]
+clause = "180ms"
+mode = "manual"
+paragraph = "800ms"
+sentence = "500ms"
+
+[planning]
+capacity_fallback = ["clause", "token"]
+split = "sentence"
+
+[roles]
+
+[roles.narrator]
+language = "en-US"
+
+[roles.narrator.binding]
+renderer = "piper"
+target_id = "en_US-amy-medium"
+voice = "en_US-amy-medium"
+
+[roles.narrator.binding.options]
+
+[roles.narrator.binding.renderer_metadata]
+frontend = "pipersynth"
+pronunciation = "pipersynth.ipa"
+source_revision = "c10ece1aade47bb51c153c893d14e5bf8e5b7117"
+
+[roles.narrator.requirements]
+frontend = "pipersynth"
+pronunciation = "pipersynth.ipa"
+token_fields = []
