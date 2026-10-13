@@ -100,7 +100,8 @@ jobs:
             "pytest==8.0.0" \
             "numpy==1.23.0" \
             "soundfile==0.12.1" \
-            "tomli==2.0.1"
+            "tomli==2.0.1" \
+            "renderplan==0.1.1"
           python -m pip install --no-deps -e .
       - name: Run lower-bound tests
         run: python -m pytest -q
@@ -160,6 +161,8 @@ jobs:
           expected = {
               "voicerender/py.typed",
               "voicerender/renderplan_render.py",
+              "voicerender/book_contract.py",
+              "voicerender/book_layout.py",
           }
 
           with ZipFile(wheel) as archive:
@@ -174,6 +177,15 @@ jobs:
                   for value in metadata.get_all("Requires-Dist", [])
               }
               assert {"numpy", "soundfile"} <= requirements
+
+              renderplan_requirement = next(
+                  Requirement(value)
+                  for value in metadata.get_all("Requires-Dist", [])
+                  if Requirement(value).name.lower() == "renderplan"
+              )
+              assert {">=0.1.1", "<0.2"} <= {
+                  str(specifier) for specifier in renderplan_requirement.specifier
+              }
               base_requirements = set()
               for value in metadata.get_all("Requires-Dist", []):
                   requirement = Requirement(value)
@@ -209,11 +221,16 @@ jobs:
           import sys
 
           import voicerender
+          import voicerender.book
+          from renderplan import RenderPlanSet
           from voicerender import list_engines
 
           assert metadata.version("voicerender") == voicerender.__version__
           assert resources.files("voicerender").joinpath("py.typed").is_file()
           assert resources.files("voicerender").joinpath("renderplan_render.py").is_file()
+          assert resources.files("voicerender").joinpath("book_contract.py").is_file()
+          assert resources.files("voicerender").joinpath("book_layout.py").is_file()
+          assert RenderPlanSet is not None
           assert len(list_engines()) == 6
           assert not any(
               name.split(".", 1)[0] in {
@@ -225,6 +242,7 @@ jobs:
           PY
           "$VENV/bin/voicerender" --version
           "$VENV/bin/voicerender" engines list --json
+          "$VENV/bin/python" "$GITHUB_WORKSPACE/tests/wheel_smoke.py"
       - name: Smoke-test the installed Piper extra
         working-directory: ${{ runner.temp }}
         run: |

@@ -21,6 +21,8 @@ class RenderEventCallbackError(VoiceRenderError):
 class PlanError(VoiceRenderError, ValueError):
     """Invalid speech plan or selection."""
 
+    code = "plan.invalid"
+
 
 class UnsupportedPlanSemanticsError(PlanError):
     """A valid source plan requires semantics VoiceRender cannot preserve."""

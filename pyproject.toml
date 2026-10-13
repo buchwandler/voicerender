@@ -15,7 +15,7 @@ dependencies = [
   "numpy>=1.23",
   "soundfile>=0.12",
   "tomli>=2; python_version < '3.11'",
-  "renderplan>=0.1,<0.2",
+  "renderplan>=0.1.1,<0.2",
 ]
 
 [project.optional-dependencies]

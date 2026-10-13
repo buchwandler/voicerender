@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 from renderplan import (
     PreflightCheck,
     PreflightReport,
@@ -16,11 +20,13 @@ from renderplan import (
     RenderPlanSet,
     RenderPlanSetChapter,
     RenderProfile,
+    ReplanRequest,
     RoleProfile,
     SourceSpan,
     SpeechArtifact,
     SpeechItem,
     load_manifest,
+    load_plan,
     save_manifest,
     save_plan,
     save_preflight,
@@ -29,6 +35,7 @@ from renderplan import (
 )
 
 import voicerender.book as book_module
+from voicerender.book_contract import load_renderplan_set
 from voicerender.errors import ArtifactError
 from voicerender.renderplan_render import RENDER_MANIFEST_FILENAME, RenderPlanResult
 from voicerender.storage import atomic_wav
@@ -155,9 +162,10 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         output_dir: str | Path,
         cache_dir: str | Path | None = None,
         force: bool = False,
+        recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
     ) -> RenderPlanResult:
-        del cache_dir
+        del cache_dir, recheck_report_path
         selected = (
             tuple(plan.speech)
             if speech_numbers is None
@@ -326,6 +334,97 @@ def test_partial_windows_accumulate_and_later_full_selection_finishes_chapter(
     assert len(calls["preflight"]) == 1
 
 
+def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path, chapters=((5, 1),))
+    original_render = book_module.render_renderplan
+
+    def replan_during_render(
+        plan: RenderPlan,
+        *,
+        preflight: PreflightReport,
+        output_dir: str | Path,
+        cache_dir: str | Path | None = None,
+        force: bool = False,
+        recheck_report_path: str | Path | None = None,
+        speech_numbers: set[int] | frozenset[int] | None = None,
+    ) -> RenderPlanResult:
+        result = original_render(
+            plan,
+            preflight=preflight,
+            output_dir=output_dir,
+            cache_dir=cache_dir,
+            force=force,
+            recheck_report_path=recheck_report_path,
+            speech_numbers=speech_numbers,
+        )
+        assert recheck_report_path is not None
+        speech = plan.speech[0]
+        check = PreflightCheck(
+            segment_number=speech.number,
+            segment_id=speech.segment_id or speech.computed_id(),
+            status="too_long",
+            metric="model_tokens",
+            measured=101,
+            maximum=100,
+            source="test.runtime_measurement",
+        )
+        request = ReplanRequest(
+            segment_number=speech.number,
+            segment_id=speech.segment_id or speech.computed_id(),
+            source=speech.source,
+            current_level=speech.planning_level,
+            action="split",
+            reason="capacity",
+            metric="model_tokens",
+            measured=101,
+            maximum=100,
+        )
+        fresh = PreflightReport(
+            render_plan_id=plan.plan_id or plan.computed_id(),
+            source_plan_id=plan.source_plan_id,
+            render_profile_id=plan.render_profile_id,
+            status="replan",
+            checks=(check,),
+            replan=(request,),
+            producer=Producer(name="voicerender", version="test"),
+        ).with_identity()
+        fresh.validate_against(plan)
+        save_preflight(fresh, recheck_report_path)
+        return replace(
+            result,
+            error="fresh capacity check rejected this occurrence",
+            fresh_preflight=fresh,
+            error_code="preflight.replan",
+        )
+
+    monkeypatch.setattr(book_module, "render_renderplan", replan_during_render)
+    rendered = book_module.render_book(workspace, variant=variant)
+
+    outcome = rendered.outcomes[0]
+    assert outcome.status == "failed"
+    assert outcome.error_code == "preflight.replan"
+    assert outcome.recheck_report is not None
+    assert outcome.recheck_report.name == "preflight-recheck.toml"
+    fresh = book_module.load_preflight(outcome.recheck_report)
+    assert fresh.status == "replan"
+    assert fresh.render_plan_id == outcome.render_plan_id
+    expected_plan = load_plan(outcome.renderplan)
+    assert [(check.segment_number, check.segment_id) for check in fresh.checks] == [
+        (
+            expected_plan.speech[0].number,
+            expected_plan.speech[0].segment_id or expected_plan.speech[0].computed_id(),
+        )
+    ]
+    report = tomllib.loads(rendered.report_path.read_text(encoding="utf-8"))
+    assert report["item"][0]["error_code"] == "preflight.replan"
+    assert report["item"][0]["recheck_report"] == (
+        "chapter-0005/preflight-recheck.toml"
+    )
+
+
 def test_invalid_selection_and_identity_fail_before_preflight_or_render(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -345,7 +444,7 @@ def test_invalid_selection_and_identity_fail_before_preflight_or_render(
     assert calls["render"] == []
 
     set_path = workspace / "renderplan" / variant / "renderplan-set.toml"
-    renderplan_set = book_module.load_renderplan_set(set_path)
+    renderplan_set = load_renderplan_set(set_path)
     bad_chapter = replace(
         renderplan_set.chapters[0], render_plan_id="sha256:" + "f" * 64
     )
@@ -374,12 +473,12 @@ def test_malformed_set_variant_path_and_symlink_escape_fail_closed(
     set_path.write_text("format = [", encoding="utf-8")
     with pytest.raises(book_module.BookRenderError) as malformed:
         book_module.render_book(workspace, variant=variant)
-    assert malformed.value.code == "index.invalid"
+    assert malformed.value.code == "index.read_failed"
 
     workspace2, variant2 = _book(tmp_path / "second", chapters=((5, 1),))
     variant_dir2 = workspace2 / "renderplan" / variant2
     set_path2 = variant_dir2 / "renderplan-set.toml"
-    renderplan_set2 = book_module.load_renderplan_set(set_path2)
+    renderplan_set2 = load_renderplan_set(set_path2)
     entry = renderplan_set2.chapters[0]
     outside = tmp_path / "outside.renderplan.toml"
     outside.write_text(

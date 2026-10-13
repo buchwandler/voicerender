@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from renderplan import (
@@ -17,16 +16,39 @@ from renderplan import (
     RenderManifest,
     RenderPlan,
     RenderPlanSetChapter,
-    RenderPlanSetError,
     load_manifest,
     load_plan,
     load_preflight,
-    load_renderplan_set,
-    validate_renderplan_set,
-    validate_renderplan_set_profile,
 )
 
-from .errors import ArtifactError, PlanError, VoiceRenderError
+from .book_contract import (
+    BookRenderError,
+    load_validated_renderplan_set,
+    validate_chapter_plan,
+    validate_profile_snapshot,
+)
+from .book_layout import (
+    assert_safe_output_metadata as _assert_safe_output_metadata,
+)
+from .book_layout import (
+    is_within as _is_within,
+)
+from .book_layout import (
+    regular_file as _regular_file,
+)
+from .book_layout import (
+    require_contained_file as _require_contained_file,
+)
+from .book_layout import (
+    resolve_root as _resolve_root,
+)
+from .book_layout import (
+    resolve_variant_directory,
+)
+from .book_layout import (
+    resolve_workspace as _resolve_workspace,
+)
+from .errors import ArtifactError, PlanError
 from .preflight import preflight_render_plan
 from .renderplan_render import (
     RENDER_MANIFEST_FILENAME,
@@ -35,15 +57,8 @@ from .renderplan_render import (
 from .storage import verified_wav
 
 BOOK_REPORT_FILENAME = "voicerender-report.toml"
+RECHECK_PREFLIGHT_FILENAME = "preflight-recheck.toml"
 BookChapterStatus = Literal["complete", "partial", "failed", "skipped", "reused"]
-
-
-class BookRenderError(VoiceRenderError, ValueError):
-    """A book workspace, variant, index, profile, or selector is invalid."""
-
-    def __init__(self, message: str, *, code: str = "workspace.invalid") -> None:
-        super().__init__(message)
-        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +107,8 @@ class ChapterRenderOutcome:
     manifest_complete: bool = False
     error_code: str | None = None
     error_message: str | None = None
+    recheck_report: Path | None = None
+    execution_fingerprint: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,42 +242,10 @@ def _resolve_request(
     fail_fast: bool,
 ) -> BookRenderRequest:
     workspace_path = _resolve_workspace(workspace)
-    if (
-        not isinstance(variant, str)
-        or not variant
-        or variant in {".", ".."}
-        or Path(variant).name != variant
-        or PureWindowsPath(variant).name != variant
-        or "/" in variant
-        or "\\" in variant
-        or "\x00" in variant
-    ):
-        raise BookRenderError(
-            "--variant must be an exact directory basename",
-            code="variant.identity_mismatch",
-        )
-
     renderplan_base = _resolve_root(
         renderplan_root or workspace_path / "renderplan", "RenderPlan"
     )
-    variant_candidate = renderplan_base / variant
-    if not variant_candidate.exists():
-        raise BookRenderError(
-            f"RenderPlan variant directory does not exist: {variant_candidate}",
-            code="variant.not_found",
-        )
-    try:
-        variant_dir = variant_candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BookRenderError(
-            f"cannot resolve RenderPlan variant directory {variant_candidate}: {exc}",
-            code="variant.not_found",
-        ) from exc
-    if not variant_dir.is_dir() or not _is_within(variant_dir, renderplan_base):
-        raise BookRenderError(
-            f"RenderPlan variant is not a directory inside its root: {variant_candidate}",
-            code="variant.not_found",
-        )
+    variant_dir = resolve_variant_directory(renderplan_base, variant)
 
     set_path = variant_dir / "renderplan-set.toml"
     if set_path.is_symlink() or not _regular_file(set_path):
@@ -268,14 +253,7 @@ def _resolve_request(
             f"renderplan-set.toml must be a regular file: {set_path}",
             code="index.invalid",
         )
-    try:
-        renderplan_set = load_renderplan_set(set_path)
-        validate_renderplan_set(renderplan_set)
-    except (RenderPlanSetError, OSError, ValueError, TypeError) as exc:
-        raise BookRenderError(
-            f"invalid renderplan-set.toml: {exc}",
-            code="index.invalid",
-        ) from exc
+    renderplan_set = load_validated_renderplan_set(set_path)
 
     expected_variant_name = (
         f"{renderplan_set.variant}--{renderplan_set.profile_fingerprint}"
@@ -294,14 +272,7 @@ def _resolve_request(
         missing_code="profile.snapshot_missing",
         reject_symlink=False,
     )
-    try:
-        profile = validate_renderplan_set_profile(
-            renderplan_set,
-            profile_path,
-            expected_profile_id=renderplan_set.profile_id,
-        )
-    except RenderPlanSetError as exc:
-        raise BookRenderError(str(exc), code=exc.code) from exc
+    profile = validate_profile_snapshot(renderplan_set, profile_path)
     profile_id = profile.profile_id or profile.computed_id()
 
     available_chapters = {chapter.source_number for chapter in renderplan_set.chapters}
@@ -347,7 +318,6 @@ def _resolve_request(
     loaded_chapters: list[_LoadedChapter] = []
     chapter_outputs: set[Path] = set()
     for entry in selected_entries:
-        _validate_chapter_id(entry.id)
         plan_candidate = variant_dir.joinpath(*PurePosixPath(entry.renderplan).parts)
         plan_path = _require_contained_file(
             plan_candidate,
@@ -362,16 +332,7 @@ def _resolve_request(
             raise BookRenderError(
                 f"cannot load RenderPlan for {entry.id}: {exc}", code="plan.missing"
             ) from exc
-        plan_id = plan.plan_id or plan.computed_id()
-        if (
-            plan_id != entry.render_plan_id
-            or plan.source_plan_id != entry.source_plan_id
-            or plan.render_profile_id != renderplan_set.profile_id
-        ):
-            raise BookRenderError(
-                f"RenderPlan identity does not match renderplan-set entry {entry.id}",
-                code="plan.identity_mismatch",
-            )
+        validate_chapter_plan(renderplan_set, entry, plan)
         chapter_output = output_variant_dir / entry.id
         chapter_output_resolved = chapter_output.resolve(strict=False)
         if not _is_within(chapter_output_resolved, output_variant_dir):
@@ -395,6 +356,10 @@ def _resolve_request(
         )
         _assert_safe_output_metadata(
             chapter_output_resolved / "preflight.toml", chapter_output_resolved
+        )
+        _assert_safe_output_metadata(
+            chapter_output_resolved / RECHECK_PREFLIGHT_FILENAME,
+            chapter_output_resolved,
         )
         chapter_outputs.add(chapter_output_resolved)
         speech_numbers = (
@@ -488,6 +453,8 @@ def _render_chapter(
     try:
         preflight_path = chapter.output_dir / "preflight.toml"
         _assert_safe_output_metadata(preflight_path, chapter.output_dir)
+        recheck_report_path = chapter.output_dir / RECHECK_PREFLIGHT_FILENAME
+        _assert_safe_output_metadata(recheck_report_path, chapter.output_dir)
         preflight = _get_preflight(chapter.plan, preflight_path)
     except BookRenderError as exc:
         return _failure_outcome(chapter, index, planned, selected, exc.code, str(exc))
@@ -522,6 +489,7 @@ def _render_chapter(
             output_dir=chapter.output_dir,
             cache_dir=request.cache_dir,
             force=request.force,
+            recheck_report_path=recheck_report_path,
             speech_numbers=chapter.speech_numbers,
         )
     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
@@ -554,19 +522,12 @@ def _render_chapter(
         rendered=result.rendered_count,
         reused=result.reused_count,
         manifest_complete=result.manifest.complete,
-        error_code=(
-            (
-                "preflight.replan"
-                if result.fresh_preflight is not None
-                and result.fresh_preflight.status == "replan"
-                else "preflight.reject"
-                if result.fresh_preflight is not None
-                else "render.failed"
-            )
-            if result.failed
-            else None
-        ),
+        error_code=((result.error_code or "render.failed") if result.failed else None),
         error_message=result.error,
+        recheck_report=(
+            recheck_report_path if result.fresh_preflight is not None else None
+        ),
+        execution_fingerprint=result.execution_fingerprint,
     )
 
 
@@ -661,103 +622,6 @@ def _verified_manifest_for_selection(chapter: _LoadedChapter) -> RenderManifest 
         return None
 
 
-def _resolve_workspace(workspace: str | Path) -> Path:
-    path = Path(workspace).expanduser()
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BookRenderError(f"cannot resolve book workspace {path}: {exc}") from exc
-    if not resolved.is_dir():
-        raise BookRenderError(f"book workspace is not a directory: {resolved}")
-    if resolved.name == "chapters":
-        resolved = resolved.parent
-    return resolved
-
-
-def _resolve_root(path: str | Path, label: str) -> Path:
-    root = Path(path).expanduser().resolve(strict=False)
-    if root.exists() and not root.is_dir():
-        raise BookRenderError(f"{label} root is not a directory: {root}")
-    return root
-
-
-def _require_contained_file(
-    path: Path,
-    root: Path,
-    label: str,
-    *,
-    missing_code: str,
-    reject_symlink: bool,
-) -> Path:
-    if reject_symlink and path.is_symlink():
-        raise BookRenderError(
-            f"{label} must not be a symlink: {path}", code=missing_code
-        )
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BookRenderError(
-            f"{label} is missing or unreadable: {path}", code=missing_code
-        ) from exc
-    try:
-        root_resolved = root.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise BookRenderError(f"cannot resolve containment root {root}: {exc}") from exc
-    if not _is_within(resolved, root_resolved):
-        raise BookRenderError(
-            f"{label} resolves outside its variant directory: {path}", code=missing_code
-        )
-    if not resolved.is_file():
-        raise BookRenderError(
-            f"{label} is not a regular file: {path}", code=missing_code
-        )
-    return resolved
-
-
-def _regular_file(path: Path) -> bool:
-    try:
-        return stat.S_ISREG(path.lstat().st_mode)
-    except OSError:
-        return False
-
-
-def _assert_safe_output_metadata(path: Path, output_dir: Path) -> None:
-    if path.is_symlink():
-        try:
-            target = path.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise BookRenderError(
-                f"output metadata symlink cannot be resolved: {path}",
-                code="workspace.invalid",
-            ) from exc
-        if not _is_within(target, output_dir.resolve(strict=False)):
-            raise BookRenderError(
-                f"output metadata symlink escapes chapter directory: {path}",
-                code="workspace.invalid",
-            )
-    if path.exists() and path.is_dir():
-        raise BookRenderError(
-            f"output metadata path is a directory: {path}", code="workspace.invalid"
-        )
-
-
-def _validate_chapter_id(chapter_id: str) -> None:
-    if (
-        not isinstance(chapter_id, str)
-        or not chapter_id
-        or chapter_id in {".", ".."}
-        or Path(chapter_id).name != chapter_id
-        or PureWindowsPath(chapter_id).name != chapter_id
-        or "/" in chapter_id
-        or "\\" in chapter_id
-        or "\x00" in chapter_id
-    ):
-        raise BookRenderError(
-            f"chapter id is not a safe directory basename: {chapter_id!r}",
-            code="index.invalid",
-        )
-
-
 def _parse_number_ranges(selector: str, label: str) -> tuple[tuple[int, int], ...]:
     if not isinstance(selector, str) or not selector.strip():
         raise BookRenderError(
@@ -822,13 +686,6 @@ def _resolve_ranges(
                     f"unknown {label} number {candidate}", code="selection.invalid"
                 )
     return frozenset(selected)
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        return path.is_relative_to(root)
-    except ValueError:
-        return False
 
 
 def _failure_outcome(
@@ -905,6 +762,12 @@ def _outcome_to_dict(
     }
     if outcome.manifest is not None:
         item["manifest"] = _relative_posix(outcome.manifest, output_variant_dir)
+    if outcome.recheck_report is not None:
+        item["recheck_report"] = _relative_posix(
+            outcome.recheck_report, output_variant_dir
+        )
+    if outcome.execution_fingerprint:
+        item["execution_fingerprint"] = list(outcome.execution_fingerprint)
     if outcome.error_code is not None:
         item["error_code"] = outcome.error_code
     if outcome.error_message is not None:
@@ -954,6 +817,11 @@ def _write_book_report(result: BookRenderResult) -> None:
         assert isinstance(item, Mapping)
         lines.extend(["", "[[item]]"])
         for key, value in item.items():
+            if key == "execution_fingerprint":
+                key = "execution_fingerprint_json"
+                value = json.dumps(
+                    value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
             lines.append(f"{key} = {_toml_value(value)}")
     destination = result.report_path
     temporary: Path | None = None
@@ -990,6 +858,7 @@ def _toml_value(value: Any) -> str:
 
 __all__ = [
     "BOOK_REPORT_FILENAME",
+    "RECHECK_PREFLIGHT_FILENAME",
     "BookChapterStatus",
     "BookRenderError",
     "BookRenderRequest",

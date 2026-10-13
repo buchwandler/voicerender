@@ -185,6 +185,20 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
         if report.status == "replan"
         else 1,
         "output": None,
+        "error_code": (
+            "preflight.replan"
+            if report.status == "replan"
+            else "preflight.reject"
+            if report.status == "reject"
+            else None
+        ),
+        "error": (
+            "Renderer capability requires replanning."
+            if report.status == "replan"
+            else "Renderer preflight rejected this plan."
+            if report.status == "reject"
+            else None
+        ),
     }
 
 
@@ -198,6 +212,8 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
         "reused": result.reused_count,
         "failed": result.failed,
         "manifest": str(result.manifest_path),
+        "error_code": result.error_code,
+        "execution_fingerprint": list(result.execution_fingerprint),
         "fresh_preflight": (
             _preflight_payload(result.fresh_preflight)
             if result.fresh_preflight is not None
@@ -419,7 +435,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             elif result.failed:
                 print(
-                    f"Render incomplete: {result.error}; manifest: {result.manifest_path}"
+                    f"Render incomplete: {result.error_code or 'render.failed'}: {result.error}; "
+                    f"manifest: {result.manifest_path}"
                 )
             else:
                 print(
@@ -479,7 +496,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if valid else 1
 
     except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        if getattr(args, "json", False) and args.command == "render":
+            error_code = getattr(exc, "code", None)
+            payload = {
+                "error": str(exc),
+                "error_code": error_code
+                if isinstance(error_code, str)
+                else "input.invalid",
+                "exit_code": 1,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
         return 1
     parser.error("unsupported command")
     return 2

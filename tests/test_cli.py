@@ -76,6 +76,15 @@ assert not any(name.startswith('voicerender.inputs.utterplan') for name in sys.m
     )
 
 
+def test_declared_renderplan_floor_exposes_book_set_contract() -> None:
+    from renderplan import RenderPlanSet
+
+    import voicerender.book
+
+    assert voicerender.book is not None
+    assert RenderPlanSet is not None
+
+
 def test_direct_v5_consumer_files_are_retired() -> None:
     root = Path(__file__).resolve().parents[1]
     retired = (

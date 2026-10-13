@@ -21,6 +21,8 @@ changelog
 
 The RenderPlan renderer preserves request order and identity: one speech item becomes one exact request and one numbered WAV. It does not adaptively split, merge, normalize, or reorder requests. An incomplete run leaves a valid partial manifest.
 
+An `ok` preflight approves the exact plan under capability observed at preflight time; VoiceRender remeasures before each synthesis. Capacity drift stops that occurrence without synthesis and returns a fresh plan-matched `replan` report; session-open failure returns `reject`. Pass `--recheck-report PATH` to `voicerender render` to persist either report. VoiceRender never edits speech text or emits a child RenderPlan. Operational render results include a separate execution fingerprint with adapter/API, synthesis, voice/options, and observed-capacity facts; these facts do not affect `RenderPlan.plan_id`.
+
 The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
 
 For book-level projection, UtterPlan owns the `renderplan-set.toml` collection index
@@ -56,7 +58,7 @@ voicerender render-book "Novel.ssmdbook" \
   --variant "narration--<profile-id-prefix>" --chapters 5
 ```
 
-A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter; each chapter directory contains its `preflight.toml`, cumulative `render-manifest.toml`, and numbered WAVs. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
+A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter, including execution fingerprints and the path to any fresh recheck report; each chapter directory contains its `preflight.toml`, optional `preflight-recheck.toml`, cumulative `render-manifest.toml`, and numbered WAVs. A stale persisted `ok` is invalidated only by a fresh report for the same plan and failed speech occurrence. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
 
 ## Engine integration
 

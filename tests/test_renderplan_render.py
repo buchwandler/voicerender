@@ -7,6 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 import pytest
 from renderplan import (
     CapacityConstraint,
@@ -92,6 +97,7 @@ class _Adapter:
         self.measured_texts: list[str] = []
         self.synthesized_texts: list[str] = []
         self.measurements: dict[str, RequestMeasure | Exception] = {}
+        self.open_error: Exception | None = None
         self.session = _Session(self)
 
     def probe_api(self) -> EngineApiProbe:
@@ -174,6 +180,8 @@ class _Adapter:
     def open(self, selection: EngineSelection) -> Iterator[EngineSession]:
         self.open_count += 1
         try:
+            if self.open_error is not None:
+                raise self.open_error
             yield self.session
         finally:
             self.close_count += 1
@@ -243,6 +251,23 @@ def test_render_executes_exact_requests_in_order_and_writes_numbered_manifest(
     assert adapter.synthesized_texts == [" first ", "second "]
     assert adapter.open_count == 1
     assert adapter.close_count == 1
+    assert len(result.execution_fingerprint) == 2
+    fingerprint = result.execution_fingerprint[0]
+    assert fingerprint["voicerender_version"]
+    assert fingerprint["adapter_id"] == _ENGINE_ID
+    assert fingerprint["adapter_version"] == "1.0"
+    assert fingerprint["api_probe_signature"]
+    assert fingerprint["canonical_synthesis_identity"]["target_id"] == _TARGET_ID
+    assert fingerprint["model"] == _TARGET_ID
+    assert fingerprint["voice"] == "voice-a"
+    assert fingerprint["options"] == {"speed": 1.0}
+    assert fingerprint["capacity"] == {
+        "metric": "model_tokens",
+        "measured": len(" first "),
+        "maximum": 100,
+        "source": "fake.frontend_measure",
+    }
+    assert fingerprint["fingerprint_id"].startswith("sha256:")
     assert [item.wav for item in result.manifest.speech] == ["000001.wav", "000002.wav"]
     assert [item.segment_id for item in result.manifest.speech] == [
         item.segment_id for item in plan.speech
@@ -310,6 +335,8 @@ def test_stale_and_missing_ok_reports_fail_before_synthesis(
     report = _report(adapter, plan, tmp_path)
     stale_plan = _plan("different plan")
 
+    adapter.measured_texts.clear()
+    adapter.open_count = 0
     with pytest.raises(PlanError, match="does not match"):
         render_renderplan(
             stale_plan,
@@ -324,6 +351,8 @@ def test_stale_and_missing_ok_reports_fail_before_synthesis(
             output_dir=tmp_path / "missing-output",
         )
     assert adapter.synthesized_texts == []
+    assert adapter.measured_texts == []
+    assert adapter.open_count == 0
     assert not (tmp_path / "stale-output").exists()
     assert not (tmp_path / "missing-output").exists()
 
@@ -355,6 +384,7 @@ def test_immediate_remeasurement_failure_stops_and_writes_valid_partial_manifest
 
     assert result.failed
     assert result.error is not None
+    assert result.error_code == "preflight.replan"
     assert adapter.measured_texts == ["fits first", "fails next"]
     assert adapter.synthesized_texts == ["fits first"]
     assert result.manifest.complete is False
@@ -370,6 +400,46 @@ def test_immediate_remeasurement_failure_stops_and_writes_valid_partial_manifest
     assert load_preflight(recheck_path).status == "replan"
     assert (tmp_path / "partial" / "000001.wav").is_file()
     assert not (tmp_path / "partial" / "000002.wav").exists()
+    assert result.fresh_preflight.render_plan_id == plan.plan_id
+    assert len(result.fresh_preflight.checks) == 1
+    assert result.fresh_preflight.checks[0].segment_number == 2
+    assert result.fresh_preflight.checks[0].segment_id == plan.speech[1].segment_id
+    assert plan.speech[1].text == "fails next"
+    assert result.execution_fingerprint[-1]["capacity"]["maximum"] == 100
+
+
+def test_session_open_failure_writes_fresh_reject_for_exact_occurrence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("engine changed after preflight")
+    report = _report(adapter, plan, tmp_path)
+    adapter.open_error = RuntimeError("backend session unavailable")
+    adapter.synthesized_texts.clear()
+    recheck_path = tmp_path / "fresh-reject.toml"
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "rejected-render",
+        recheck_report_path=recheck_path,
+    )
+
+    assert result.failed
+    assert result.error_code == "preflight.reject"
+    assert adapter.synthesized_texts == []
+    assert result.fresh_preflight is not None
+    assert result.fresh_preflight.status == "reject"
+    assert result.fresh_preflight.render_plan_id == plan.plan_id
+    assert len(result.fresh_preflight.checks) == 1
+    check = result.fresh_preflight.checks[0]
+    assert (check.segment_number, check.segment_id) == (
+        plan.speech[0].number,
+        plan.speech[0].segment_id,
+    )
+    assert load_preflight(recheck_path).report_id == result.fresh_preflight.report_id
+    assert result.execution_fingerprint[0]["execution_status"] == "session_open_failed"
+    assert result.execution_fingerprint[0]["capacity"] is None
 
 
 def test_non_ok_preflight_rejected_without_output_or_synthesis(
@@ -422,6 +492,28 @@ def test_cli_renders_and_inspects_shared_manifest(
     assert code == 0
     assert render_payload["complete"] is True
     assert render_payload["speech_count"] == 1
+    assert len(render_payload["execution_fingerprint"]) == 1
+    assert render_payload["execution_fingerprint"][0]["adapter_id"] == _ENGINE_ID
+    assert render_payload["error_code"] is None
+    assert adapter.synthesized_texts == ["CLI exact request"]
+
+    stale_plan_path = tmp_path / "stale.renderplan.toml"
+    save_plan(_plan("different CLI plan"), stale_plan_path)
+    code = main(
+        [
+            "render",
+            str(stale_plan_path),
+            "--preflight",
+            str(report_path),
+            "--out-dir",
+            str(tmp_path / "stale-cli-output"),
+            "--json",
+        ]
+    )
+    stale_payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert stale_payload["error_code"] == "plan.invalid"
+    assert "does not match" in stale_payload["error"]
     assert adapter.synthesized_texts == ["CLI exact request"]
 
     code = main(
@@ -802,6 +894,16 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
 
     first = invoke("--chapters", "1", "--speech", "1")
     assert first["items"][0]["status"] == "partial"
+    fingerprint = first["items"][0]["execution_fingerprint"][0]
+    assert fingerprint["adapter_id"] == _ENGINE_ID
+    assert fingerprint["capacity"]["metric"] == "model_tokens"
+    book_report = tomllib.loads(
+        (output_root / variant / "voicerender-report.toml").read_text(encoding="utf-8")
+    )
+    report_fingerprint = json.loads(
+        book_report["item"][0]["execution_fingerprint_json"]
+    )
+    assert report_fingerprint[0]["fingerprint_id"] == fingerprint["fingerprint_id"]
     assert first["items"][0]["manifest_complete"] is False
     assert (output_root / variant / "chapter-0001" / "000001.wav").is_file()
     assert adapter.synthesized_texts == ["speech one"]

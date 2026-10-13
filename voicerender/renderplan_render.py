@@ -57,6 +57,8 @@ class RenderPlanResult:
     selection_complete: bool
     error: str | None = None
     fresh_preflight: PreflightReport | None = None
+    error_code: str | None = None
+    execution_fingerprint: tuple[dict[str, Any], ...] = ()
 
     @property
     def failed(self) -> bool:
@@ -71,6 +73,7 @@ class _PreparedSpeech:
     segment_id: str
     cache_key: str
     session_key: str
+    execution_fingerprint: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,7 @@ class _OpenFailure:
 class _RenderFailure:
     message: str
     fresh_preflight: PreflightReport | None = None
+    error_code: str = "render.failed"
 
 
 def render_renderplan(
@@ -142,6 +146,7 @@ def render_renderplan(
     artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
     rendered = reused = 0
     failure: _RenderFailure | None = None
+    execution_fingerprints: dict[tuple[int, str], dict[str, Any]] = {}
     with _exclusive_render(out):
         cache.mkdir(parents=True, exist_ok=True)
         artifact_map = _load_existing_artifacts(
@@ -175,13 +180,18 @@ def render_renderplan(
                 item = current.item
                 key = (item.number, current.segment_id)
                 target = out / item.wav
+                fingerprint = dict(current.execution_fingerprint)
+                fingerprint["capacity"] = None
+                fingerprint["execution_status"] = "not_measured"
                 try:
                     cached = None if force else _read_cache(cache, current.cache_key)
                     if cached is not None:
                         source, info = cached
                         _copy_verified(source, target, info)
                         reused += 1
+                        fingerprint["execution_status"] = "cache_reused"
                     else:
+                        fingerprint["execution_status"] = "synthesized"
                         session = sessions.get(current.session_key)
                         if session is None:
                             try:
@@ -192,6 +202,10 @@ def render_renderplan(
                                 session = _OpenFailure(exc)
                             sessions[current.session_key] = session
                         if isinstance(session, _OpenFailure):
+                            fingerprint["execution_status"] = "session_open_failed"
+                            execution_fingerprints[key] = (
+                                _finalize_execution_fingerprint(fingerprint)
+                            )
                             failure = _RenderFailure(
                                 f"Cannot open renderer session: {session.error}",
                                 fresh_preflight=(
@@ -204,6 +218,11 @@ def render_renderplan(
                                     if item.preflight_required
                                     else None
                                 ),
+                                error_code=(
+                                    "preflight.reject"
+                                    if item.preflight_required
+                                    else "engine.session_failed"
+                                ),
                             )
                             break
 
@@ -213,6 +232,7 @@ def render_renderplan(
                             outcome = classify_measurement(exc)
                         else:
                             outcome = classify_measurement(measured)
+                        fingerprint["capacity"] = _measurement_fingerprint(outcome)
                         if outcome.disposition is not PreflightDisposition.OK:
                             fresh = (
                                 _failure_report(
@@ -224,12 +244,21 @@ def render_renderplan(
                                 if item.preflight_required
                                 else None
                             )
-                            if recheck_report_path is not None and fresh is not None:
-                                save_preflight(fresh, recheck_report_path)
+                            fingerprint["execution_status"] = "remeasurement_failed"
+                            execution_fingerprints[key] = (
+                                _finalize_execution_fingerprint(fingerprint)
+                            )
                             failure = _RenderFailure(
                                 outcome.error
                                 or "Immediate renderer remeasurement did not return an exact fit",
                                 fresh_preflight=fresh,
+                                error_code=(
+                                    "preflight.replan"
+                                    if fresh is not None and fresh.status == "replan"
+                                    else "preflight.reject"
+                                    if fresh is not None
+                                    else "engine.measurement_failed"
+                                ),
                             )
                             break
 
@@ -281,10 +310,38 @@ def render_renderplan(
                         complete=len(current_artifacts) == len(parsed_plan.speech),
                         producer=producer,
                     )
+                    execution_fingerprints[key] = _finalize_execution_fingerprint(
+                        fingerprint
+                    )
                 except Exception as exc:  # noqa: BLE001 - Persist a valid cumulative partial manifest.
-                    failure = _RenderFailure(str(exc) or "Render failed")
+                    error_code = getattr(exc, "code", None)
+                    failure = _RenderFailure(
+                        str(exc) or "Render failed",
+                        error_code=(
+                            error_code
+                            if isinstance(error_code, str)
+                            else "render.failed"
+                        ),
+                    )
+                    fingerprint["execution_status"] = "render_failed"
+                    execution_fingerprints[key] = _finalize_execution_fingerprint(
+                        fingerprint
+                    )
                     break
 
+        if (
+            failure is not None
+            and failure.fresh_preflight is not None
+            and recheck_report_path is not None
+        ):
+            try:
+                save_preflight(failure.fresh_preflight, recheck_report_path)
+            except Exception as exc:  # noqa: BLE001 - Keep the generated report available in the result.
+                failure = _RenderFailure(
+                    f"Cannot persist fresh preflight report {recheck_report_path}: {exc}",
+                    fresh_preflight=failure.fresh_preflight,
+                    error_code="preflight.report_write_failed",
+                )
         current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
         manifest = _persist_manifest(
             parsed_plan,
@@ -310,6 +367,8 @@ def render_renderplan(
         selection_complete=selected_complete,
         error=failure.message if failure is not None else None,
         fresh_preflight=failure.fresh_preflight if failure is not None else None,
+        error_code=failure.error_code if failure is not None else None,
+        execution_fingerprint=tuple(execution_fingerprints.values()),
     )
 
 
@@ -406,9 +465,11 @@ def _load_existing_artifacts(
 def _reset_owned_artifacts(output_dir: Path) -> None:
     """Remove only VoiceRender's well-known chapter output files."""
     for child in output_dir.iterdir():
-        owned = child.name in {RENDER_MANIFEST_FILENAME, "preflight.toml"} or bool(
-            re.fullmatch(r"\d{6,}\.wav", child.name)
-        )
+        owned = child.name in {
+            RENDER_MANIFEST_FILENAME,
+            "preflight.toml",
+            "preflight-recheck.toml",
+        } or bool(re.fullmatch(r"\d{6,}\.wav", child.name))
         if not owned:
             continue
         if child.is_symlink() or child.is_file():
@@ -433,18 +494,33 @@ def _prepare_speech(item: SpeechItem) -> _PreparedSpeech:
         selection = engine_selection_from_binding(item.binding, language=item.language)
         adapter = get_adapter(selection.engine)
         session_key = _session_compatibility_key(adapter, selection)
+        adapter_version = adapter.version()
+        api_probe = asdict(adapter.probe_api())
+        synthesis_identity = dict(adapter.canonical_synthesis_identity(selection))
         identity = {
             "schema": _CACHE_SCHEMA,
             "segment_id": item.segment_id or item.computed_id(),
             "engine": adapter.id,
-            "engine_version": adapter.version(),
-            "api_probe": asdict(adapter.probe_api()),
-            "engine_identity": dict(adapter.canonical_synthesis_identity(selection)),
+            "engine_version": adapter_version,
+            "api_probe": api_probe,
+            "engine_identity": synthesis_identity,
             "language": selection.language,
             "voice": selection.voice,
             "speaker": selection.speaker,
             "options": dict(selection.options),
             "offline": selection.offline,
+        }
+        execution_fingerprint = {
+            "voicerender_version": _voicerender_version(),
+            "adapter_id": adapter.id,
+            "adapter_version": adapter_version,
+            "api_probe_signature": digest(api_probe),
+            "canonical_synthesis_identity": synthesis_identity,
+            "model": selection.target_id,
+            "language": selection.language,
+            "voice": selection.voice,
+            "speaker": selection.speaker,
+            "options": dict(selection.options),
         }
         cache_key = digest(identity)
     except Exception as exc:
@@ -458,7 +534,26 @@ def _prepare_speech(item: SpeechItem) -> _PreparedSpeech:
         segment_id=item.segment_id or item.computed_id(),
         cache_key=cache_key,
         session_key=session_key,
+        execution_fingerprint=execution_fingerprint,
     )
+
+
+def _measurement_fingerprint(outcome: MeasurementOutcome) -> dict[str, Any] | None:
+    measurement = outcome.measurement
+    if measurement is None:
+        return None
+    return {
+        "metric": measurement.unit,
+        "measured": measurement.amount,
+        "maximum": measurement.maximum,
+        "source": measurement.source,
+    }
+
+
+def _finalize_execution_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
+    result = dict(fingerprint)
+    result["fingerprint_id"] = f"sha256:{digest(fingerprint)}"
+    return result
 
 
 def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None:
