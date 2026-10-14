@@ -105,6 +105,7 @@ def _fake_package(package: str) -> ModuleType:
         "BundleAssetManager": ("resolve_bundle", "list_bundles"),
         "KittenVoice": (
             "synthesize_prepared",
+            "measure_prepared",
             "from_pretrained",
             "from_local",
             "close",
@@ -152,6 +153,7 @@ def _fake_package(package: str) -> ModuleType:
         "RequestMeasure",
         "discover_bundles",
         "KittenVoice",
+        "SynthesisMeasure",
         "discover_models",
         "runtime_identity",
         "SoproSynthError",
@@ -224,6 +226,13 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     import importlib
 
     fake = _fake_package(package)
+    if engine == "kitten":
+        fake.request_api_contract = lambda: {
+            "version": 1,
+            "supports_request_measurement": True,
+            "measurement_entrypoint": "KittenVoice.measure_prepared",
+            "measurement_metric": "model_tokens",
+        }
     if engine == "sopro":
         fake.request_api_contract = lambda: SimpleNamespace(
             supports_reference_voice=True,
@@ -282,6 +291,114 @@ def test_piper_probe_requires_measure_method(monkeypatch: pytest.MonkeyPatch) ->
 
     assert not probe.compatible
     assert "PiperVoice.measure" in probe.missing_methods
+
+
+def test_kitten_probe_requires_measure_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+    delattr(fake.KittenVoice, "measure_prepared")
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert not probe.compatible
+    assert "KittenVoice.measure_prepared" in probe.missing_methods
+
+
+def test_kitten_probe_rejects_measurement_disabled_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+    fake.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": False,
+    }
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert not probe.compatible
+    assert probe.status == "api_incompatible"
+    assert probe.failed_stage == "request_measurement_contract"
+    assert probe.details["supports_request_measurement"] is False
+    assert any(
+        "does not support request measurement" in warning for warning in probe.warnings
+    )
+
+
+def test_kitten_probe_fails_closed_when_measurement_contract_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+    calls = 0
+
+    def request_api_contract() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"version": 1, "supports_request_measurement": True}
+        raise RuntimeError("contract unavailable")
+
+    fake.request_api_contract = request_api_contract
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert not probe.compatible
+    assert probe.status == "api_probe_failed"
+    assert probe.failed_stage == "request_measurement_contract"
+    assert probe.error_type == "RuntimeError"
+
+
+def test_kitten_probe_reports_measurement_stage_for_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+
+    def request_api_contract() -> dict[str, object]:
+        raise RuntimeError("contract unavailable")
+
+    fake.request_api_contract = request_api_contract
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert not probe.compatible
+    assert probe.status == "api_probe_failed"
+    assert probe.failed_stage == "request_measurement_contract"
+    assert probe.error_type == "RuntimeError"
+
+
+def test_kitten_capabilities_advertise_request_measurement() -> None:
+    assert get_adapter("kitten").capabilities().supports_request_measurement is True
+
+
+def test_kitten_probe_requires_synthesis_measure_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+    delattr(fake, "SynthesisMeasure")
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert not probe.compatible
+    assert "SynthesisMeasure" in probe.missing_symbols
+
+
+def test_kitten_probe_accepts_attribute_measurement_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+    fake.request_api_contract = lambda: SimpleNamespace(
+        supports_request_measurement=True
+    )
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert probe.compatible, probe
 
 
 @pytest.mark.parametrize("engine", sorted(ENGINE_IDS))

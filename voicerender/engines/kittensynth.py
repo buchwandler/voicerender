@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace
 from typing import Any
 
 from ..errors import (
@@ -180,12 +182,24 @@ class KittenSynthEngineSession:
         self._selection = selection
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
+        try:
+            measured = self._voice.measure_prepared(request.text)
+        except EngineSynthesisError:
+            raise
+        except Exception as exc:
+            raise _translate_kitten_error(exc, self._selection, request) from exc
+
+        details: dict[str, Any] = {"model_id": measured.model_id}
+        native_metadata = getattr(measured, "metadata", None)
+        if isinstance(native_metadata, Mapping):
+            details["native_metadata"] = dict(native_metadata)
         return RequestMeasure(
-            fits=None,
-            amount=None,
-            maximum=None,
-            unit="unknown",
-            source="kittensynth.no_capacity_measurement",
+            fits=measured.fits,
+            amount=measured.token_count,
+            maximum=measured.max_tokens,
+            unit="model_tokens",
+            source="kittensynth.measure_prepared",
+            details=details,
         )
 
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
@@ -228,11 +242,12 @@ class KittenSynthEngineAdapter:
         return distribution_version(self.package_name)
 
     def probe_api(self) -> EngineApiProbe:
-        return probe_public_api(
+        probe = probe_public_api(
             engine=self.id,
             package=self.package_name,
             required_symbols=(
                 "KittenVoice",
+                "SynthesisMeasure",
                 "SynthesisConfig",
                 "SynthesisResult",
                 "discover_models",
@@ -241,6 +256,7 @@ class KittenSynthEngineAdapter:
             required_methods={
                 "KittenVoice": (
                     "synthesize_prepared",
+                    "measure_prepared",
                     "from_pretrained",
                     "from_local",
                     "close",
@@ -249,6 +265,59 @@ class KittenSynthEngineAdapter:
             },
             expected_api_version=SUPPORTED_REQUEST_API_VERSION,
         )
+        if not probe.compatible:
+            if (
+                probe.failed_stage == "contract_inspection"
+                and probe.failed_symbol == "request_api_contract"
+            ):
+                return replace(probe, failed_stage="request_measurement_contract")
+            return probe
+
+        try:
+            kittensynth = importlib.import_module(self.package_name)
+            contract_factory = getattr(kittensynth, "request_api_contract", None)
+            if not callable(contract_factory):
+                raise TypeError("request_api_contract is not callable")
+            contract = contract_factory()
+            missing = object()
+            if isinstance(contract, Mapping):
+                supports_measurement = contract.get(
+                    "supports_request_measurement", missing
+                )
+            else:
+                supports_measurement = getattr(
+                    contract, "supports_request_measurement", missing
+                )
+        except Exception as exc:  # noqa: BLE001 - Contract inspection must fail closed.
+            return replace(
+                probe,
+                compatible=False,
+                status="api_probe_failed",
+                failed_stage="request_measurement_contract",
+                failed_symbol="request_api_contract",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+
+        if supports_measurement is not True:
+            return replace(
+                probe,
+                compatible=False,
+                status="api_incompatible",
+                failed_stage="request_measurement_contract",
+                warnings=probe.warnings
+                + (
+                    "KittenSynth request API contract does not support request measurement.",
+                ),
+                details={
+                    "supports_request_measurement": (
+                        "missing"
+                        if supports_measurement is missing
+                        else supports_measurement
+                    )
+                },
+            )
+        return probe
 
     def compatible_api(self) -> bool:
         return self.probe_api().compatible
@@ -271,7 +340,7 @@ class KittenSynthEngineAdapter:
             supports_live=True,
             supports_timestamps=False,
             supports_voice_level_calibration=False,
-            supports_request_measurement=False,
+            supports_request_measurement=True,
         )
 
     def renderprofile_fragment(

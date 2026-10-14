@@ -33,6 +33,7 @@ from voicerender.engines.base import (
     RequestMeasure,
     SpeechRequest,
 )
+from voicerender.engines.kittensynth import KittenSynthEngineAdapter
 from voicerender.engines.pipersynth import PiperSynthEngineAdapter
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
@@ -273,6 +274,82 @@ def _install_fake_pipersynth(
     return events
 
 
+def _install_fake_kittensynth(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    amount: int,
+    maximum: int | None,
+    fits: bool | None,
+) -> list[tuple[str, Any]]:
+    events: list[tuple[str, Any]] = []
+    model = SimpleNamespace(
+        id="kitten-test-model",
+        language="en-US",
+        quality="medium",
+        voice_ids=("Jasper",),
+        display_name="Kitten test model",
+        version="0.1",
+        metadata={},
+        runtime_available=True,
+        sample_rate=24000,
+        voices=(
+            SimpleNamespace(
+                id="Jasper",
+                gender="unknown",
+                language="en-US",
+                locale="en-US",
+                language_label="English",
+            ),
+        ),
+        default_voice="Jasper",
+        aliases=(),
+    )
+
+    class FakeVoice:
+        @classmethod
+        def from_pretrained(cls, target_id: str, **kwargs: Any) -> FakeVoice:
+            assert target_id == "kitten-test-model"
+            return cls()
+
+        def measure_prepared(self, text: str) -> Any:
+            events.append(("measure", text))
+            return SimpleNamespace(
+                token_count=amount,
+                max_tokens=maximum,
+                fits=fits,
+                model_id="kitten-test-model",
+                metadata={"frontend": "fake-kitteng2p"},
+            )
+
+        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
+            events.append(("synthesize", args))
+            raise AssertionError("preflight must never synthesize")
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    FakeVoice.from_local = classmethod(lambda cls, *args, **kwargs: cls())
+    module = ModuleType("kittensynth")
+    module.__version__ = "0.1.4"
+    module.__file__ = "/fake/kittensynth/__init__.py"
+    module.REQUEST_API_VERSION = 1
+    module.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": True,
+        "measurement_entrypoint": "KittenVoice.measure_prepared",
+        "measurement_metric": "model_tokens",
+    }
+    module.KittenVoice = FakeVoice
+    module.SynthesisMeasure = object
+    module.SynthesisConfig = object
+    module.SynthesisResult = object
+    module.discover_models = lambda **kwargs: (model,)
+    module.runtime_identity = lambda: {"engine_version": "0.1.4"}
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    monkeypatch.setitem(_ADAPTERS, "kitten", KittenSynthEngineAdapter())
+    return events
+
+
 def _plan(
     *texts: tuple[str, bool, str],
     binding: dict[str, Any] | None = None,
@@ -393,6 +470,64 @@ def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
     assert events[0][1].id == item.computed_id()
     assert item.controls[0].name == "emphasis"
     assert report.render_plan_id == plan.plan_id
+
+
+def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=None, fits=None)
+    binding = {
+        "renderer": "kitten",
+        "target_id": "kitten-test-model",
+        "voice": "Jasper",
+    }
+    plan = _plan(("Kitten preflight", True, "sentence"), binding=binding)
+
+    report = preflight_render_plan(plan, tmp_path / "kitten-preflight.toml")
+
+    check = report.checks[0]
+    assert report.status == "ok"
+    assert check.status == "ok"
+    assert check.metric == "model_tokens"
+    assert check.measured == 180
+    assert check.maximum is None
+    assert check.source == "kittensynth.measure_prepared"
+    assert [event[0] for event in events] == ["measure", "close"]
+    assert events[0][1] == "Kitten preflight"
+
+
+def test_kitten_preflight_defers_emphasis_to_composition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=None, fits=None)
+    binding = {
+        "renderer": "kitten",
+        "target_id": "kitten-test-model",
+        "voice": "Jasper",
+    }
+    plan = _plan(("Kitten emphasis", True, "sentence"), binding=binding)
+    item = replace(
+        plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=5, name="emphasis", params={}),),
+    )
+    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
+
+    report = preflight_render_plan(
+        plan,
+        tmp_path / "kitten-emphasis-deferred.toml",
+        emphasis_policy="defer-to-compose",
+    )
+
+    check = report.checks[0]
+    assert report.status == "ok"
+    assert check.status == "ok"
+    assert check.metric == "model_tokens"
+    assert check.measured == 180
+    assert "audiocompose.emphasis.gain.v1" in check.detail
+    assert "pending composition" in check.detail
+    assert [event[0] for event in events] == ["measure", "close"]
+    assert events[0][1] == item.text
 
 
 def test_piper_render_defers_emphasis_to_composition_without_native_option(
