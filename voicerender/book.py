@@ -50,7 +50,9 @@ from .book_layout import (
 )
 from .errors import ArtifactError, PlanError
 from .preflight import preflight_render_plan
+from .renderplan_input import EMPHASIS_COMPOSITION_CAPABILITY, EmphasisPolicy
 from .renderplan_render import (
+    RENDER_DIAGNOSTICS_FILENAME,
     RENDER_MANIFEST_FILENAME,
     render_renderplan,
 )
@@ -83,6 +85,7 @@ class BookRenderRequest:
     cache_dir: Path
     force: bool
     fail_fast: bool
+    emphasis_policy: EmphasisPolicy
     chapter_selector: str
     speech_selector: str
     render_profile_id: str
@@ -109,6 +112,7 @@ class ChapterRenderOutcome:
     error_message: str | None = None
     recheck_report: Path | None = None
     execution_fingerprint: tuple[dict[str, Any], ...] = ()
+    pending_composition: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +155,10 @@ class BookRenderResult:
     def exit_code(self) -> int:
         return 1 if self.failed else 0
 
+    @property
+    def pending_composition(self) -> bool:
+        return any(outcome.pending_composition for outcome in self.outcomes)
+
     def to_dict(self) -> dict[str, Any]:
         request = self.request
         return {
@@ -161,6 +169,8 @@ class BookRenderResult:
             "renderplans": str(request.renderplan_variant_dir),
             "output": str(request.output_variant_dir),
             "cache": str(request.cache_dir),
+            "emphasis_policy": request.emphasis_policy.value,
+            "pending_composition": self.pending_composition,
             "report": str(self.report_path),
             "selection": {
                 "chapters": request.chapter_selector,
@@ -191,8 +201,15 @@ def render_book(
     cache_dir: str | Path | None = None,
     force: bool = False,
     fail_fast: bool = False,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
 ) -> BookRenderResult:
     """Render selected chapters in a RenderPlan variant using shared preflight and render APIs."""
+    try:
+        resolved_emphasis_policy = EmphasisPolicy(emphasis_policy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "emphasis_policy must be 'reject' or 'defer-to-compose'"
+        ) from exc
     request = _resolve_request(
         workspace,
         variant=variant,
@@ -203,6 +220,7 @@ def render_book(
         cache_dir=cache_dir,
         force=force,
         fail_fast=fail_fast,
+        emphasis_policy=resolved_emphasis_policy,
     )
     request.output_variant_dir.mkdir(parents=True, exist_ok=True)
     request.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -240,6 +258,7 @@ def _resolve_request(
     cache_dir: str | Path | None,
     force: bool,
     fail_fast: bool,
+    emphasis_policy: EmphasisPolicy,
 ) -> BookRenderRequest:
     workspace_path = _resolve_workspace(workspace)
     renderplan_base = _resolve_root(
@@ -413,6 +432,7 @@ def _resolve_request(
         cache_dir=resolved_cache,
         force=force,
         fail_fast=fail_fast,
+        emphasis_policy=emphasis_policy,
         chapter_selector=chapter_selector,
         speech_selector=speech_selector,
         render_profile_id=profile_id,
@@ -432,7 +452,9 @@ def _render_chapter(
 
     if not request.force:
         existing = _verified_manifest_for_selection(chapter)
-        if existing is not None:
+        if existing is not None and _render_diagnostics_reusable(
+            chapter, request.emphasis_policy
+        ):
             return ChapterRenderOutcome(
                 index=index,
                 id=entry.id,
@@ -448,6 +470,11 @@ def _render_chapter(
                 rendered=0,
                 reused=selected,
                 manifest_complete=existing.complete,
+                pending_composition=any(
+                    control.name == "emphasis"
+                    for item in chapter.plan.speech
+                    for control in item.controls
+                ),
             )
 
     try:
@@ -455,7 +482,9 @@ def _render_chapter(
         _assert_safe_output_metadata(preflight_path, chapter.output_dir)
         recheck_report_path = chapter.output_dir / RECHECK_PREFLIGHT_FILENAME
         _assert_safe_output_metadata(recheck_report_path, chapter.output_dir)
-        preflight = _get_preflight(chapter.plan, preflight_path)
+        preflight = _get_preflight(
+            chapter.plan, preflight_path, emphasis_policy=request.emphasis_policy
+        )
     except BookRenderError as exc:
         return _failure_outcome(chapter, index, planned, selected, exc.code, str(exc))
     except Exception as exc:  # noqa: BLE001 - Chapter-specific preflight errors are reported and batch continues.
@@ -491,6 +520,7 @@ def _render_chapter(
             force=request.force,
             recheck_report_path=recheck_report_path,
             speech_numbers=chapter.speech_numbers,
+            emphasis_policy=request.emphasis_policy,
         )
     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
         error_code = getattr(exc, "code", None)
@@ -528,10 +558,16 @@ def _render_chapter(
             recheck_report_path if result.fresh_preflight is not None else None
         ),
         execution_fingerprint=result.execution_fingerprint,
+        pending_composition=result.pending_composition,
     )
 
 
-def _get_preflight(plan: RenderPlan, path: Path) -> PreflightReport:
+def _get_preflight(
+    plan: RenderPlan,
+    path: Path,
+    *,
+    emphasis_policy: EmphasisPolicy,
+) -> PreflightReport:
     if path.exists() or path.is_symlink():
         if path.is_symlink():
             resolved = path.resolve(strict=True)
@@ -543,14 +579,21 @@ def _get_preflight(plan: RenderPlan, path: Path) -> PreflightReport:
         if path.is_file():
             try:
                 existing = load_preflight(path)
-                if _preflight_is_reusable(existing, plan):
+                if _preflight_is_reusable(
+                    existing, plan, emphasis_policy=emphasis_policy
+                ):
                     return existing
             except (OSError, ValueError, TypeError):
                 pass
-    return preflight_render_plan(plan, path)
+    return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
 
 
-def _preflight_is_reusable(report: PreflightReport, plan: RenderPlan) -> bool:
+def _preflight_is_reusable(
+    report: PreflightReport,
+    plan: RenderPlan,
+    *,
+    emphasis_policy: EmphasisPolicy = EmphasisPolicy.REJECT,
+) -> bool:
     if report.status != "ok":
         return False
     try:
@@ -563,11 +606,65 @@ def _preflight_is_reusable(report: PreflightReport, plan: RenderPlan) -> bool:
     required = [item for item in plan.speech if item.preflight_required]
     if len(checks) != len(required):
         return False
-    return all(
-        (item.number, item.segment_id or item.computed_id()) in checks
-        and checks[(item.number, item.segment_id or item.computed_id())].status == "ok"
-        for item in required
-    )
+    for item in required:
+        key = (item.number, item.segment_id or item.computed_id())
+        check = checks.get(key)
+        if check is None or check.status != "ok":
+            return False
+        if any(control.name == "emphasis" for control in item.controls) and (
+            emphasis_policy is not EmphasisPolicy.DEFER_TO_COMPOSE
+            or EMPHASIS_COMPOSITION_CAPABILITY not in (check.detail or "")
+        ):
+            return False
+    return True
+
+def _render_diagnostics_reusable(
+    chapter: _LoadedChapter, emphasis_policy: EmphasisPolicy
+) -> bool:
+    expected = {
+        (
+            item.number,
+            item.segment_id or item.computed_id(),
+            sum(control.name == "emphasis" for control in item.controls),
+        )
+        for item in chapter.plan.speech
+        if any(control.name == "emphasis" for control in item.controls)
+    }
+    if not expected:
+        return True
+    if emphasis_policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
+        return False
+    path = chapter.output_dir / RENDER_DIAGNOSTICS_FILENAME
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "voicerender.render-diagnostics.v1"
+        or payload.get("render_plan_id")
+        != (chapter.plan.plan_id or chapter.plan.computed_id())
+        or payload.get("emphasis_policy") != emphasis_policy.value
+        or payload.get("pending_composition") is not True
+        or not isinstance(payload.get("deferred_controls"), list)
+    ):
+        return False
+    observed: list[tuple[int, str, int]] = []
+    for entry in payload["deferred_controls"]:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("capability") != EMPHASIS_COMPOSITION_CAPABILITY
+            or type(entry.get("segment_number")) is not int
+            or not isinstance(entry.get("segment_id"), str)
+            or type(entry.get("count")) is not int
+        ):
+            return False
+        observed.append(
+            (entry["segment_number"], entry["segment_id"], entry["count"])
+        )
+    return len(observed) == len(expected) and set(observed) == expected
 
 
 def _verified_manifest_for_selection(chapter: _LoadedChapter) -> RenderManifest | None:
@@ -759,6 +856,7 @@ def _outcome_to_dict(
         "rendered": outcome.rendered,
         "reused": outcome.reused,
         "manifest_complete": outcome.manifest_complete,
+        "pending_composition": outcome.pending_composition,
     }
     if outcome.manifest is not None:
         item["manifest"] = _relative_posix(outcome.manifest, output_variant_dir)
@@ -785,6 +883,8 @@ def _write_book_report(result: BookRenderResult) -> None:
         "format": "voicerender-book-report",
         "version": 1,
         "variant": request.variant_name,
+        "emphasis_policy": request.emphasis_policy.value,
+        "pending_composition": result.pending_composition,
         "render_profile_id": request.render_profile_id,
         "requested": result.requested,
         "succeeded": result.succeeded,

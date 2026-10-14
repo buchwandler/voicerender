@@ -12,6 +12,7 @@ from renderplan import (
     SpeechItem,
     TokenBundle,
 )
+from renderplan.errors import ValidationError
 
 from voicerender.engines.api_probe import EngineApiProbe
 from voicerender.engines.base import (
@@ -35,6 +36,7 @@ from voicerender.renderplan_input import (
     PreflightDisposition,
     classify_measurement,
     engine_selection_from_binding,
+    speech_request_conversion_from_renderplan,
     speech_request_from_renderplan,
 )
 
@@ -47,6 +49,7 @@ class _Adapter:
         self.required_fields: tuple[str, ...] = ("span", "pos", "tag", "lemma", "morph")
         self.native_semantics: frozenset[str] = frozenset()
         self.pronunciation = True
+        self.lowered_controls: list[SpeechControl] = []
 
     def probe_api(self) -> EngineApiProbe:
         return EngineApiProbe(
@@ -122,6 +125,7 @@ class _Adapter:
     def lower_renderplan_control(
         self, control: SpeechControl, selection: EngineSelection
     ) -> dict[str, Any]:
+        self.lowered_controls.append(control)
         return {
             "start": control.start,
             "end": control.end,
@@ -292,18 +296,19 @@ def test_prosody_control_requires_adapter_declaration_and_exact_lowering(
     )
 
 
-def test_emphasis_and_unknown_controls_fail_closed(
+def test_emphasis_without_downstream_policy_and_unknown_controls_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _install(monkeypatch)
+    _install(monkeypatch)
     emphasis = _item(
         tokens=_complete_tokens(),
         controls=(SpeechControl(start=2, end=7, name="emphasis", params={}),),
     )
-    with pytest.raises(UnsupportedSynthesisFeatureError):
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="explicitly declared downstream handler"
+    ):
         speech_request_from_renderplan(emphasis)
 
-    adapter.native_semantics = frozenset({"extension:example"})
     unknown = _item(
         tokens=_complete_tokens(),
         controls=(SpeechControl(start=2, end=7, name="mystery", params={}),),
@@ -313,6 +318,159 @@ def test_emphasis_and_unknown_controls_fail_closed(
     ):
         speech_request_from_renderplan(unknown)
 
+    extension = _item(
+        tokens=_complete_tokens(),
+        controls=(SpeechControl(start=2, end=7, name="extension:example", params={}),),
+    )
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="does not declare support for 'extension:example'"
+    ):
+        speech_request_from_renderplan(
+            extension, emphasis_policy="defer-to-compose"
+        )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"level": "reduced"},
+        {"level": "moderate"},
+        {"level": "strong"},
+    ],
+)
+def test_emphasis_is_deferred_without_native_lowering(
+    monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> None:
+    adapter = _install(monkeypatch)
+    item = _item(
+        tokens=_complete_tokens(),
+        controls=(SpeechControl(start=2, end=7, name="emphasis", params=params),),
+    )
+    original_controls = item.controls
+    original_id = item.computed_id()
+
+    conversion = speech_request_conversion_from_renderplan(
+        item, emphasis_policy="defer-to-compose"
+    )
+
+    assert conversion.deferred_capability == "audiocompose.emphasis.gain.v1"
+    assert conversion.deferred_control_count == 1
+    assert conversion.request.text == item.text
+    assert conversion.request.id == original_id
+    assert "renderplan_controls" not in conversion.request.options
+    assert adapter.lowered_controls == []
+    assert item.controls == original_controls
+    assert item.computed_id() == original_id
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"volume": 2},
+        {"rate": 1.1},
+        {"level": "extreme"},
+        {"level": 1},
+        {"level": True},
+        {"level": "strong", "volume": 2},
+    ],
+)
+def test_invalid_emphasis_parameters_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> None:
+    _install(monkeypatch)
+    item = _item(
+        tokens=_complete_tokens(),
+        controls=(SpeechControl(start=2, end=7, name="emphasis", params=params),),
+    )
+    with pytest.raises(UnsupportedSynthesisFeatureError):
+        speech_request_from_renderplan(item, emphasis_policy="defer-to-compose")
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(-1, 2), (2, 2), (7, 2), (True, 4)],
+)
+def test_invalid_control_ranges_are_rejected_by_renderplan_model(
+    start: int, end: int
+) -> None:
+    with pytest.raises(ValidationError, match="control"):
+        SpeechControl(start=start, end=end, name="emphasis", params={})
+
+
+def test_out_of_text_control_range_fails_closed_during_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch)
+    item = _item(
+        tokens=_complete_tokens(),
+        controls=(SpeechControl(start=2, end=7, name="emphasis", params={}),),
+    )
+    object.__setattr__(item.controls[0], "end", len(item.text) + 1)
+
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="invalid range"):
+        speech_request_from_renderplan(item, emphasis_policy="defer-to-compose")
+
+
+def test_speech_item_rejects_control_ranges_past_text() -> None:
+    control = SpeechControl(start=2, end=len(_item().text) + 1, name="emphasis", params={})
+    with pytest.raises(ValidationError, match="exceeds speech text length"):
+        _item(controls=(control,))
+
+def test_overlapping_emphasis_controls_are_only_deferred_once_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    controls = (
+        SpeechControl(start=2, end=7, name="emphasis", params={}),
+        SpeechControl(start=4, end=8, name="emphasis", params={"level": "strong"}),
+    )
+    item = _item(tokens=_complete_tokens(), controls=controls)
+
+    conversion = speech_request_conversion_from_renderplan(
+        item, emphasis_policy="defer-to-compose"
+    )
+
+    assert conversion.deferred_control_count == 2
+    assert conversion.deferred_capability == "audiocompose.emphasis.gain.v1"
+    assert conversion.request.options == {"speed": 1.1}
+    assert adapter.lowered_controls == []
+    assert item.controls == controls
+
+
+def test_native_pronunciation_is_preserved_alongside_deferred_emphasis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    item = _item(
+        tokens=_complete_tokens(),
+        controls=(
+            SpeechControl(start=2, end=7, name="emphasis", params={"level": "moderate"}),
+            SpeechControl(
+                start=9,
+                end=14,
+                name="pronunciation",
+                params={"phonemes": "wɝːld", "alphabet": "ipa"},
+            ),
+        ),
+    )
+
+    conversion = speech_request_conversion_from_renderplan(
+        item, emphasis_policy="defer-to-compose"
+    )
+
+    assert conversion.deferred_control_count == 1
+    assert conversion.request.pronunciation_overrides == (
+        PronunciationSpan(
+            start=9,
+            end=14,
+            phonemes="wɝːld",
+            language="en-US",
+            alphabet="ipa",
+        ),
+    )
+    assert "renderplan_controls" not in conversion.request.options
+    assert adapter.lowered_controls == []
 
 def test_measurement_outcomes_and_typed_too_long_exception_are_centralized() -> None:
     assert (

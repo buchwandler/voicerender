@@ -20,7 +20,11 @@ from .engines.registry import (
 )
 from .errors import VoiceRenderError
 from .preflight import preflight_render_plan
-from .renderplan_render import RenderPlanResult, render_renderplan
+from .renderplan_render import (
+    RENDER_DIAGNOSTICS_FILENAME,
+    RenderPlanResult,
+    render_renderplan,
+)
 from .renderprofile import (
     create_render_profile,
     load_render_profile,
@@ -100,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("-o", "--output", required=True, type=Path)
     preflight.add_argument("--json", action="store_true")
 
+    preflight.add_argument(
+        "--emphasis-policy",
+        choices=("reject", "defer-to-compose"),
+        default="reject",
+        help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
+    )
     render = commands.add_parser(
         "render", help="Render a plan using a matching OK report"
     )
@@ -110,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--recheck-report", type=Path)
     render.add_argument("--force", action="store_true")
     render.add_argument("--json", action="store_true")
+    render.add_argument(
+        "--emphasis-policy",
+        choices=("reject", "defer-to-compose"),
+        default="reject",
+        help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
+    )
 
     book_render = commands.add_parser(
         "render-book", help="Render selected chapters from a RenderPlan variant"
@@ -126,6 +142,12 @@ def build_parser() -> argparse.ArgumentParser:
     book_render.add_argument("--output-root", type=Path)
     book_render.add_argument("--cache-dir", type=Path)
     book_render.add_argument("--force", action="store_true")
+    book_render.add_argument(
+        "--emphasis-policy",
+        choices=("reject", "defer-to-compose"),
+        default="reject",
+        help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
+    )
     book_render.add_argument("--fail-fast", action="store_true")
     book_render.add_argument("--json", action="store_true")
 
@@ -212,6 +234,8 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
         "reused": result.reused_count,
         "failed": result.failed,
         "manifest": str(result.manifest_path),
+        "diagnostics": str(result.manifest_path.parent / RENDER_DIAGNOSTICS_FILENAME),
+        "pending_composition": result.pending_composition,
         "error_code": result.error_code,
         "execution_fingerprint": list(result.execution_fingerprint),
         "fresh_preflight": (
@@ -255,6 +279,11 @@ def _print_book_result(result: BookRenderResult) -> None:
             )
             if outcome.manifest is not None:
                 print(f"       manifest: {outcome.manifest}")
+        if outcome.pending_composition:
+            print(
+                "       WARNING: emphasis remains pending composition; see "
+                f"{outcome.output_dir / RENDER_DIAGNOSTICS_FILENAME}"
+            )
     print("VoiceRender summary")
     print(f"  requested: {result.requested}")
     print(f"  complete:  {result.full_chapters}")
@@ -401,7 +430,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "preflight report path must not overwrite its RenderPlan"
                 )
-            report = preflight_render_plan(load_plan(args.plan), args.output)
+            report = preflight_render_plan(
+                load_plan(args.plan), args.output, emphasis_policy=args.emphasis_policy
+            )
             payload = _preflight_payload(report)
             payload["output"] = str(args.output)
             if args.json:
@@ -429,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
                 cache_dir=args.cache_dir,
                 recheck_report_path=args.recheck_report,
                 force=args.force,
+                emphasis_policy=args.emphasis_policy,
             )
             payload = _render_payload(result)
             if args.json:
@@ -443,6 +475,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"Rendered {payload['speech_count']} speech items "
                     f"({result.rendered_count} new, {result.reused_count} reused); "
                     f"manifest: {result.manifest_path}"
+                )
+            if result.pending_composition:
+                print(
+                    "WARNING: emphasis is pending composition; see "
+                    f"{result.manifest_path.parent / RENDER_DIAGNOSTICS_FILENAME}"
                 )
             if result.failed:
                 fresh = result.fresh_preflight
@@ -461,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
                     cache_dir=args.cache_dir,
                     force=args.force,
                     fail_fast=args.fail_fast,
+                    emphasis_policy=args.emphasis_policy,
                 )
             except (BookRenderError, OSError, ValueError, TypeError) as exc:
                 error_code = getattr(exc, "code", "workspace.invalid")

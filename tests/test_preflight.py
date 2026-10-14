@@ -16,6 +16,7 @@ from renderplan import (
     SourceSpan,
     SpeechControl,
     SpeechItem,
+    load_manifest,
     load_preflight,
     save_plan,
 )
@@ -41,6 +42,7 @@ from voicerender.preflight import (
     preflight_render_plan,
     preflight_summary,
 )
+from voicerender.renderplan_render import render_renderplan
 
 _ENGINE_ID = "preflight-test-engine"
 _TARGET_ID = "preflight-target-v1"
@@ -189,6 +191,7 @@ def _install_fake_pipersynth(
     amount: int,
     maximum: int | None,
     fits: bool | None,
+    allow_synthesis: bool = False,
 ) -> list[tuple[str, Any]]:
     events: list[tuple[str, Any]] = []
     metadata = SimpleNamespace(
@@ -221,9 +224,17 @@ def _install_fake_pipersynth(
             )
 
         def synthesize(self, *args: Any, **kwargs: Any) -> Any:
-            events.append(("synthesize", None))
-            raise AssertionError("preflight must not call PiperVoice.synthesize")
-
+            if not allow_synthesis:
+                raise AssertionError("preflight must never call PiperVoice.synthesize")
+            native = args[0]
+            events.append(("synthesize", native))
+            return SimpleNamespace(
+                id=native.id,
+                audio=[0.0, 0.2, -0.2, 0.1],
+                sample_rate=22050,
+                metadata={},
+                warnings=(),
+            )
         def close(self) -> None:
             events.append(("close", None))
 
@@ -348,9 +359,103 @@ def test_piper_preflight_keeps_emphasis_rejected(
     assert report.status == "reject"
     assert report.checks[0].status == "error"
     assert report.checks[0].source == "synthesis.unsupported_feature"
-    assert "does not declare support for 'emphasis'" in report.checks[0].detail
+    assert "explicitly declared downstream handler" in report.checks[0].detail
     assert events == []
 
+
+
+
+def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=None, fits=None)
+    binding = {"renderer": "piper", "target_id": "piper-test-model"}
+    plan = _plan(("Piper emphasis", True, "sentence"), binding=binding)
+    item = replace(
+        plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=5, name="emphasis", params={}),),
+    )
+    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
+
+    report = preflight_render_plan(
+        plan,
+        tmp_path / "piper-emphasis-deferred.toml",
+        emphasis_policy="defer-to-compose",
+    )
+
+    check = report.checks[0]
+    assert report.status == "ok"
+    assert check.status == "ok"
+    assert "audiocompose.emphasis.gain.v1" in check.detail
+    assert "pending composition" in check.detail
+    assert [event[0] for event in events] == ["measure", "close"]
+    assert events[0][1].text == item.text
+    assert events[0][1].id == item.computed_id()
+    assert item.controls[0].name == "emphasis"
+    assert report.render_plan_id == plan.plan_id
+
+
+
+def test_piper_render_defers_emphasis_to_composition_without_native_option(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_pipersynth(
+        monkeypatch,
+        amount=20,
+        maximum=None,
+        fits=None,
+        allow_synthesis=True,
+    )
+    binding = {"renderer": "piper", "target_id": "piper-test-model"}
+    plain_plan = _plan(("Piper raw speech", True, "sentence"), binding=binding)
+    plain_preflight = preflight_render_plan(plain_plan, tmp_path / "plain.toml")
+    plain_result = render_renderplan(
+        plain_plan,
+        preflight=plain_preflight,
+        output_dir=tmp_path / "plain",
+        cache_dir=tmp_path / "cache",
+    )
+
+    item = replace(
+        plain_plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=5, name="emphasis", params={}),),
+    )
+    plan = replace(plain_plan, flow=(item,), plan_id=None).with_identity()
+    original_segment_id = item.computed_id()
+    preflight = preflight_render_plan(
+        plan,
+        tmp_path / "emphasis.toml",
+        emphasis_policy="defer-to-compose",
+    )
+    events.clear()
+
+    result = render_renderplan(
+        plan,
+        preflight=preflight,
+        output_dir=tmp_path / "emphasis",
+        cache_dir=tmp_path / "cache",
+        emphasis_policy="defer-to-compose",
+    )
+
+    assert not result.failed
+    assert result.rendered_count == 1
+    assert [name for name, _ in events] == [
+        "measure",
+        "synthesize",
+        "close",
+    ]
+    native_request = next(value for name, value in events if name == "synthesize")
+    assert native_request.text == item.text
+    assert native_request.id == original_segment_id
+    assert not hasattr(native_request, "renderplan_controls")
+    manifest = load_manifest(result.manifest_path)
+    manifest.validate_against(plan)
+    assert manifest.render_plan_id == plan.plan_id
+    assert manifest.speech[0].segment_id == original_segment_id
+    assert manifest.speech[0].sha256 == plain_result.manifest.speech[0].sha256
+    assert (tmp_path / "emphasis" / item.wav).is_file()
 
 def test_preflight_persists_all_fit_report_reuses_session_and_never_synthesizes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

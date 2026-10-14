@@ -42,6 +42,23 @@ voicerender inspect-manifest renders/narration/render-manifest.toml --json
 
 Install the selected engine extra and make its model assets available before preflight/render; VoiceRender does not download models implicitly. Preflight reports `ok`, `replan`, or `reject` for each required speech occurrence. An `ok` report approves that exact RenderPlan under the observed renderer capability; rendering still remeasures each exact request immediately before synthesis. If fresh capacity no longer fits, VoiceRender stops before synthesis for that occurrence and returns a new same-plan/same-occurrence `replan` report; a session-open failure returns a fresh `reject` report. The CLI writes that report to `--recheck-report` when supplied. VoiceRender never creates a child plan, changes text, or adapts chunking. Every RenderPlan speech item maps to exactly one public `SpeechRequest` and one numbered WAV, in plan order; VoiceRender does not split, merge, normalize, or reorder requests. Incremental manifests remain valid when rendering fails partway through. Render results expose an execution fingerprint (VoiceRender/adapter versions, API-probe signature, synthesis identity, voice/options, and measured capacity) separately from `RenderPlan.plan_id`.
 
+
+
+### Deferred emphasis
+
+VoiceRender does not apply emphasis during speech synthesis and does not advertise `emphasis` as a native Piper feature. By default, emphasis is rejected. An orchestration pipeline that declares the `audiocompose.emphasis.gain.v1` handler must select `--emphasis-policy defer-to-compose` for **both** preflight and render (or for `render-book`):
+
+```bash
+voicerender preflight chapter.renderplan.toml \
+  -o chapter.preflight.toml --emphasis-policy defer-to-compose
+voicerender render chapter.renderplan.toml \
+  --preflight chapter.preflight.toml --out-dir renders/narration \
+  --emphasis-policy defer-to-compose
+```
+
+The accepted emphasis parameters are `{}` or one of `{ "level": "reduced" }`, `{ "level": "moderate" }`, or `{ "level": "strong" }`; unknown keys, types, and invalid ranges are rejected. Other unsupported controls remain fail-closed. VoiceRender sends the original text to the engine without an emphasis option, preserves the original controls and identities in the RenderPlan, and leaves control interpretation—including overlapping emphasis—to AudioCompose.
+
+Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `render-book` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
 The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
 
 Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
@@ -120,6 +137,7 @@ Novel.ssmdbook/
     └── chapter-0005/
         ├── preflight.toml                 # whole-chapter preflight
         ├── render-manifest.toml            # cumulative verified artifacts
+        ├── render-diagnostics.json          # deferred controls, if any, remain pending composition
         ├── 000001.wav
         └── ...
 ```
@@ -142,6 +160,21 @@ if report.status == "ok":
         cache_dir=".voicerender-cache",
     )
     print(result.manifest_path)
+```
+
+
+For an emphasis-bearing plan, the Python API uses the same safe default (`reject`). A pipeline that declares the composition handler must pass the opt-in policy to both stages:
+
+```python
+report = preflight_render_plan(
+    plan, "chapter.preflight.toml", emphasis_policy="defer-to-compose"
+)
+result = render_renderplan(
+    plan,
+    preflight=report,
+    output_dir="renders/narration",
+    emphasis_policy="defer-to-compose",
+)
 ```
 
 Third-party engines can implement the request-level adapter protocol in `voicerender.engines.base` and register with `voicerender.engines.register_adapter`. Engine implementations and model assets remain lazily loaded.

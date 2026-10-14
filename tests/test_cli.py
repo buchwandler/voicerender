@@ -117,3 +117,30 @@ def test_shared_example_plan_and_profile_are_identity_matched() -> None:
     assert plan.render_profile_id == profile.profile_id
     assert plan.speech[0].binding == profile.roles["narrator"].binding
     assert plan.speech[0].text == "A small shared RenderPlan example."
+
+
+
+def test_cli_emphasis_policy_defaults_to_reject_and_can_defer() -> None:
+    from voicerender.cli import build_parser
+
+    parser = build_parser()
+    commands = (
+        ["preflight", "plan.toml", "--output", "preflight.toml"],
+        [
+            "render",
+            "plan.toml",
+            "--preflight",
+            "preflight.toml",
+            "--out-dir",
+            "rendered",
+        ],
+        ["render-book", "book", "--variant", "narration"],
+    )
+    for command in commands:
+        assert parser.parse_args(command).emphasis_policy == "reject"
+        assert (
+            parser.parse_args(
+                [*command, "--emphasis-policy", "defer-to-compose"]
+            ).emphasis_policy
+            == "defer-to-compose"
+        )

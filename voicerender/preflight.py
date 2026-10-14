@@ -23,11 +23,12 @@ from .engines.base import EngineSelection, EngineSession
 from .engines.registry import get_adapter, open_session
 from .errors import PlanError
 from .renderplan_input import (
+    EmphasisPolicy,
     MeasurementOutcome,
     PreflightDisposition,
     classify_measurement,
     engine_selection_from_binding,
-    speech_request_from_renderplan,
+    speech_request_conversion_from_renderplan,
 )
 
 
@@ -37,7 +38,12 @@ class _OpenFailure:
     detail: str
 
 
-def preflight_render_plan(plan: RenderPlan, output: str | Path) -> PreflightReport:
+def preflight_render_plan(
+    plan: RenderPlan,
+    output: str | Path,
+    *,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+) -> PreflightReport:
     """Measure each required speech occurrence, then validate and persist its report."""
     if not isinstance(plan, RenderPlan):
         raise PlanError("preflight input must be a RenderPlan")
@@ -50,7 +56,10 @@ def preflight_render_plan(plan: RenderPlan, output: str | Path) -> PreflightRepo
                 continue
             segment_id = item.segment_id or item.computed_id()
             try:
-                request = speech_request_from_renderplan(item)
+                conversion = speech_request_conversion_from_renderplan(
+                    item, emphasis_policy=emphasis_policy
+                )
+                request = conversion.request
                 selection = engine_selection_from_binding(
                     item.binding, language=item.language
                 )
@@ -87,7 +96,15 @@ def preflight_render_plan(plan: RenderPlan, output: str | Path) -> PreflightRepo
                 outcome = classify_measurement(exc)
             else:
                 outcome = classify_measurement(measured)
-            checks.append(_measurement_check(item, segment_id, outcome))
+            checks.append(
+                _measurement_check(
+                    item,
+                    segment_id,
+                    outcome,
+                    deferred_capability=conversion.deferred_capability,
+                    deferred_control_count=conversion.deferred_control_count,
+                )
+            )
 
         expected = {
             (item.number, item.segment_id or item.computed_id())
@@ -171,7 +188,12 @@ def preflight_summary(report: PreflightReport, output: str | Path) -> dict[str, 
 
 
 def _measurement_check(
-    item: SpeechItem, segment_id: str, outcome: MeasurementOutcome
+    item: SpeechItem,
+    segment_id: str,
+    outcome: MeasurementOutcome,
+    *,
+    deferred_capability: str | None = None,
+    deferred_control_count: int = 0,
 ) -> PreflightCheck:
     measurement = outcome.measurement
     status = {
@@ -179,6 +201,13 @@ def _measurement_check(
         PreflightDisposition.TOO_LONG: "too_long",
         PreflightDisposition.REJECT: "error",
     }[outcome.disposition]
+    detail = outcome.error
+    if deferred_capability is not None and deferred_control_count:
+        deferred_detail = (
+            f"Deferred {deferred_control_count} emphasis control(s) to "
+            f"{deferred_capability}; pending composition (not applied by VoiceRender)."
+        )
+        detail = f"{detail}; {deferred_detail}" if detail else deferred_detail
     return PreflightCheck(
         segment_number=item.number,
         segment_id=segment_id,
@@ -191,7 +220,7 @@ def _measurement_check(
             if measurement is not None and measurement.source.strip()
             else "voicerender.preflight"
         ),
-        detail=outcome.error,
+        detail=detail,
     )
 
 

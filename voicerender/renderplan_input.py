@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from typing import Any
 
-from renderplan import SpeechItem, TokenBundle
+from renderplan import SpeechControl, SpeechItem, TokenBundle
 
 from .engines.base import (
     EngineSelection,
@@ -43,6 +43,25 @@ class MeasurementOutcome:
     measurement: RequestMeasure | None = None
     error: str | None = None
 
+
+
+EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
+
+
+class EmphasisPolicy(str, Enum):
+    """Policy for emphasis controls not natively interpreted by VoiceRender."""
+
+    REJECT = "reject"
+    DEFER_TO_COMPOSE = "defer-to-compose"
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechRequestConversion:
+    """Native speech request plus a trace of controls deferred downstream."""
+
+    request: SpeechRequest
+    deferred_capability: str | None = None
+    deferred_control_count: int = 0
 
 def engine_selection_from_binding(
     binding: Mapping[str, Any], *, language: str
@@ -157,10 +176,20 @@ def engine_selection_from_binding(
     return replace(selection, metadata=metadata)
 
 
-def speech_request_from_renderplan(item: SpeechItem) -> SpeechRequest:
-    """Convert one SpeechItem into the exact request used by measure and synthesize."""
+def speech_request_conversion_from_renderplan(
+    item: SpeechItem,
+    *,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+) -> SpeechRequestConversion:
+    """Convert one SpeechItem into a request and its deferred-control trace."""
     if not isinstance(item, SpeechItem):
         raise PlanError("RenderPlan item must be a SpeechItem")
+    try:
+        policy = EmphasisPolicy(emphasis_policy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "emphasis_policy must be 'reject' or 'defer-to-compose'"
+        ) from exc
     selection = engine_selection_from_binding(item.binding, language=item.language)
     adapter = get_adapter(selection.engine)
     fragment_method = getattr(adapter, "renderprofile_fragment", None)
@@ -174,11 +203,13 @@ def speech_request_from_renderplan(item: SpeechItem) -> SpeechRequest:
             f"Engine {adapter.id!r} returned an invalid RenderProfile fragment"
         )
     tokens = _speech_tokens(item, fragment.token_fields)
-    overrides, control_options = _lower_controls(item, adapter, selection)
+    overrides, control_options, deferred_count = _lower_controls(
+        item, adapter, selection, emphasis_policy=policy
+    )
     options = dict(selection.options)
     if control_options:
         options["renderplan_controls"] = control_options
-    return SpeechRequest(
+    request = SpeechRequest(
         id=item.segment_id or item.computed_id(),
         text=item.text,
         language=item.language,
@@ -188,6 +219,24 @@ def speech_request_from_renderplan(item: SpeechItem) -> SpeechRequest:
         tokens=tokens,
         options=options,
     )
+    return SpeechRequestConversion(
+        request=request,
+        deferred_capability=(
+            EMPHASIS_COMPOSITION_CAPABILITY if deferred_count else None
+        ),
+        deferred_control_count=deferred_count,
+    )
+
+
+def speech_request_from_renderplan(
+    item: SpeechItem,
+    *,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+) -> SpeechRequest:
+    """Convert one SpeechItem into the exact request used by measure and synthesize."""
+    return speech_request_conversion_from_renderplan(
+        item, emphasis_policy=emphasis_policy
+    ).request
 
 
 def _is_exact_amount(value: RequestMeasure) -> bool:
@@ -374,18 +423,28 @@ def _speech_tokens(
 
 
 def _lower_controls(
-    item: SpeechItem, adapter: Any, selection: EngineSelection
-) -> tuple[tuple[PronunciationSpan, ...], tuple[Mapping[str, Any], ...]]:
+    item: SpeechItem,
+    adapter: Any,
+    selection: EngineSelection,
+    *,
+    emphasis_policy: EmphasisPolicy,
+) -> tuple[tuple[PronunciationSpan, ...], tuple[Mapping[str, Any], ...], int]:
     capabilities = adapter.capabilities()
     overrides: list[PronunciationSpan] = []
     lowered: list[Mapping[str, Any]] = []
+    deferred_emphasis_count = 0
     for control in item.controls:
+        _validate_control_range(item, control)
         if control.name == "pronunciation":
             if not capabilities.supports_pronunciation_overrides:
                 raise UnsupportedSynthesisFeatureError(
                     f"Engine {adapter.id!r} does not support pronunciation controls"
                 )
             params = control.params
+            if not isinstance(params, Mapping):
+                raise UnsupportedSynthesisFeatureError(
+                    "Pronunciation control parameters must be a table"
+                )
             unknown = set(params).difference({"phonemes", "alphabet", "language"})
             if unknown:
                 raise UnsupportedSynthesisFeatureError(
@@ -421,9 +480,18 @@ def _lower_controls(
             )
             continue
 
-        if control.name not in {"prosody", "emphasis"} and not control.name.startswith(
-            "extension:"
-        ):
+        if control.name == "emphasis":
+            if emphasis_policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
+                raise UnsupportedSynthesisFeatureError(
+                    "Emphasis requires an explicitly declared downstream handler "
+                    f"({EMPHASIS_COMPOSITION_CAPABILITY}); select "
+                    "emphasis_policy='defer-to-compose' to defer it"
+                )
+            _validate_emphasis_params(control.params)
+            deferred_emphasis_count += 1
+            continue
+
+        if control.name != "prosody" and not control.name.startswith("extension:"):
             raise UnsupportedSynthesisFeatureError(
                 f"Unsupported RenderPlan speech control {control.name!r}"
             )
@@ -456,7 +524,41 @@ def _lower_controls(
                 "options": dict(lowered_options["options"]),
             }
         )
-    return tuple(overrides), tuple(lowered)
+    return tuple(overrides), tuple(lowered), deferred_emphasis_count
+
+
+def _validate_control_range(item: SpeechItem, control: SpeechControl) -> None:
+    if (
+        type(control.start) is not int
+        or type(control.end) is not int
+        or control.start < 0
+        or control.start >= control.end
+        or control.end > len(item.text)
+    ):
+        raise UnsupportedSynthesisFeatureError(
+            f"RenderPlan speech control {control.name!r} has an invalid range "
+            f"[{control.start}, {control.end}) for text length {len(item.text)}"
+        )
+
+
+def _validate_emphasis_params(params: Any) -> None:
+    if not isinstance(params, Mapping):
+        raise UnsupportedSynthesisFeatureError(
+            "Emphasis control parameters must be a table"
+        )
+    unknown = set(params).difference({"level"})
+    if unknown:
+        raise UnsupportedSynthesisFeatureError(
+            "Unsupported emphasis control parameter(s): "
+            + ", ".join(sorted(str(name) for name in unknown))
+        )
+    if "level" in params and (
+        not isinstance(params["level"], str)
+        or params["level"] not in {"reduced", "moderate", "strong"}
+    ):
+        raise UnsupportedSynthesisFeatureError(
+            "Emphasis level must be one of: reduced, moderate, strong"
+        )
 
 
 def _required_string(value: Any, field_name: str) -> str:
@@ -478,9 +580,13 @@ def _nonnegative_int(value: Any) -> int | None:
 
 
 __all__ = [
+    "EMPHASIS_COMPOSITION_CAPABILITY",
+    "EmphasisPolicy",
     "MeasurementOutcome",
     "PreflightDisposition",
+    "SpeechRequestConversion",
     "classify_measurement",
     "engine_selection_from_binding",
+    "speech_request_conversion_from_renderplan",
     "speech_request_from_renderplan",
 ]

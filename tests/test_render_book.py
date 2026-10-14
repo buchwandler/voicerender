@@ -24,6 +24,7 @@ from renderplan import (
     RoleProfile,
     SourceSpan,
     SpeechArtifact,
+    SpeechControl,
     SpeechItem,
     load_manifest,
     load_plan,
@@ -77,7 +78,8 @@ def _plan(profile: RenderProfile, chapter_number: int, count: int) -> RenderPlan
 
 
 def _book(
-    tmp_path: Path, chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1))
+    tmp_path: Path, chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1)),
+    emphasis_speech: int | None = None
 ) -> tuple[Path, str]:
     workspace = tmp_path / "sample.ssmdbook"
     variant_name = "narration--"
@@ -93,6 +95,23 @@ def _book(
     for source_number, speech_count in chapters:
         chapter_id = f"chapter-{source_number:04d}"
         plan = _plan(profile, source_number, speech_count)
+        if emphasis_speech is not None:
+            plan = replace(
+                plan,
+                flow=tuple(
+                    replace(
+                        item,
+                        segment_id=None,
+                        controls=(
+                            SpeechControl(start=0, end=3, name="emphasis", params={}),
+                        ),
+                    )
+                    if item.number == emphasis_speech
+                    else item
+                    for item in plan.flow
+                ),
+                plan_id=None,
+            ).with_identity()
         plan_name = f"{chapter_id}.renderplan.toml"
         save_plan(plan, variant_dir / plan_name)
         entries.append(
@@ -151,8 +170,16 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     preflight_calls: list[str] = []
     render_calls: list[tuple[str, frozenset[int] | None]] = []
 
-    def preflight(plan: RenderPlan, path: str | Path) -> PreflightReport:
+    policy_calls: list[str] = []
+
+    def preflight(
+        plan: RenderPlan,
+        path: str | Path,
+        *,
+        emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+    ) -> PreflightReport:
         preflight_calls.append(plan.plan_id or plan.computed_id())
+        policy_calls.append(f"preflight:{emphasis_policy.value}")
         return _preflight(plan, Path(path))
 
     def render(
@@ -164,8 +191,10 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         force: bool = False,
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
+        emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
     ) -> RenderPlanResult:
         del cache_dir, recheck_report_path
+        policy_calls.append(f"render:{emphasis_policy.value}")
         selected = (
             tuple(plan.speech)
             if speech_numbers is None
@@ -232,11 +261,58 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             rendered_count=rendered,
             reused_count=reused,
             selection_complete=selected_keys.issubset(set(artifacts)),
+            pending_composition=(
+                emphasis_policy is book_module.EmphasisPolicy.DEFER_TO_COMPOSE
+                and any(
+                    control.name == "emphasis"
+                    for item in plan.speech
+                    for control in item.controls
+                )
+            ),
         )
 
     monkeypatch.setattr(book_module, "preflight_render_plan", preflight)
     monkeypatch.setattr(book_module, "render_renderplan", render)
-    return {"preflight": preflight_calls, "render": render_calls}
+    return {"preflight": preflight_calls, "render": render_calls, "policy": policy_calls}
+
+
+def test_book_propagates_explicit_emphasis_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path)
+
+    result = book_module.render_book(
+        workspace, variant=variant, emphasis_policy="defer-to-compose"
+    )
+
+    assert result.exit_code == 0
+    assert len(calls["policy"]) == 6
+    assert all(call.endswith(":defer-to-compose") for call in calls["policy"])
+
+
+def test_book_reports_pending_composition_in_result_and_human_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(
+        tmp_path, chapters=((5, 1),), emphasis_speech=1
+    )
+
+    result = book_module.render_book(
+        workspace, variant=variant, emphasis_policy="defer-to-compose"
+    )
+    assert result.pending_composition is True
+    outcome = result.outcomes[0]
+    assert outcome.pending_composition is True
+    report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["pending_composition"] is True
+    assert report["item"][0]["pending_composition"] is True
+
+    from voicerender.cli import _print_book_result
+
+    _print_book_result(result)
+    assert "emphasis remains pending composition" in capsys.readouterr().out
 
 
 def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
@@ -350,6 +426,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
         force: bool = False,
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
+        emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
     ) -> RenderPlanResult:
         result = original_render(
             plan,
@@ -359,6 +436,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
             force=force,
             recheck_report_path=recheck_report_path,
             speech_numbers=speech_numbers,
+            emphasis_policy=emphasis_policy,
         )
         assert recheck_report_path is not None
         speech = plan.speech[0]

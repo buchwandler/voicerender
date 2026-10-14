@@ -22,6 +22,7 @@ from renderplan import (
     RenderProfile,
     RoleProfile,
     SourceSpan,
+    SpeechControl,
     SpeechItem,
     load_manifest,
     load_preflight,
@@ -43,9 +44,16 @@ from voicerender.engines.base import (
 )
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
-from voicerender.errors import ArtifactError, PlanError
+from voicerender.errors import (
+    ArtifactError,
+    PlanError,
+    UnsupportedSynthesisFeatureError,
+)
 from voicerender.preflight import preflight_render_plan
-from voicerender.renderplan_render import render_renderplan
+from voicerender.renderplan_render import (
+    RENDER_DIAGNOSTICS_FILENAME,
+    render_renderplan,
+)
 from voicerender.storage import wav_info
 
 _ENGINE_ID = "renderplan-render-test-engine"
@@ -80,6 +88,7 @@ class _Session:
 
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
         self.adapter.synthesized_texts.append(request.text)
+        self.adapter.synthesized_requests.append(request)
         return RenderedSpeech(
             id=request.id,
             audio=[0.0, 0.2, -0.2, 0.1],
@@ -96,6 +105,7 @@ class _Adapter:
         self.close_count = 0
         self.measured_texts: list[str] = []
         self.synthesized_texts: list[str] = []
+        self.synthesized_requests: list[SpeechRequest] = []
         self.measurements: dict[str, RequestMeasure | Exception] = {}
         self.open_error: Exception | None = None
         self.session = _Session(self)
@@ -223,6 +233,152 @@ def _plan(*texts: str) -> RenderPlan:
 def _report(adapter: _Adapter, plan: RenderPlan, tmp_path: Path) -> PreflightReport:
     del adapter
     return preflight_render_plan(plan, tmp_path / "preflight.toml")
+
+def test_render_defers_emphasis_without_changing_wav_or_manifest_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    text = "raw voice"
+    plain_plan = _plan(text)
+    plain_report = preflight_render_plan(plain_plan, tmp_path / "plain-preflight.toml")
+    plain_result = render_renderplan(
+        plain_plan,
+        preflight=plain_report,
+        output_dir=tmp_path / "plain-render",
+        cache_dir=tmp_path / "cache",
+    )
+
+    item = replace(
+        plain_plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=3, name="emphasis", params={}),),
+    )
+    emphasis_plan = replace(plain_plan, flow=(item,), plan_id=None).with_identity()
+    original_plan_id = emphasis_plan.plan_id
+    original_segment_id = item.computed_id()
+    report = preflight_render_plan(
+        emphasis_plan,
+        tmp_path / "emphasis-preflight.toml",
+        emphasis_policy="defer-to-compose",
+    )
+    adapter.synthesized_texts.clear()
+    adapter.synthesized_requests.clear()
+
+    result = render_renderplan(
+        emphasis_plan,
+        preflight=report,
+        output_dir=tmp_path / "emphasis-render",
+        cache_dir=tmp_path / "cache",
+        emphasis_policy="defer-to-compose",
+    )
+
+    assert not result.failed
+    assert result.pending_composition is True
+    assert adapter.synthesized_texts == [text]
+    assert adapter.synthesized_requests[0].text == text
+    assert "renderplan_controls" not in adapter.synthesized_requests[0].options
+    assert result.manifest.render_plan_id == original_plan_id
+    assert result.manifest.speech[0].segment_id == original_segment_id
+    assert result.manifest.speech[0].sha256 == plain_result.manifest.speech[0].sha256
+    result.manifest.validate_against(emphasis_plan)
+    assert item.controls == (SpeechControl(start=0, end=3, name="emphasis", params={}),)
+
+    diagnostics_path = tmp_path / "emphasis-render" / RENDER_DIAGNOSTICS_FILENAME
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert diagnostics["pending_composition"] is True
+    assert diagnostics["emphasis_policy"] == "defer-to-compose"
+    assert diagnostics["deferred_controls"] == [
+        {
+            "segment_number": 1,
+            "segment_id": original_segment_id,
+            "capability": "audiocompose.emphasis.gain.v1",
+            "count": 1,
+        }
+    ]
+    assert "pending composition" in diagnostics["warnings"][0]
+
+
+def test_partial_render_diagnostics_preserve_plan_wide_pending_emphasis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch)
+    base_plan = _plan("partial windows")
+    emphasized = replace(
+        base_plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=3, name="emphasis", params={}),),
+    )
+    plain = replace(base_plan.speech[0], number=2, segment_id=None, controls=())
+    plan = replace(base_plan, flow=(emphasized, plain), plan_id=None).with_identity()
+    report = preflight_render_plan(
+        plan,
+        tmp_path / "preflight.toml",
+        emphasis_policy="defer-to-compose",
+    )
+
+    second_window = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "partial-render",
+        cache_dir=tmp_path / "cache",
+        speech_numbers={2},
+        emphasis_policy="defer-to-compose",
+    )
+    assert second_window.pending_composition is True
+    assert not second_window.manifest.complete
+
+    first_window = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "partial-render",
+        cache_dir=tmp_path / "cache",
+        speech_numbers={1},
+        emphasis_policy="defer-to-compose",
+    )
+    assert first_window.pending_composition is True
+    assert first_window.manifest.complete
+    diagnostics = json.loads(
+        (tmp_path / "partial-render" / RENDER_DIAGNOSTICS_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert diagnostics["pending_composition"] is True
+    assert diagnostics["deferred_controls"] == [
+        {
+            "segment_number": 1,
+            "segment_id": emphasized.computed_id(),
+            "capability": "audiocompose.emphasis.gain.v1",
+            "count": 1,
+        }
+    ]
+
+
+def test_render_policy_must_match_deferred_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch)
+    plan = _plan("policy agreement")
+    item = replace(
+        plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=6, name="emphasis", params={}),),
+    )
+    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
+    report = preflight_render_plan(
+        plan,
+        tmp_path / "deferred-preflight.toml",
+        emphasis_policy="defer-to-compose",
+    )
+
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="explicitly select"
+    ):
+        render_renderplan(
+            plan,
+            preflight=report,
+            output_dir=tmp_path / "mismatched-policy",
+        )
+    assert not (tmp_path / "mismatched-policy").exists()
 
 
 def test_render_executes_exact_requests_in_order_and_writes_numbered_manifest(

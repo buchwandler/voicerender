@@ -30,18 +30,22 @@ from renderplan import (
 
 from .engines.base import EngineSelection, EngineSession, SpeechRequest
 from .engines.registry import get_adapter, open_session
-from .errors import ArtifactError, PlanError
+from .errors import ArtifactError, PlanError, UnsupportedSynthesisFeatureError
 from .preflight import _session_compatibility_key
 from .renderplan_input import (
+    EMPHASIS_COMPOSITION_CAPABILITY,
+    EmphasisPolicy,
     MeasurementOutcome,
     PreflightDisposition,
+    SpeechRequestConversion,
     classify_measurement,
     engine_selection_from_binding,
-    speech_request_from_renderplan,
+    speech_request_conversion_from_renderplan,
 )
 from .storage import atomic_json, atomic_wav, digest, verified_wav, wav_info
 
 RENDER_MANIFEST_FILENAME = "render-manifest.toml"
+RENDER_DIAGNOSTICS_FILENAME = "render-diagnostics.json"
 _CACHE_SCHEMA = "voicerender.renderplan-cache.v1"
 
 
@@ -59,6 +63,7 @@ class RenderPlanResult:
     fresh_preflight: PreflightReport | None = None
     error_code: str | None = None
     execution_fingerprint: tuple[dict[str, Any], ...] = ()
+    pending_composition: bool = False
 
     @property
     def failed(self) -> bool:
@@ -97,6 +102,7 @@ def render_renderplan(
     force: bool = False,
     recheck_report_path: str | Path | None = None,
     speech_numbers: Collection[int] | None = None,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
 ) -> RenderPlanResult:
     """Render selected speech items, retaining verified artifacts from prior runs."""
     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
@@ -131,6 +137,61 @@ def render_renderplan(
                 f"Speech occurrence {key} does not have a matching OK preflight check"
             )
 
+    try:
+        policy = EmphasisPolicy(emphasis_policy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "emphasis_policy must be 'reject' or 'defer-to-compose'"
+        ) from exc
+    emphasis_items = tuple(
+        item
+        for item in parsed_plan.speech
+        if any(control.name == "emphasis" for control in item.controls)
+    )
+    if emphasis_items and policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
+        raise UnsupportedSynthesisFeatureError(
+            "This RenderPlan contains emphasis controls; explicitly select "
+            "emphasis_policy='defer-to-compose' and declare "
+            f"{EMPHASIS_COMPOSITION_CAPABILITY}"
+        )
+    for item in emphasis_items:
+        if not item.preflight_required:
+            continue
+        key = (item.number, item.segment_id or item.computed_id())
+        check = checked.get(key)
+        if check is None or EMPHASIS_COMPOSITION_CAPABILITY not in (check.detail or ""):
+            raise PlanError(
+                f"Preflight did not confirm deferred emphasis for speech occurrence {key}"
+            )
+    conversions = {
+        (item.number, item.segment_id or item.computed_id()):
+        speech_request_conversion_from_renderplan(item, emphasis_policy=policy)
+        for item in selected_items
+    }
+    deferred_controls = [
+        {
+            "segment_number": item.number,
+            "segment_id": item.segment_id or item.computed_id(),
+            "capability": EMPHASIS_COMPOSITION_CAPABILITY,
+            "count": sum(control.name == "emphasis" for control in item.controls),
+        }
+        for item in emphasis_items
+        if policy is EmphasisPolicy.DEFER_TO_COMPOSE
+    ]
+    diagnostics = {
+        "schema": "voicerender.render-diagnostics.v1",
+        "render_plan_id": parsed_plan.plan_id or parsed_plan.computed_id(),
+        "emphasis_policy": policy.value,
+        "pending_composition": bool(deferred_controls),
+        "deferred_controls": deferred_controls,
+        "warnings": (
+            [
+                "Any WAVs produced contain unchanged speech; emphasis remains pending composition."
+            ]
+            if deferred_controls
+            else []
+        ),
+    }
     out = Path(output_dir).expanduser().resolve()
     cache = (
         Path(cache_dir).expanduser().resolve()
@@ -149,6 +210,7 @@ def render_renderplan(
     execution_fingerprints: dict[tuple[int, str], dict[str, Any]] = {}
     with _exclusive_render(out):
         cache.mkdir(parents=True, exist_ok=True)
+        atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
         artifact_map = _load_existing_artifacts(
             parsed_plan, out, manifest_path, report_id, force=force
         )
@@ -164,7 +226,16 @@ def render_renderplan(
             if force
             or (item.number, item.segment_id or item.computed_id()) not in artifact_map
         )
-        prepared = tuple(_prepare_speech(item) for item in pending_items)
+        prepared = tuple(
+            _prepare_speech(
+                item,
+                emphasis_policy=policy,
+                conversion=conversions[
+                    (item.number, item.segment_id or item.computed_id())
+                ],
+            )
+            for item in pending_items
+        )
         current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
         _persist_manifest(
             parsed_plan,
@@ -369,6 +440,7 @@ def render_renderplan(
         fresh_preflight=failure.fresh_preflight if failure is not None else None,
         error_code=failure.error_code if failure is not None else None,
         execution_fingerprint=tuple(execution_fingerprints.values()),
+        pending_composition=bool(deferred_controls),
     )
 
 
@@ -467,6 +539,7 @@ def _reset_owned_artifacts(output_dir: Path) -> None:
     for child in output_dir.iterdir():
         owned = child.name in {
             RENDER_MANIFEST_FILENAME,
+            RENDER_DIAGNOSTICS_FILENAME,
             "preflight.toml",
             "preflight-recheck.toml",
         } or bool(re.fullmatch(r"\d{6,}\.wav", child.name))
@@ -488,9 +561,18 @@ def _ordered_artifacts(
     ]
 
 
-def _prepare_speech(item: SpeechItem) -> _PreparedSpeech:
+def _prepare_speech(
+    item: SpeechItem,
+    *,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    conversion: SpeechRequestConversion | None = None,
+) -> _PreparedSpeech:
     try:
-        request = speech_request_from_renderplan(item)
+        if conversion is None:
+            conversion = speech_request_conversion_from_renderplan(
+                item, emphasis_policy=emphasis_policy
+            )
+        request = conversion.request
         selection = engine_selection_from_binding(item.binding, language=item.language)
         adapter = get_adapter(selection.engine)
         session_key = _session_compatibility_key(adapter, selection)
@@ -724,6 +806,7 @@ def _exclusive_render(output_dir: Path) -> Iterator[None]:
 
 
 __all__ = [
+    "RENDER_DIAGNOSTICS_FILENAME",
     "RENDER_MANIFEST_FILENAME",
     "RenderPlanResult",
     "render_renderplan",
