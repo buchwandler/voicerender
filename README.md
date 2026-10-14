@@ -68,7 +68,7 @@ voicerender profile refresh narration.renderprofile.toml \
   -o narration.refreshed.renderprofile.toml
 ```
 
-The shared RenderProfile workflow rejects reference-audio bindings because this execution path does not define a portable reference-audio contract.
+Local reference audio is machine-local and remains rejected in shared RenderProfiles. Pinned Voicefolio managed references (`kind="managed_reference"`, `resolver="voicefolio"`) are supported: VoiceRender checks catalog pins without downloading audio, then resolves the verified WAV at execution time. See the [Voicefolio managed-reference example](examples/voices/pocket-reference.toml).
 
 ## SSMDBook RenderPlan collections from UtterPlan
 
@@ -187,7 +187,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
 - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
 - **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
-- **Reference audio:** unsupported in the shared RenderProfile execution path for this MVP.
+- **Portable managed voices:** local `kind="reference"` paths are non-portable and rejected in shared RenderProfiles; pinned Voicefolio managed references are supported.
 
 ## Tests
 

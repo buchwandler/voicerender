@@ -1,0 +1,513 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import pytest
+import voicefolio
+
+import voicerender.engines.pocketsynth as pocketsynth_adapter
+from voicerender import managed_voices
+from voicerender.engines.base import EngineSelection, SpeechRequest
+from voicerender.engines.pocketsynth import (
+    PocketSynthEngineAdapter,
+    PocketSynthEngineSession,
+    _manager,
+    _voice_identity,
+    _voice_source,
+)
+from voicerender.engines.profiles import reject_reference_binding
+from voicerender.engines.selection import EngineRequest
+from voicerender.errors import EngineBackendError, ProfileError
+
+
+def _entry() -> voicefolio.VoiceEntry:
+    return voicefolio.VoiceEntry(
+        ref=voicefolio.VoiceRef("test-voices", "sample"),
+        dataset="test-dataset",
+        variant="original",
+        format="wav",
+        url="https://example.invalid/sample.wav",
+        size=12,
+        sha256="a" * 64,
+        source_repository="https://example.invalid/repo",
+        source_revision="revision-1",
+        source_path="voices/sample.wav",
+        license="CC-BY-4.0",
+    )
+
+
+def _source(entry: voicefolio.VoiceEntry | None = None) -> dict[str, Any]:
+    entry = entry or _entry()
+    return {
+        "kind": "managed_reference",
+        "resolver": "voicefolio",
+        "value": str(entry.ref),
+        "sha256": entry.sha256,
+        "source_revision": entry.source_revision,
+        "source_repository": entry.source_repository,
+        "source_path": entry.source_path,
+        "license": entry.license,
+        "dataset": entry.dataset,
+        "variant": entry.variant,
+    }
+
+
+def _install_catalog(monkeypatch: pytest.MonkeyPatch, entry: voicefolio.VoiceEntry) -> None:
+    catalog = voicefolio.Catalog([entry])
+    monkeypatch.setattr(managed_voices.voicefolio, "load_catalog", lambda **_: catalog)
+
+
+def _request(source: dict[str, Any], **options: Any) -> EngineRequest:
+    request_options = {**options, "voice_source": source}
+    return EngineRequest(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        options=request_options,
+    )
+
+
+def test_pocket_resolve_preserves_voicefolio_pins_without_fetching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = _entry()
+    source = _source(entry)
+    _install_catalog(monkeypatch, entry)
+
+    def unexpected_fetch(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("adapter metadata resolution must not fetch a WAV")
+
+    monkeypatch.setattr(managed_voices.voicefolio, "resolve_voice_source", unexpected_fetch)
+
+    selection, diagnostics = PocketSynthEngineAdapter().resolve(_request(source))
+
+    assert diagnostics == ()
+    assert selection.metadata["voice_source"] == source
+
+
+def test_pocket_resolve_reports_stale_pins_without_rewriting_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = _entry()
+    source = _source(entry)
+    source["sha256"] = "b" * 64
+    _install_catalog(monkeypatch, entry)
+
+    selection, diagnostics = PocketSynthEngineAdapter().resolve(_request(source))
+
+    assert [item.code for item in diagnostics] == ["managed_voice.invalid_source"]
+    assert selection.metadata["voice_source"] == source
+
+
+def test_voice_source_preserves_resolver_and_has_limited_legacy_shim() -> None:
+    entry = _entry()
+    source = _source(entry)
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        metadata={"voice_source": source},
+    )
+
+    normalized = _voice_source(selection)
+
+    assert normalized is not None
+    assert normalized["resolver"] == "voicefolio"
+    assert normalized["source_revision"] == entry.source_revision
+
+    legacy = dict(source, value="kyutai-tts-voices:sample")
+    legacy.pop("resolver")
+    with pytest.warns(DeprecationWarning, match="resolver='voicefolio'"):
+        normalized_legacy = _voice_source(
+            EngineSelection(
+                engine="pocket",
+                target_id="bundle-test",
+                language="en-US",
+                metadata={"voice_source": legacy},
+            )
+        )
+    assert normalized_legacy is not None
+    assert normalized_legacy["resolver"] == "voicefolio"
+
+
+def test_pocket_profile_fragment_retains_authored_managed_source() -> None:
+    source = _source()
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        metadata={"voice_source": source},
+    )
+
+    fragment = PocketSynthEngineAdapter().renderprofile_fragment(selection)
+
+    assert fragment.binding["options"]["voice_source"] == source
+    reject_reference_binding(fragment.binding)
+
+
+def test_shared_profile_accepts_voicefolio_but_rejects_incomplete_managed_source() -> None:
+    source = _source()
+
+    reject_reference_binding({"options": {"voice_source": source}})
+
+    incomplete = dict(source)
+    del incomplete["sha256"]
+    with pytest.raises(ProfileError, match="requires non-empty sha256"):
+        reject_reference_binding({"options": {"voice_source": incomplete}})
+
+
+
+def test_pocket_profile_fragment_still_rejects_local_reference() -> None:
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        metadata={
+            "voice_source": {
+                "kind": "reference",
+                "value": "/machine/local.wav",
+                "sha256": "a" * 64,
+            }
+        },
+    )
+
+    with pytest.raises(ProfileError, match="Reference-audio bindings"):
+        PocketSynthEngineAdapter().renderprofile_fragment(selection)
+
+
+
+def test_managed_execution_resolves_once_passes_path_and_reuses_prepared_voice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = _source()
+    voice_path = tmp_path / "verified.wav"
+    resolved = managed_voices.ResolvedManagedVoice(
+        resolver="voicefolio",
+        ref=source["value"],
+        path=voice_path,
+        sha256=source["sha256"],
+        source_revision=source["source_revision"],
+        source_repository=source["source_repository"],
+        source_path=source["source_path"],
+        license=source["license"],
+        dataset=source["dataset"],
+        variant=source["variant"],
+    )
+    resolve_calls: list[dict[str, Any]] = []
+    prepared_paths: list[Path] = []
+    prepared = object()
+
+    def resolve(managed_source: Any, **kwargs: Any) -> Any:
+        resolve_calls.append({"source": managed_source, **kwargs})
+        return resolved
+
+    class Runtime:
+        def prepare_voice(self, path: Path) -> object:
+            prepared_paths.append(path)
+            return prepared
+
+    monkeypatch.setattr(pocketsynth_adapter, "resolve_managed_voice", resolve)
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        options={"cache_dir": tmp_path, "voice_catalog_path": tmp_path / "voices.json"},
+        metadata={"voice_source": source},
+        offline=True,
+    )
+    session = PocketSynthEngineSession(Runtime(), selection, None, None)
+    request = SpeechRequest(
+        id="request-1",
+        text="hello",
+        language="en-US",
+        options={"voice_source": source},
+    )
+
+    first = session._voice(request)
+    second = session._voice(request)
+
+    assert first is prepared and second is prepared
+    assert prepared_paths == [voice_path]
+    assert resolve_calls == [
+        {
+            "source": source,
+            "cache_dir": tmp_path,
+            "offline": True,
+            "catalog_paths": tmp_path / "voices.json",
+        }
+    ]
+    assert next(iter(session._voices)) == (
+        "managed_reference",
+        "voicefolio",
+        source["value"],
+        source["sha256"],
+        source["source_revision"],
+    )
+
+
+def test_managed_execution_checks_resolver_provenance_before_prepare(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = _source()
+    resolved = managed_voices.ResolvedManagedVoice(
+        resolver="voicefolio",
+        ref=source["value"],
+        path=tmp_path / "verified.wav",
+        sha256=source["sha256"],
+        source_revision=source["source_revision"],
+        source_repository=source["source_repository"],
+        source_path="different/path.wav",
+    )
+
+    monkeypatch.setattr(
+        pocketsynth_adapter,
+        "resolve_managed_voice",
+        lambda *args, **kwargs: resolved,
+    )
+
+    class Runtime:
+        def prepare_voice(self, path: Path) -> object:
+            raise AssertionError("mismatched provenance must be rejected first")
+
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        metadata={"voice_source": source},
+    )
+    session = PocketSynthEngineSession(Runtime(), selection, None, None)
+    request = SpeechRequest(id="request-1", text="hello", language="en-US")
+
+    with pytest.raises(EngineBackendError) as error:
+        session._voice(request)
+
+    assert error.value.code == "pocket.managed_reference_changed"
+    assert error.value.details["resolver"] == "voicefolio"
+
+
+def test_managed_identity_keeps_resolver_and_excludes_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        options={"voice_catalog_path": "/machine/voices.json"},
+        metadata={"voice_source": source},
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "pocketsynth",
+        SimpleNamespace(runtime_identity=lambda: {"runtime": "test"}),
+    )
+
+    identity = _voice_identity(selection)
+    canonical = PocketSynthEngineAdapter().canonical_synthesis_identity(selection)
+
+    assert identity == {
+        "kind": "managed_reference",
+        "resolver": "voicefolio",
+        "ref": source["value"],
+        "sha256": source["sha256"],
+        "source_revision": source["source_revision"],
+    }
+    assert canonical["voice"] == identity
+    assert "/machine/voices.json" not in repr(canonical)
+
+
+def test_catalog_options_remain_separate_and_voice_browsing_uses_voicefolio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entry = _entry()
+    catalog = voicefolio.Catalog([entry])
+    voice_catalog_path = tmp_path / "voice-catalog.json"
+    model_catalog_path = tmp_path / "pocket-model-catalog.json"
+    voicefolio_paths: list[tuple[Any, ...]] = []
+
+    def load_catalog(*, extra_paths: Any = ()) -> voicefolio.Catalog:
+        voicefolio_paths.append(tuple(extra_paths))
+        return catalog
+
+    monkeypatch.setattr(managed_voices.voicefolio, "load_catalog", load_catalog)
+    source = _source(entry)
+    selection, diagnostics = PocketSynthEngineAdapter().resolve(
+        _request(
+            source,
+            voice_catalog_path=voice_catalog_path,
+            catalog_path=model_catalog_path,
+        )
+    )
+    assert diagnostics == ()
+    assert selection.options["voice_catalog_path"] == voice_catalog_path
+    assert selection.options["catalog_path"] == model_catalog_path
+
+    class BundleManager:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    bundle_calls: list[dict[str, Any]] = []
+
+    def discover_bundles(**kwargs: Any) -> tuple[Any, ...]:
+        bundle_calls.append(kwargs)
+        return ()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pocketsynth",
+        SimpleNamespace(
+            BundleAssetManager=BundleManager,
+            discover_bundles=discover_bundles,
+        ),
+    )
+    manager = _manager(
+        options={
+            "cache_dir": tmp_path,
+            "catalog_path": model_catalog_path,
+            "voice_catalog_path": voice_catalog_path,
+        },
+        offline=False,
+    )
+    PocketSynthEngineAdapter().list_voice_prompts(
+        dataset=entry.dataset, voice_catalog_path=voice_catalog_path
+    )
+    assert manager.kwargs["catalog_path"] == model_catalog_path
+    assert "voice_catalog_path" not in manager.kwargs
+    assert voicefolio_paths == [(voice_catalog_path,), (voice_catalog_path,)]
+
+    from voicerender.engines.pocketsynth import _discover_bundles
+
+    _discover_bundles(
+        options={
+            "cache_dir": tmp_path,
+            "catalog_path": model_catalog_path,
+            "voice_catalog_path": voice_catalog_path,
+        },
+        language="en",
+        offline=False,
+        refresh=False,
+    )
+    assert bundle_calls[0]["catalog_path"] == model_catalog_path
+    assert "voice_catalog_path" not in bundle_calls[0]
+
+
+
+def test_offline_cached_voicefolio_asset_renders_with_managed_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = _source()
+    voice_path = tmp_path / "cached-verified.wav"
+    resolved = managed_voices.ResolvedManagedVoice(
+        resolver="voicefolio",
+        ref=source["value"],
+        path=voice_path,
+        sha256=source["sha256"],
+        source_revision=source["source_revision"],
+        source_repository=source["source_repository"],
+        source_path=source["source_path"],
+    )
+    calls: list[dict[str, Any]] = []
+    prepared = object()
+
+    def resolve(managed_source: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return resolved
+
+    class Runtime:
+        def prepare_voice(self, path: Path) -> object:
+            assert path == voice_path
+            return prepared
+
+        def synthesize(self, native: Any, *, voice: Any, config: Any, voice_level: Any):
+            assert voice is prepared
+            return SimpleNamespace(
+                id=native.id,
+                audio=np.ones(8, dtype=np.float32) / 4,
+                sample_rate=24000,
+                warnings=(),
+                metadata={"token_count": 1},
+            )
+
+    monkeypatch.setattr(pocketsynth_adapter, "resolve_managed_voice", resolve)
+    monkeypatch.setitem(
+        sys.modules,
+        "pocketsynth",
+        SimpleNamespace(SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs)),
+    )
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        options={"voice_catalog_path": tmp_path / "voices.json"},
+        metadata={"voice_source": source},
+        offline=True,
+    )
+    session = PocketSynthEngineSession(
+        Runtime(), selection, generation=object(), voice_level=SimpleNamespace(mode="off")
+    )
+    request = SpeechRequest(
+        id="render-1",
+        text="hello",
+        language="en-US",
+        options={"voice_source": source},
+    )
+
+    rendered = session.synthesize(request)
+
+    assert rendered.sample_rate == 24000
+    assert rendered.metadata["voice"] == {
+        "kind": "managed_reference",
+        "resolver": "voicefolio",
+        "ref": source["value"],
+        "sha256": source["sha256"],
+        "source_revision": source["source_revision"],
+    }
+    assert calls == [
+        {
+            "cache_dir": None,
+            "offline": True,
+            "catalog_paths": tmp_path / "voices.json",
+        }
+    ]
+
+
+
+def test_offline_voicefolio_cache_miss_keeps_precise_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    error = EngineBackendError(
+        "Voicefolio has no cached WAV while offline.",
+        code="managed_voice.offline_cache_miss",
+        details={"resolver": "voicefolio", "ref": source["value"]},
+    )
+    def fail_resolution(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(
+        pocketsynth_adapter, "resolve_managed_voice", fail_resolution
+    )
+
+    class Runtime:
+        def prepare_voice(self, path: Path) -> object:
+            raise AssertionError("a Voicefolio cache miss must fail before PocketSynth")
+
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        metadata={"voice_source": source},
+        offline=True,
+    )
+    session = PocketSynthEngineSession(Runtime(), selection, None, None)
+    request = SpeechRequest(id="request-1", text="hello", language="en-US")
+
+    with pytest.raises(EngineBackendError) as caught:
+        session._voice(request)
+
+    assert caught.value.code == "managed_voice.offline_cache_miss"
+    assert caught.value.details["resolver"] == "voicefolio"

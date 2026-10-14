@@ -121,12 +121,9 @@ def _fake_package(package: str) -> ModuleType:
         "PocketRuntime",
         "GenerationConfig",
         "BundleAssetManager",
-        "VoicePromptInfo",
         "PreparedVoice",
         "RequestMeasure",
         "discover_bundles",
-        "inspect_voice_prompt",
-        "list_voice_prompts",
         "KittenVoice",
         "discover_models",
         "runtime_identity",
@@ -163,8 +160,6 @@ def _fake_package(package: str) -> ModuleType:
     for name in (
         "discover_models",
         "discover_bundles",
-        "list_voice_prompts",
-        "inspect_voice_prompt",
     ):
         if name in symbols:
             setattr(module, name, forbidden_discovery)

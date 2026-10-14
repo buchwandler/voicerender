@@ -1,10 +1,39 @@
-schema = "voicerender.voice-profile.v1"
-name = "cloned-narrator"
+# Portable Voicefolio-managed reference example.
+# Replace the target placeholder with an installed Pocket bundle, then use
+# `voicerender profile create` to capture current renderer metadata and identity.
+
+default_role = "narrator"
+format = "renderprofile"
+profile_id = "sha256:1cefb3c9a599c84ccc30589c5d38501a5574c88bcfef582cceafa50cf9664df0"
+schema_version = 1
 
 [roles.narrator]
-engine = "pocket"
-target_id = "REPLACE_WITH_INSTALLED_BUNDLE_ID"
-reference_audio = "../../my-reference-voice.wav"
+language = "en-US"
 
-[roles.narrator.options]
+[roles.narrator.binding]
+renderer = "pocket"
+target_id = "REPLACE_WITH_INSTALLED_BUNDLE_ID"
+
+[roles.narrator.binding.options]
 precision = "int8"
+
+[roles.narrator.binding.options.voice_source]
+kind = "managed_reference"
+resolver = "voicefolio"
+value = "kyutai-tts-voices:alba-mackenna/a-moment-by"
+sha256 = "a1805f0e3610f0d5985f4abb51979620a012899e810019960310944bbcba509d"
+source_revision = "323332d33f997de8394f24a193e1a76df720e01a"
+source_repository = "kyutai/tts-voices"
+source_path = "alba-mackenna/a-moment-by.wav"
+license = "CC-BY-4.0"
+dataset = "alba-mackenna"
+variant = "original"
+
+[roles.narrator.binding.renderer_metadata]
+frontend = "pocketsynth"
+pronunciation = "unsupported"
+
+[roles.narrator.requirements]
+frontend = "pocketsynth"
+pronunciation = "unsupported"
+token_fields = []

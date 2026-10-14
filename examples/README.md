@@ -5,6 +5,9 @@
 - `voices/narration.renderprofile.toml` is a RenderProfile snapshot created from the Piper adapter's discovered `en_US-amy-medium` target.
 - `plans/chapter.renderplan.toml` references that exact profile identity and contains one required speech item.
 
+
+
+`voices/pocket-reference.toml` demonstrates a portable Voicefolio-managed WAV reference with resolver, SHA, revision, repository, and source-path pins. Replace its Pocket target placeholder and create a profile from installed bundle metadata; a machine-local `kind="reference"` path is still invalid in shared profiles.
 The pair can be parsed and validated without inference. To measure and render it, install the Piper extra and make the selected model available locally:
 
 ```bash

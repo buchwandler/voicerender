@@ -106,6 +106,7 @@ def reject_reference_binding(binding: Mapping[str, Any]) -> None:
 
 
 def _reject_reference_binding(binding: Mapping[str, Any]) -> None:
+    """Reject machine-local paths and validate portable managed-reference shape."""
     options = binding.get("options", {})
     options = options if isinstance(options, Mapping) else {}
     source = binding.get("voice_source", options.get("voice_source"))
@@ -117,8 +118,32 @@ def _reject_reference_binding(binding: Mapping[str, Any]) -> None:
     ):
         raise ProfileError(
             "Reference-audio bindings are not supported in RenderPlan profiles; "
-            "use a named voice or speaker binding"
+            "use a named voice or a Voicefolio managed reference"
         )
+    if isinstance(source, Mapping) and source.get("kind") == "managed_reference":
+        resolver = source.get("resolver")
+        ref = source.get("value")
+        legacy_voicefolio_ref = (
+            resolver is None
+            and isinstance(ref, str)
+            and ref.startswith("kyutai-tts-voices:")
+        )
+        if resolver != "voicefolio" and not legacy_voicefolio_ref:
+            raise ProfileError(
+                "Managed reference bindings require resolver='voicefolio'"
+            )
+        for name in (
+            "value",
+            "sha256",
+            "source_revision",
+            "source_repository",
+            "source_path",
+        ):
+            value = source.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ProfileError(
+                    f"Voicefolio managed-reference binding requires non-empty {name}"
+                )
 
 
 __all__ = ["make_renderprofile_fragment", "reject_reference_binding"]
