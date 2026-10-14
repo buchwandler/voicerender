@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.metadata
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -169,11 +170,18 @@ class EngineDiagnostic:
     severity: Literal["error", "warning", "info"]
     message: str
     field: str | None = None
+    details: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
-    def as_dict(self) -> dict[str, str]:
-        value = {"code": self.code, "severity": self.severity, "message": self.message}
+    def as_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+        }
         if self.field is not None:
             value["field"] = self.field
+        if self.details:
+            value["details"] = dict(self.details)
         return value
 
 

@@ -235,6 +235,7 @@ def _install_fake_pipersynth(
                 metadata={},
                 warnings=(),
             )
+
         def close(self) -> None:
             events.append(("close", None))
 
@@ -363,8 +364,6 @@ def test_piper_preflight_keeps_emphasis_rejected(
     assert events == []
 
 
-
-
 def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -394,7 +393,6 @@ def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
     assert events[0][1].id == item.computed_id()
     assert item.controls[0].name == "emphasis"
     assert report.render_plan_id == plan.plan_id
-
 
 
 def test_piper_render_defers_emphasis_to_composition_without_native_option(
@@ -456,6 +454,7 @@ def test_piper_render_defers_emphasis_to_composition_without_native_option(
     assert manifest.speech[0].segment_id == original_segment_id
     assert manifest.speech[0].sha256 == plain_result.manifest.speech[0].sha256
     assert (tmp_path / "emphasis" / item.wav).is_file()
+
 
 def test_preflight_persists_all_fit_report_reuses_session_and_never_synthesizes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

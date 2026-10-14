@@ -63,7 +63,9 @@ def test_validate_managed_voice_checks_pins_without_fetching(
     def unexpected_fetch(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("metadata validation must not fetch a WAV")
 
-    monkeypatch.setattr(managed_voices.voicefolio, "resolve_voice_source", unexpected_fetch)
+    monkeypatch.setattr(
+        managed_voices.voicefolio, "resolve_voice_source", unexpected_fetch
+    )
 
     result = managed_voices.validate_managed_voice(_source(entry))
 
@@ -155,7 +157,6 @@ def test_resolve_managed_voice_maps_offline_cache_miss(
 
     assert error.value.code == "managed_voice.offline_cache_miss"
     assert error.value.details["resolver"] == "voicefolio"
-
 
 
 def test_resolve_managed_voice_maps_unknown_reference_to_invalid_voice(

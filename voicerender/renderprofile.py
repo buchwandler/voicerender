@@ -18,10 +18,11 @@ from renderplan import (
 )
 
 from .engines.base import EngineSelection, RenderProfileFragment
-from .engines.profiles import reject_reference_binding
+from .engines.profiles import validate_voice_source_binding
 from .engines.registry import get_adapter, normalize_engine_id, resolve_voice
 from .engines.selection import EngineRequest
-from .errors import ProfileError
+from .errors import EngineError, ProfileError
+from .voice_sources import normalize_voice_source
 
 _DEFAULT_PAUSES = PausePolicy(
     mode="manual",
@@ -37,6 +38,7 @@ def create_render_profile(
     role: str = "narrator",
     voice: str | None = None,
     speaker: str | int | None = None,
+    voice_source: Mapping[str, Any] | None = None,
     options: Mapping[str, Any] | None = None,
     offline: bool = False,
     refresh: bool = False,
@@ -46,13 +48,29 @@ def create_render_profile(
         raise ProfileError("Profile role name must not be empty")
     if not language.strip():
         raise ProfileError("Profile language must not be empty")
+    profile_options = dict(options or {})
+    if voice_source is not None:
+        if voice is not None or speaker is not None:
+            raise ProfileError("voice/speaker and voice_source cannot both be set")
+        if "voice_source" in profile_options:
+            raise ProfileError("voice_source was provided both directly and in options")
+        try:
+            profile_options["voice_source"] = normalize_voice_source(
+                voice_source
+            ).as_mapping()
+        except (EngineError, ValueError) as exc:
+            raise ProfileError(str(exc)) from exc
+    elif "voice_source" in profile_options and (
+        voice is not None or speaker is not None
+    ):
+        raise ProfileError("voice/speaker and voice_source cannot both be set")
     request = EngineRequest(
         engine=engine,
         target_id=target_id,
         language=language,
         voice=voice,
         speaker=speaker,
-        options=dict(options or {}),
+        options=profile_options,
         offline=offline,
         refresh=refresh,
     )
@@ -103,7 +121,7 @@ def validate_render_profile(
     loaded = load_render_profile(profile)
     for role_name, role in loaded.roles.items():
         binding = role.binding
-        reject_reference_binding(binding)
+        validate_voice_source_binding(binding)
         renderer = _required_string(
             binding.get("renderer"), f"roles.{role_name}.binding.renderer"
         )
@@ -170,7 +188,7 @@ def refresh_render_profile(
     refreshed_roles: dict[str, RoleProfile] = {}
     for role_name, role in original.roles.items():
         binding = dict(role.binding)
-        reject_reference_binding(binding)
+        validate_voice_source_binding(binding)
         renderer = _required_string(
             binding.get("renderer"), f"roles.{role_name}.renderer"
         )
@@ -242,7 +260,7 @@ def _resolve_fragment(
         raise ProfileError(
             f"Engine {adapter.id!r} returned an invalid RenderProfile fragment"
         )
-    reject_reference_binding(fragment.binding)
+    validate_voice_source_binding(fragment.binding)
     if fragment.binding.get("renderer") != adapter.id:
         raise ProfileError("RenderProfile fragment renderer does not match its adapter")
     if fragment.binding.get("target_id") != selection.target_id:

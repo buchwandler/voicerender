@@ -33,6 +33,7 @@ from .renderprofile import (
     validate_render_profile,
 )
 from .storage import wav_info
+from .voice_sources import local_reference_source, managed_reference_source
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,7 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     profile_create.add_argument("--target", required=True)
     profile_create.add_argument("--language", required=True)
     profile_create.add_argument("--role", default="narrator")
-    profile_create.add_argument("--voice")
+    voice_source_group = profile_create.add_mutually_exclusive_group()
+    voice_source_group.add_argument("--voice")
+    voice_source_group.add_argument("--voicefolio-ref")
+    voice_source_group.add_argument("--reference-wav", type=Path)
     profile_create.add_argument("--speaker")
     profile_create.add_argument(
         "--option",
@@ -390,14 +394,21 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "profile":
             if args.profile_command == "create":
+                profile_options = _json_options(args.option)
+                voice_source = None
+                if args.voicefolio_ref:
+                    voice_source = managed_reference_source(args.voicefolio_ref)
+                elif args.reference_wav is not None:
+                    voice_source = local_reference_source(args.reference_wav)
                 profile = create_render_profile(
                     engine=args.engine,
                     target_id=args.target,
                     language=args.language,
                     role=args.role,
                     voice=args.voice,
+                    voice_source=voice_source,
                     speaker=args.speaker,
-                    options=_json_options(args.option),
+                    options=profile_options,
                     offline=args.offline,
                     refresh=args.refresh,
                 )

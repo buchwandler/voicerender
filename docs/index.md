@@ -64,4 +64,4 @@ A speech window can succeed (exit 0) while the whole-chapter manifest remains pa
 
 Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
 
-The shared RenderProfile MVP rejects reference-audio bindings. Composition, external-media resolution, mastering, and export belong to downstream tools.
+Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.

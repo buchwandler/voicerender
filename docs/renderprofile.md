@@ -80,3 +80,21 @@ rendering requires a matching all-`ok` report. See the
 [UtterPlan SSMDBook workflow](https://pypi.org/project/utterplan/) and the
 [RenderPlan package contract](https://pypi.org/project/renderplan/) for the
 producer/consumer boundary.
+
+## Reference-voice sources
+
+A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They can be used in a local RenderProfile but are machine-specific; do not share a local profile unless that path and file are intentionally available on the other machine. Validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references; persist the Voicefolio reference, content digest, source revision, repository, and source path pins.
+
+The CLI creates local sources with `--reference-wav PATH` and managed sources with `--voicefolio-ref REF`. For example:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
+  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact words spoken in the clip."}' \
+  --output narrator.renderprofile.toml
+```
+
+Kokoro selects enrollment based on the target's discovered capabilities. `engine = "auto"` chooses Inno for a static target advertising the `inno-v0.2` enroller and AkinVox for a reference-only target. Inno accepts optional `fmax` and no transcript. AkinVox requires a non-empty exact `reference_text` and currently supports English only. A profile may also set `voice_enrollment` explicitly to `inno` or `akinvox`; unsupported target/engine combinations fail validation.
+
+Preflight verifies local hashes and Voicefolio catalog metadata, then measures the request without fetching managed audio or enrolling/conditioning a voice. At synthesis time, the engine resolves the verified audio and lazily enrolls it; the enrolled voice is reused within that session. Canonical synthesis identity includes content/provenance pins, the selected enrollment engine/options, and the exact AkinVox transcript hash, but excludes local/cache paths and raw transcript text.

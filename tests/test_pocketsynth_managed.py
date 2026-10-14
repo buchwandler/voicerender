@@ -22,6 +22,7 @@ from voicerender.engines.pocketsynth import (
 from voicerender.engines.profiles import reject_reference_binding
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineBackendError, ProfileError
+from voicerender.voice_sources import local_reference_source
 
 
 def _entry() -> voicefolio.VoiceEntry:
@@ -56,7 +57,9 @@ def _source(entry: voicefolio.VoiceEntry | None = None) -> dict[str, Any]:
     }
 
 
-def _install_catalog(monkeypatch: pytest.MonkeyPatch, entry: voicefolio.VoiceEntry) -> None:
+def _install_catalog(
+    monkeypatch: pytest.MonkeyPatch, entry: voicefolio.VoiceEntry
+) -> None:
     catalog = voicefolio.Catalog([entry])
     monkeypatch.setattr(managed_voices.voicefolio, "load_catalog", lambda **_: catalog)
 
@@ -81,7 +84,9 @@ def test_pocket_resolve_preserves_voicefolio_pins_without_fetching(
     def unexpected_fetch(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("adapter metadata resolution must not fetch a WAV")
 
-    monkeypatch.setattr(managed_voices.voicefolio, "resolve_voice_source", unexpected_fetch)
+    monkeypatch.setattr(
+        managed_voices.voicefolio, "resolve_voice_source", unexpected_fetch
+    )
 
     selection, diagnostics = PocketSynthEngineAdapter().resolve(_request(source))
 
@@ -149,35 +154,34 @@ def test_pocket_profile_fragment_retains_authored_managed_source() -> None:
     reject_reference_binding(fragment.binding)
 
 
-def test_shared_profile_accepts_voicefolio_but_rejects_incomplete_managed_source() -> None:
+def test_shared_profile_accepts_voicefolio_but_rejects_incomplete_managed_source() -> (
+    None
+):
     source = _source()
 
     reject_reference_binding({"options": {"voice_source": source}})
 
     incomplete = dict(source)
     del incomplete["sha256"]
-    with pytest.raises(ProfileError, match="requires non-empty sha256"):
+    with pytest.raises(ProfileError, match="lowercase 64-character SHA-256 digest"):
         reject_reference_binding({"options": {"voice_source": incomplete}})
 
 
-
-def test_pocket_profile_fragment_still_rejects_local_reference() -> None:
+def test_pocket_profile_fragment_accepts_local_reference(tmp_path: Path) -> None:
+    reference = tmp_path / "local.wav"
+    reference.write_bytes(b"local reference")
+    source = local_reference_source(reference)
     selection = EngineSelection(
         engine="pocket",
         target_id="bundle-test",
         language="en-US",
-        metadata={
-            "voice_source": {
-                "kind": "reference",
-                "value": "/machine/local.wav",
-                "sha256": "a" * 64,
-            }
-        },
+        metadata={"voice_source": source},
     )
 
-    with pytest.raises(ProfileError, match="Reference-audio bindings"):
-        PocketSynthEngineAdapter().renderprofile_fragment(selection)
+    fragment = PocketSynthEngineAdapter().renderprofile_fragment(selection)
 
+    assert fragment.binding["options"]["voice_source"] == source
+    reject_reference_binding(fragment.binding)
 
 
 def test_managed_execution_resolves_once_passes_path_and_reuses_prepared_voice(
@@ -210,7 +214,7 @@ def test_managed_execution_resolves_once_passes_path_and_reuses_prepared_voice(
             prepared_paths.append(path)
             return prepared
 
-    monkeypatch.setattr(pocketsynth_adapter, "resolve_managed_voice", resolve)
+    monkeypatch.setattr(pocketsynth_adapter, "resolve_reference_audio", resolve)
     selection = EngineSelection(
         engine="pocket",
         target_id="bundle-test",
@@ -265,7 +269,7 @@ def test_managed_execution_checks_resolver_provenance_before_prepare(
 
     monkeypatch.setattr(
         pocketsynth_adapter,
-        "resolve_managed_voice",
+        "resolve_reference_audio",
         lambda *args, **kwargs: resolved,
     )
 
@@ -395,7 +399,6 @@ def test_catalog_options_remain_separate_and_voice_browsing_uses_voicefolio(
     assert "voice_catalog_path" not in bundle_calls[0]
 
 
-
 def test_offline_cached_voicefolio_asset_renders_with_managed_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -432,7 +435,7 @@ def test_offline_cached_voicefolio_asset_renders_with_managed_identity(
                 metadata={"token_count": 1},
             )
 
-    monkeypatch.setattr(pocketsynth_adapter, "resolve_managed_voice", resolve)
+    monkeypatch.setattr(pocketsynth_adapter, "resolve_reference_audio", resolve)
     monkeypatch.setitem(
         sys.modules,
         "pocketsynth",
@@ -447,7 +450,10 @@ def test_offline_cached_voicefolio_asset_renders_with_managed_identity(
         offline=True,
     )
     session = PocketSynthEngineSession(
-        Runtime(), selection, generation=object(), voice_level=SimpleNamespace(mode="off")
+        Runtime(),
+        selection,
+        generation=object(),
+        voice_level=SimpleNamespace(mode="off"),
     )
     request = SpeechRequest(
         id="render-1",
@@ -475,7 +481,6 @@ def test_offline_cached_voicefolio_asset_renders_with_managed_identity(
     ]
 
 
-
 def test_offline_voicefolio_cache_miss_keeps_precise_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -485,12 +490,11 @@ def test_offline_voicefolio_cache_miss_keeps_precise_diagnostic(
         code="managed_voice.offline_cache_miss",
         details={"resolver": "voicefolio", "ref": source["value"]},
     )
+
     def fail_resolution(*args: Any, **kwargs: Any) -> Any:
         raise error
 
-    monkeypatch.setattr(
-        pocketsynth_adapter, "resolve_managed_voice", fail_resolution
-    )
+    monkeypatch.setattr(pocketsynth_adapter, "resolve_reference_audio", fail_resolution)
 
     class Runtime:
         def prepare_voice(self, path: Path) -> object:

@@ -17,7 +17,7 @@ from .engines.base import (
     SpeechRequest,
     SpeechToken,
 )
-from .engines.profiles import reject_reference_binding
+from .engines.profiles import validate_voice_source_binding
 from .engines.registry import get_adapter, normalize_engine_id, resolve_voice
 from .engines.selection import EngineRequest
 from .errors import (
@@ -44,7 +44,6 @@ class MeasurementOutcome:
     error: str | None = None
 
 
-
 EMPHASIS_COMPOSITION_CAPABILITY = "audiocompose.emphasis.gain.v1"
 
 
@@ -63,13 +62,14 @@ class SpeechRequestConversion:
     deferred_capability: str | None = None
     deferred_control_count: int = 0
 
+
 def engine_selection_from_binding(
     binding: Mapping[str, Any], *, language: str
 ) -> EngineSelection:
     """Resolve and validate a self-contained RenderPlan renderer binding."""
     if not isinstance(binding, Mapping):
         raise ProfileError("RenderPlan speech binding must be a table")
-    reject_reference_binding(binding)
+    validate_voice_source_binding(binding)
     allowed = {
         "renderer",
         "target_id",

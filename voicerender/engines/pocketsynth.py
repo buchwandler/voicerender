@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import warnings
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
@@ -23,10 +21,12 @@ from ..errors import (
     SpeechRequestTooLongError,
     UnsupportedSynthesisFeatureError,
 )
-from ..managed_voices import (
-    ResolvedManagedVoice,
-    resolve_managed_voice,
-    validate_managed_voice,
+from ..voice_sources import (
+    ResolvedReferenceAudio,
+    normalize_voice_source,
+    resolve_reference_audio,
+    validate_voice_source,
+    voice_source_identity,
 )
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
@@ -49,7 +49,7 @@ from .metadata import (
     normalize_language_key,
     normalize_locale_tag,
 )
-from .profiles import make_renderprofile_fragment, reject_reference_binding
+from .profiles import make_renderprofile_fragment, validate_voice_source_binding
 
 POCKET_OPTION_NAMES = frozenset(
     {
@@ -289,106 +289,21 @@ def _matches_language(requested: str, available: str) -> bool:
 
 def _voice_source(selection: EngineSelection) -> Mapping[str, Any] | None:
     source = selection.metadata.get("voice_source")
-    if not isinstance(source, Mapping):
+    if source is None:
         return None
-    kind = source.get("kind")
-    value = source.get("value", source.get("path"))
-    if (
-        kind not in {"named", "reference", "managed_reference"}
-        or not isinstance(value, str)
-        or not value
-    ):
-        raise ValueError(
-            "pocket.voice_source_invalid: expected a named, reference, or managed reference source"
-        )
+    try:
+        return normalize_voice_source(source).as_mapping()
+    except (EngineError, ValueError) as exc:
+        raise ValueError(f"pocket.voice_source_invalid: {exc}") from exc
 
-    resolver: str | None = None
-    if kind == "managed_reference":
-        raw_resolver = source.get("resolver")
-        if raw_resolver is None and value.startswith("kyutai-tts-voices:"):
-            warnings.warn(
-                "Managed references without resolver are deprecated; persist resolver='voicefolio'.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            resolver = "voicefolio"
-        elif not isinstance(raw_resolver, str) or not raw_resolver.strip():
-            raise ValueError(
-                "pocket.voice_source_invalid: managed_reference requires a non-empty resolver"
-            )
-        else:
-            resolver = raw_resolver
-
-    required_fields: tuple[str, ...] = ("sha256",) if kind == "reference" else ()
-    if kind == "managed_reference":
-        required_fields = (
-            "sha256",
-            "source_revision",
-            "source_repository",
-            "source_path",
-        )
-    for name in required_fields:
-        item = source.get(name)
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(
-                f"pocket.voice_source_invalid: {kind} voice source requires non-empty {name}"
-            )
-
-    normalized: dict[str, Any] = {"kind": kind, "value": value}
-    if resolver is not None:
-        normalized["resolver"] = resolver
-    for name in (
-        "sha256",
-        "source_revision",
-        "source_repository",
-        "source_path",
-        "license",
-        "dataset",
-        "variant",
-    ):
-        item = source.get(name)
-        if item is not None:
-            if not isinstance(item, str) or not item.strip():
-                raise ValueError(
-                    f"pocket.voice_source_invalid: {name} must be a non-empty string"
-                )
-            normalized[name] = item
-    return normalized
 
 def _voice_identity(selection: EngineSelection) -> dict[str, str] | None:
     source = _voice_source(selection)
     if source is not None:
-        if source["kind"] == "reference":
-            return {"kind": "reference", "sha256": str(source["sha256"])}
-        if source["kind"] == "managed_reference":
-            identity = {
-                "kind": "managed_reference",
-                "resolver": str(source["resolver"]),
-                "ref": str(source["value"]),
-                "sha256": str(source["sha256"]),
-            }
-            if source.get("source_revision") is not None:
-                identity["source_revision"] = str(source["source_revision"])
-            return identity
-        return {"kind": "named", "value": str(source["value"])}
+        return dict(voice_source_identity(source))
     if selection.voice:
         return {"kind": "named", "value": selection.voice}
     return None
-
-
-def _reference_path(source: Mapping[str, Any]) -> Path:
-    return Path(str(source["value"])).expanduser()
-
-
-def _reference_sha256(source: Mapping[str, Any]) -> str:
-    path = _reference_path(source)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    expected = str(source["sha256"])
-    if digest != expected:
-        raise ValueError(
-            f"pocket.reference_voice_changed: expected {expected}, found {digest} for {path}"
-        )
-    return digest
 
 
 def _manager(*, options: Mapping[str, Any], offline: bool) -> Any:
@@ -526,19 +441,11 @@ class PocketSynthEngineSession:
 
     def _voice(self, request: SpeechRequest) -> Any:
         request_source = request.options.get("voice_source")
-        source = None
-        if isinstance(request_source, Mapping):
-            source_selection = EngineSelection(
-                engine=self._selection.engine,
-                target_id=self._selection.target_id,
-                language=self._selection.language,
-                voice=request.voice,
-                options=self._selection.options,
-                metadata={"voice_source": request_source},
-            )
-            source = _voice_source(source_selection)
-        if source is None:
-            source = _voice_source(self._selection)
+        source = (
+            normalize_voice_source(request_source).as_mapping()
+            if request_source is not None
+            else _voice_source(self._selection)
+        )
         if source is None:
             voice_name = request.voice or self._selection.voice
             if not voice_name:
@@ -548,9 +455,9 @@ class PocketSynthEngineSession:
         kind = str(source["kind"])
         key: tuple[str, ...]
         if kind == "reference":
-            _reference_sha256(source)
-            key = ("reference", str(source["sha256"]))
-            voice_input: str | Path = _reference_path(source)
+            resolved = resolve_reference_audio(source)
+            key = ("reference", resolved.sha256)
+            voice_input: str | Path = resolved.path
         elif kind == "managed_reference":
             key = (
                 "managed_reference",
@@ -561,7 +468,7 @@ class PocketSynthEngineSession:
             )
             if key in self._voices:
                 return self._voices[key]
-            resolved = resolve_managed_voice(
+            resolved = resolve_reference_audio(
                 source,
                 cache_dir=self._selection.options.get("cache_dir"),
                 offline=self._selection.offline,
@@ -596,6 +503,7 @@ class PocketSynthEngineSession:
             raise
         self._voices[key] = prepared
         return prepared
+
     def _native_request(self, request: SpeechRequest, module: Any) -> Any:
         if request.tokens:
             raise UnsupportedSynthesisFeatureError(
@@ -743,7 +651,7 @@ class PocketSynthEngineSession:
 
 
 def _verify_resolved_managed_voice(
-    resolved: ResolvedManagedVoice,
+    resolved: ResolvedReferenceAudio,
     source: Mapping[str, Any],
     selection: EngineSelection,
 ) -> None:
@@ -776,6 +684,7 @@ def _verify_resolved_managed_voice(
             },
             code="pocket.managed_reference_changed",
         )
+
 
 def _voice_identity_for_request(
     selection: EngineSelection, request: SpeechRequest
@@ -872,7 +781,7 @@ class PocketSynthEngineAdapter:
             options = dict(binding.get("options", {}))
             options["voice_source"] = dict(voice_source)
             binding["options"] = options
-            reject_reference_binding(binding)
+            validate_voice_source_binding(binding)
             return replace(fragment, binding=binding)
         return fragment
 
@@ -973,28 +882,16 @@ class PocketSynthEngineAdapter:
             raise ValueError("pocket.precision_invalid: precision must be int8 or fp32")
         voice_source = options.get("voice_source")
         diagnostics: list[EngineDiagnostic] = []
-        if (
-            isinstance(voice_source, Mapping)
-            and voice_source.get("kind") == "managed_reference"
-        ):
+        if voice_source is not None:
             try:
-                normalized_source = _voice_source(
-                    EngineSelection(
-                        engine=self.id,
-                        target_id=str(target_id),
-                        language=language,
-                        options=options,
-                        metadata={"voice_source": voice_source},
-                    )
-                )
-                if normalized_source is None:
-                    raise ValueError(
-                        "pocket.voice_source_invalid: managed source is missing"
-                    )
+                normalized_source = normalize_voice_source(voice_source).as_mapping()
                 voice_source = normalized_source
-                validate_managed_voice(
-                    normalized_source,
-                    catalog_paths=options.get("voice_catalog_path"),
+                diagnostics.extend(
+                    validate_voice_source(
+                        normalized_source,
+                        offline=bool(getattr(request, "offline", False)),
+                        catalog_paths=options.get("voice_catalog_path"),
+                    )
                 )
             except (EngineError, ValueError) as exc:
                 diagnostics.append(
@@ -1158,18 +1055,14 @@ class PocketSynthEngineAdapter:
                     field="render.target.voice",
                 )
             )
-        elif voice_kind == "reference" and source is not None:
-            try:
-                _reference_sha256(source)
-            except (OSError, ValueError) as exc:
-                diagnostics.append(
-                    EngineDiagnostic(
-                        code="pocket.reference_voice_invalid",
-                        severity="error",
-                        message=str(exc),
-                        field="render.target.voice",
-                    )
+        elif source is not None and voice_kind in {"reference", "managed_reference"}:
+            diagnostics.extend(
+                validate_voice_source(
+                    source,
+                    offline=selection.offline,
+                    catalog_paths=selection.options.get("voice_catalog_path"),
                 )
+            )
         return tuple(diagnostics)
 
     def target_metadata(self, selection: EngineSelection) -> Mapping[str, Any]:

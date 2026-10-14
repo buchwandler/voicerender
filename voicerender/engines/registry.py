@@ -6,7 +6,7 @@ import importlib
 import importlib.metadata
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from ..errors import (
@@ -22,36 +22,45 @@ from .base import (
     RequestMeasure,
     SpeechRequest,
 )
+from .catalog import CatalogRequest, SynthesisTarget
 
 if TYPE_CHECKING:
     from ..capacity import CapacityContext
-from .catalog import CatalogRequest, SynthesisTarget
+
 
 # Keep this table free of adapter imports: listing engines and importing VoiceRender
 # must work in installations that contain none of the optional engine SDKs.
-_ENGINE_MODULES: dict[str, tuple[str, str, str]] = {
-    "inflect": (
-        "inflectsynth",
-        "voicerender.engines.inflectsynth",
-        "InflectSynthEngineAdapter",
+@dataclass(frozen=True, slots=True)
+class BuiltinEngineSpec:
+    package: str
+    module: str
+    adapter: str
+    supports_reference_voice: bool = False
+
+
+_ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
+    "inflect": BuiltinEngineSpec(
+        "inflectsynth", "voicerender.engines.inflectsynth", "InflectSynthEngineAdapter"
     ),
-    "kitten": (
-        "kittensynth",
-        "voicerender.engines.kittensynth",
-        "KittenSynthEngineAdapter",
+    "kitten": BuiltinEngineSpec(
+        "kittensynth", "voicerender.engines.kittensynth", "KittenSynthEngineAdapter"
     ),
-    "kokoro": ("pykokoro", "voicerender.engines.kokoro", "PyKokoroEngineAdapter"),
-    "piper": (
-        "pipersynth",
-        "voicerender.engines.pipersynth",
-        "PiperSynthEngineAdapter",
+    "kokoro": BuiltinEngineSpec(
+        "pykokoro", "voicerender.engines.kokoro", "PyKokoroEngineAdapter", True
     ),
-    "pocket": (
+    "piper": BuiltinEngineSpec(
+        "pipersynth", "voicerender.engines.pipersynth", "PiperSynthEngineAdapter"
+    ),
+    "pocket": BuiltinEngineSpec(
         "pocketsynth",
         "voicerender.engines.pocketsynth",
         "PocketSynthEngineAdapter",
+        True,
     ),
-    "supertonic": (
+    "sopro": BuiltinEngineSpec(
+        "soprosynth", "voicerender.engines.soprosynth", "SoproSynthEngineAdapter", True
+    ),
+    "supertonic": BuiltinEngineSpec(
         "supertonicsynth",
         "voicerender.engines.supertonicsynth",
         "SupertonicSynthEngineAdapter",
@@ -63,7 +72,12 @@ _ADAPTERS: dict[str, EngineAdapter] = {}
 def normalize_engine_id(engine: str) -> str:
     """Normalize a public engine identifier without importing its SDK."""
     normalized = engine.strip().casefold()
-    aliases = {"pykokoro": "kokoro", "pipersynth": "piper", "pocketsynth": "pocket"}
+    aliases = {
+        "pykokoro": "kokoro",
+        "pipersynth": "piper",
+        "pocketsynth": "pocket",
+        "soprosynth": "sopro",
+    }
     return aliases.get(normalized, normalized)
 
 
@@ -89,14 +103,14 @@ def get_adapter(engine: str) -> EngineAdapter:
     if engine_id in _ADAPTERS:
         return _ADAPTERS[engine_id]
     try:
-        _, module_name, class_name = _ENGINE_MODULES[engine_id]
+        spec = _ENGINE_MODULES[engine_id]
     except KeyError as exc:
         available = ", ".join(sorted((*_ENGINE_MODULES, *_ADAPTERS)))
         raise ProfileError(
             f"Unknown engine {engine!r}; available: {available}"
         ) from exc
-    module = importlib.import_module(module_name)
-    adapter = cast(EngineAdapter, getattr(module, class_name)())
+    module = importlib.import_module(spec.module)
+    adapter = cast(EngineAdapter, getattr(module, spec.adapter)())
     _ADAPTERS[engine_id] = adapter
     return adapter
 
@@ -104,9 +118,9 @@ def get_adapter(engine: str) -> EngineAdapter:
 def list_engines() -> list[dict[str, Any]]:
     """List known engines using distribution metadata only (no SDK imports)."""
     result: list[dict[str, Any]] = []
-    for engine_id, (package, _, _) in sorted(_ENGINE_MODULES.items()):
+    for engine_id, spec in sorted(_ENGINE_MODULES.items()):
         try:
-            installed_version = importlib.metadata.version(package)
+            installed_version = importlib.metadata.version(spec.package)
         except importlib.metadata.PackageNotFoundError:
             installed_version = None
         except Exception:  # noqa: BLE001 - Metadata failures must not break engine listing.
@@ -114,23 +128,26 @@ def list_engines() -> list[dict[str, Any]]:
         result.append(
             {
                 "id": engine_id,
-                "package": package,
+                "package": spec.package,
                 "installed": installed_version is not None,
                 "installed_version": installed_version,
                 # Compatibility field used by the older CLI output.
-                "reference_audio": engine_id == "pocket",
+                "reference_audio": spec.supports_reference_voice,
+                "supports_reference_voice": spec.supports_reference_voice,
             }
         )
     for engine_id, adapter in sorted(_ADAPTERS.items()):
         if engine_id in _ENGINE_MODULES:
             continue
+        capabilities = adapter.capabilities()
         result.append(
             {
                 "id": engine_id,
                 "package": adapter.package_name,
                 "installed": adapter.version() is not None,
                 "installed_version": adapter.version(),
-                "reference_audio": adapter.capabilities().supports_reference_voice,
+                "reference_audio": capabilities.supports_reference_voice,
+                "supports_reference_voice": capabilities.supports_reference_voice,
             }
         )
     return sorted(result, key=lambda item: str(item["id"]))

@@ -164,8 +164,10 @@ def render_renderplan(
                 f"Preflight did not confirm deferred emphasis for speech occurrence {key}"
             )
     conversions = {
-        (item.number, item.segment_id or item.computed_id()):
-        speech_request_conversion_from_renderplan(item, emphasis_policy=policy)
+        (
+            item.number,
+            item.segment_id or item.computed_id(),
+        ): speech_request_conversion_from_renderplan(item, emphasis_policy=policy)
         for item in selected_items
     }
     deferred_controls = [

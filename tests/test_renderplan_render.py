@@ -234,6 +234,7 @@ def _report(adapter: _Adapter, plan: RenderPlan, tmp_path: Path) -> PreflightRep
     del adapter
     return preflight_render_plan(plan, tmp_path / "preflight.toml")
 
+
 def test_render_defers_emphasis_without_changing_wav_or_manifest_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -370,9 +371,7 @@ def test_render_policy_must_match_deferred_preflight(
         emphasis_policy="defer-to-compose",
     )
 
-    with pytest.raises(
-        UnsupportedSynthesisFeatureError, match="explicitly select"
-    ):
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="explicitly select"):
         render_renderplan(
             plan,
             preflight=report,

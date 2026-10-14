@@ -7,7 +7,8 @@ from typing import Any, Protocol
 
 from renderplan import CapacityConstraint
 
-from ..errors import ProfileError
+from ..errors import EngineError, ProfileError
+from ..voice_sources import normalize_voice_source, validate_voice_source
 from .base import EngineSelection, RenderProfileFragment
 
 
@@ -88,7 +89,7 @@ def make_renderprofile_fragment(
         if capacity_key is not None:
             renderer_metadata[capacity_key] = renderer_capacity.maximum
 
-    _reject_reference_binding(binding)
+    validate_voice_source_binding(binding)
     return RenderProfileFragment(
         binding=binding,
         token_fields=token_fields,
@@ -100,50 +101,41 @@ def make_renderprofile_fragment(
     )
 
 
-def reject_reference_binding(binding: Mapping[str, Any]) -> None:
-    """Reject bindings whose reference audio depends on an external profile path."""
-    _reject_reference_binding(binding)
-
-
-def _reject_reference_binding(binding: Mapping[str, Any]) -> None:
-    """Reject machine-local paths and validate portable managed-reference shape."""
+def validate_voice_source_binding(binding: Mapping[str, Any]) -> None:
+    """Validate the modern RenderPlan voice-source binding without fetching assets."""
+    if not isinstance(binding, Mapping):
+        raise ProfileError("RenderPlan binding must be a table")
     options = binding.get("options", {})
-    options = options if isinstance(options, Mapping) else {}
-    source = binding.get("voice_source", options.get("voice_source"))
-    if (
-        "reference_audio" in binding
-        or "reference_audio" in options
-        or isinstance(source, Mapping)
-        and source.get("kind") == "reference"
-    ):
+    if not isinstance(options, Mapping):
+        raise ProfileError("RenderPlan binding options must be a table")
+    if "reference_audio" in binding or "reference_audio" in options:
         raise ProfileError(
-            "Reference-audio bindings are not supported in RenderPlan profiles; "
-            "use a named voice or a Voicefolio managed reference"
+            "RenderPlan bindings must use options.voice_source, not reference_audio"
         )
-    if isinstance(source, Mapping) and source.get("kind") == "managed_reference":
-        resolver = source.get("resolver")
-        ref = source.get("value")
-        legacy_voicefolio_ref = (
-            resolver is None
-            and isinstance(ref, str)
-            and ref.startswith("kyutai-tts-voices:")
-        )
-        if resolver != "voicefolio" and not legacy_voicefolio_ref:
-            raise ProfileError(
-                "Managed reference bindings require resolver='voicefolio'"
-            )
-        for name in (
-            "value",
-            "sha256",
-            "source_revision",
-            "source_repository",
-            "source_path",
-        ):
-            value = source.get(name)
-            if not isinstance(value, str) or not value.strip():
-                raise ProfileError(
-                    f"Voicefolio managed-reference binding requires non-empty {name}"
-                )
+    if "voice_source" in binding:
+        raise ProfileError("voice_source must be located in binding.options")
+    if "voice_source" not in options:
+        return
+    if binding.get("voice") is not None or binding.get("speaker") is not None:
+        raise ProfileError("voice/speaker and voice_source cannot both be set")
+    raw_source = options.get("voice_source")
+    try:
+        source = normalize_voice_source(raw_source)
+    except (EngineError, ValueError) as exc:
+        raise ProfileError(str(exc)) from exc
+    if source.kind == "reference":
+        diagnostics = validate_voice_source(source)
+        if diagnostics:
+            raise ProfileError(diagnostics[0].message)
 
 
-__all__ = ["make_renderprofile_fragment", "reject_reference_binding"]
+def reject_reference_binding(binding: Mapping[str, Any]) -> None:
+    """Deprecated compatibility wrapper for validate_voice_source_binding()."""
+    validate_voice_source_binding(binding)
+
+
+__all__ = [
+    "make_renderprofile_fragment",
+    "reject_reference_binding",
+    "validate_voice_source_binding",
+]

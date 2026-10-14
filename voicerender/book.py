@@ -618,6 +618,7 @@ def _preflight_is_reusable(
             return False
     return True
 
+
 def _render_diagnostics_reusable(
     chapter: _LoadedChapter, emphasis_policy: EmphasisPolicy
 ) -> bool:
@@ -661,9 +662,7 @@ def _render_diagnostics_reusable(
             or type(entry.get("count")) is not int
         ):
             return False
-        observed.append(
-            (entry["segment_number"], entry["segment_id"], entry["count"])
-        )
+        observed.append((entry["segment_number"], entry["segment_id"], entry["count"]))
     return len(observed) == len(expected) and set(observed) == expected
 
 

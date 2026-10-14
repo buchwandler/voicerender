@@ -14,15 +14,25 @@ from voicerender.engines.registry import (
     engine_status,
     get_adapter,
     list_engines,
+    normalize_engine_id,
 )
 
-ENGINE_IDS = {"inflect", "kitten", "kokoro", "piper", "pocket", "supertonic"}
+ENGINE_IDS = {
+    "inflect",
+    "kitten",
+    "kokoro",
+    "piper",
+    "pocket",
+    "sopro",
+    "supertonic",
+}
 PACKAGES = {
     "inflect": "inflectsynth",
     "kitten": "kittensynth",
     "kokoro": "pykokoro",
     "piper": "pipersynth",
     "pocket": "pocketsynth",
+    "sopro": "soprosynth",
     "supertonic": "supertonicsynth",
 }
 
@@ -32,6 +42,7 @@ ADAPTER_MODULES = {
     "kokoro": "voicerender.engines.kokoro",
     "piper": "voicerender.engines.pipersynth",
     "pocket": "voicerender.engines.pocketsynth",
+    "sopro": "voicerender.engines.soprosynth",
     "supertonic": "voicerender.engines.supertonicsynth",
 }
 
@@ -39,7 +50,7 @@ ADAPTER_MODULES = {
 def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
     script = r"""
 import builtins
-blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "supertonicsynth"}
+blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth"}
 seen = []
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -56,7 +67,7 @@ assert not seen
     # Keep the subprocess isolated from SDKs that may already be imported by pytest.
     script = script.replace(
         "blocked_to_ids",
-        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'supertonic'}",
+        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic'}",
     )
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -77,7 +88,13 @@ def _fake_package(package: str) -> ModuleType:
     owner_methods = {
         "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
         "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
-        "KokoroSynthesizer": ("prepare", "synthesize", "close"),
+        "KokoroSynthesizer": (
+            "prepare",
+            "measure_request",
+            "enroll_voice",
+            "synthesize",
+            "close",
+        ),
         "PocketRuntime": (
             "from_resolved",
             "prepare_voice",
@@ -90,6 +107,13 @@ def _fake_package(package: str) -> ModuleType:
             "synthesize_prepared",
             "from_pretrained",
             "from_local",
+            "close",
+        ),
+        "SoproRuntime": (
+            "load",
+            "prepare_voice",
+            "measure_request",
+            "synthesize",
             "close",
         ),
         "SupertonicRuntime": (
@@ -118,6 +142,9 @@ def _fake_package(package: str) -> ModuleType:
         "SynthesisInputTooLongError",
         "KokoroSynthesizer",
         "ShortSentenceConfig",
+        "ReferenceVoice",
+        "KokoroVoicePack",
+        "InnoEnrollmentOptions",
         "PocketRuntime",
         "GenerationConfig",
         "BundleAssetManager",
@@ -127,6 +154,10 @@ def _fake_package(package: str) -> ModuleType:
         "KittenVoice",
         "discover_models",
         "runtime_identity",
+        "SoproSynthError",
+        "SoproRuntime",
+        "SoproOutputConfig",
+        "DiscoveredBundle",
         "SupertonicRuntime",
         "AtomicSynthesisResult",
         "DiscoveredModel",
@@ -170,11 +201,20 @@ def _fake_package(package: str) -> ModuleType:
     return module
 
 
-def test_registry_lists_six_engines_without_probing() -> None:
+def test_registry_lists_seven_engines_without_probing() -> None:
     listed = list_engines()
     assert {item["id"] for item in listed} == ENGINE_IDS
     assert {item["package"] for item in listed} == set(PACKAGES.values())
     assert all("installed_version" in item for item in listed)
+    by_id = {item["id"]: item for item in listed}
+    assert by_id["sopro"]["supports_reference_voice"] is True
+    assert by_id["pocket"]["supports_reference_voice"] is True
+    assert by_id["kokoro"]["supports_reference_voice"] is True
+    assert by_id["piper"]["supports_reference_voice"] is False
+
+
+def test_soprosynth_alias_normalizes_without_loading_sdk() -> None:
+    assert normalize_engine_id("SoproSynth") == "sopro"
 
 
 @pytest.mark.parametrize(("engine", "package"), sorted(PACKAGES.items()))
@@ -184,7 +224,18 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     import importlib
 
     fake = _fake_package(package)
-    monkeypatch.setitem(sys.modules, package, fake)
+    if engine == "sopro":
+        fake.request_api_contract = lambda: SimpleNamespace(
+            supports_reference_voice=True,
+            supports_request_measurement=True,
+            supports_named_voices=False,
+        )
+    elif engine == "kokoro":
+        fake.request_api_contract = lambda: SimpleNamespace(
+            supports_request_measurement=True,
+            supports_reference_voice=True,
+            supports_voice_enrollment=True,
+        )
     original = importlib.import_module
     calls: list[str] = []
 
@@ -279,6 +330,22 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
             ),
         )
         monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    elif engine == "sopro":
+        fake = _fake_package(PACKAGES[engine])
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="sopro-demo",
+                ref="sopro:model",
+                display_name="Sopro demo",
+                languages=("en",),
+                sample_rate=24000,
+                profiles=("wasm-uint8",),
+                source_revision="revision-1",
+                source_commit="commit-1",
+                metadata={},
+            ),
+        )
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     else:
         target = SynthesisTarget(
             engine=engine,
@@ -299,7 +366,7 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
     targets = discover_targets(engine, language="en-US")
     assert len(targets) == 1
     assert targets[0].engine == engine
-    assert targets[0].id in {"piper-demo", "pocket-demo", "demo-model"}
+    assert targets[0].id in {"piper-demo", "pocket-demo", "sopro-demo", "demo-model"}
 
 
 @pytest.mark.parametrize("engine", sorted(ENGINE_IDS))
@@ -310,6 +377,44 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
 
     from voicerender.engines.selection import EngineRequest
 
+    if engine == "sopro":
+        fake = _fake_package(PACKAGES[engine])
+        fake.request_api_contract = lambda: SimpleNamespace(
+            supports_reference_voice=True,
+            supports_request_measurement=True,
+            supports_named_voices=False,
+        )
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="demo-model",
+                ref="sopro:demo-model",
+                display_name="Sopro demo",
+                languages=("en",),
+                sample_rate=24000,
+                profiles=("wasm-uint8",),
+                source_revision="revision-1",
+                source_commit="commit-1",
+                metadata={},
+            ),
+        )
+
+        class FakeGenerationConfig:
+            def __init__(self, **values) -> None:
+                self.__dict__.update(values)
+
+        class FakeOutputConfig:
+            def __init__(self, mode: str = "native") -> None:
+                self.mode = mode
+
+        class FakeVoiceLevelConfig:
+            def __init__(self, mode: str = "off", gain_db=None) -> None:
+                self.mode = mode
+                self.gain_db = gain_db
+
+        fake.GenerationConfig = FakeGenerationConfig
+        fake.SoproOutputConfig = FakeOutputConfig
+        fake.VoiceLevelConfig = FakeVoiceLevelConfig
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     if engine in {"inflect", "supertonic"}:
         fake = _fake_package(PACKAGES[engine])
 
@@ -341,8 +446,20 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
         engine=engine,
         target_id="demo-model",
         language="en-US",
-        voice="demo-voice",
-        options={"speed": 2.0} if engine == "piper" else {},
+        voice=None if engine == "sopro" else "demo-voice",
+        options=(
+            {
+                "voice_source": {
+                    "kind": "reference",
+                    "value": "/tmp/demo-reference.wav",
+                    "sha256": "a" * 64,
+                }
+            }
+            if engine == "sopro"
+            else {"speed": 2.0}
+            if engine == "piper"
+            else {}
+        ),
     )
     selection, diagnostics = get_adapter(engine).resolve(request)
 

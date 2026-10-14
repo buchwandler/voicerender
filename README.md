@@ -12,7 +12,7 @@ python -m pip install -e ".[dev]"
 python -m pip install -e ".[piper]"
 ```
 
-Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `supertonic`, and `inflect`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
+Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `supertonic`, and `inflect`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
 
 ## CLI workflow
 
@@ -42,8 +42,6 @@ voicerender inspect-manifest renders/narration/render-manifest.toml --json
 
 Install the selected engine extra and make its model assets available before preflight/render; VoiceRender does not download models implicitly. Preflight reports `ok`, `replan`, or `reject` for each required speech occurrence. An `ok` report approves that exact RenderPlan under the observed renderer capability; rendering still remeasures each exact request immediately before synthesis. If fresh capacity no longer fits, VoiceRender stops before synthesis for that occurrence and returns a new same-plan/same-occurrence `replan` report; a session-open failure returns a fresh `reject` report. The CLI writes that report to `--recheck-report` when supplied. VoiceRender never creates a child plan, changes text, or adapts chunking. Every RenderPlan speech item maps to exactly one public `SpeechRequest` and one numbered WAV, in plan order; VoiceRender does not split, merge, normalize, or reorder requests. Incremental manifests remain valid when rendering fails partway through. Render results expose an execution fingerprint (VoiceRender/adapter versions, API-probe signature, synthesis identity, voice/options, and measured capacity) separately from `RenderPlan.plan_id`.
 
-
-
 ### Deferred emphasis
 
 VoiceRender does not apply emphasis during speech synthesis and does not advertise `emphasis` as a native Piper feature. By default, emphasis is rejected. An orchestration pipeline that declares the `audiocompose.emphasis.gain.v1` handler must select `--emphasis-policy defer-to-compose` for **both** preflight and render (or for `render-book`):
@@ -68,7 +66,29 @@ voicerender profile refresh narration.renderprofile.toml \
   -o narration.refreshed.renderprofile.toml
 ```
 
-Local reference audio is machine-local and remains rejected in shared RenderProfiles. Pinned Voicefolio managed references (`kind="managed_reference"`, `resolver="voicefolio"`) are supported: VoiceRender checks catalog pins without downloading audio, then resolves the verified WAV at execution time. See the [Voicefolio managed-reference example](examples/voices/pocket-reference.toml).
+## Reference voices
+
+Kokoro, PocketSynth, and SoproSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
+
+Create a local Inno voice or a portable AkinVox voice with the CLI. AkinVox requires the exact spoken transcript; Inno does not use a transcript and may accept an `fmax` option:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target v1.0 --language en-US \
+  --reference-wav ./speaker.wav \
+  --option 'voice_enrollment={"engine":"auto","fmax":8000}' \
+  --output local-kokoro.renderprofile.toml
+
+voicerender profile create \
+  --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
+  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact words spoken in the clip."}' \
+  --output managed-kokoro.renderprofile.toml
+```
+
+`engine="auto"` selects Inno for a static target advertising the `inno-v0.2` enroller, or AkinVox for a reference-only target. AkinVox is English-only. Install `.[kokoro]` for Kokoro or `.[sopro]` for SoproSynth and make model assets available using the engine's supported process; VoiceRender does not download models implicitly.
+
+Preflight validates local content pins and managed catalog metadata, and measures text without fetching managed audio, enrolling a voice, or conditioning a reference. Rendering resolves the verified reference and enrolls it lazily; the enrolled voice is reused within that synthesis session. Canonical identity retains content/provenance pins and the exact AkinVox transcript digest, but excludes local/cache paths and raw transcript text. See the [RenderProfile lifecycle](docs/renderprofile.md) and [examples](examples/README.md) for details.
 
 ## SSMDBook RenderPlan collections from UtterPlan
 
@@ -162,7 +182,6 @@ if report.status == "ok":
     print(result.manifest_path)
 ```
 
-
 For an emphasis-bearing plan, the Python API uses the same safe default (`reject`). A pipeline that declares the composition handler must pass the opt-in policy to both stages:
 
 ```python
@@ -187,7 +206,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
 - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
 - **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
-- **Portable managed voices:** local `kind="reference"` paths are non-portable and rejected in shared RenderProfiles; pinned Voicefolio managed references are supported.
+- **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
 
 ## Tests
 

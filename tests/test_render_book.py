@@ -78,8 +78,9 @@ def _plan(profile: RenderProfile, chapter_number: int, count: int) -> RenderPlan
 
 
 def _book(
-    tmp_path: Path, chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1)),
-    emphasis_speech: int | None = None
+    tmp_path: Path,
+    chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1)),
+    emphasis_speech: int | None = None,
 ) -> tuple[Path, str]:
     workspace = tmp_path / "sample.ssmdbook"
     variant_name = "narration--"
@@ -273,7 +274,11 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(book_module, "preflight_render_plan", preflight)
     monkeypatch.setattr(book_module, "render_renderplan", render)
-    return {"preflight": preflight_calls, "render": render_calls, "policy": policy_calls}
+    return {
+        "preflight": preflight_calls,
+        "render": render_calls,
+        "policy": policy_calls,
+    }
 
 
 def test_book_propagates_explicit_emphasis_policy(
@@ -295,9 +300,7 @@ def test_book_reports_pending_composition_in_result_and_human_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _install_fake_execution(monkeypatch)
-    workspace, variant = _book(
-        tmp_path, chapters=((5, 1),), emphasis_speech=1
-    )
+    workspace, variant = _book(tmp_path, chapters=((5, 1),), emphasis_speech=1)
 
     result = book_module.render_book(
         workspace, variant=variant, emphasis_policy="defer-to-compose"

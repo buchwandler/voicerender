@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
+import json
 import logging
+import math
 import re
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace
 from typing import Any
 
 from ..errors import (
     EmptySpeechTextError,
     EngineBackendError,
     EngineError,
+    EngineSelectionError,
     EngineSynthesisError,
     InvalidEngineLanguageError,
     InvalidEngineModelError,
@@ -23,6 +28,12 @@ from ..errors import (
     UnsupportedSynthesisFeatureError,
 )
 from ..models import ModelDiscoveryError
+from ..voice_sources import (
+    normalize_voice_source,
+    resolve_reference_audio,
+    validate_voice_source,
+    voice_source_identity,
+)
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
     EngineCapabilities,
@@ -39,14 +50,14 @@ from .base import (
     voice_level_metadata,
 )
 from .catalog import SynthesisTarget, TargetVoice
-from .metadata import normalize_language_key
+from .metadata import language_base, normalize_language_key
 from .profiles import make_renderprofile_fragment
 from .registry import normalize_engine_id
 
 logger = logging.getLogger(__name__)
 
 
-PYKOKORO_REQUIRED = ">=0.10.0,<0.11"
+PYKOKORO_REQUIRED = ">=0.10.5,<0.11"
 _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
 
 
@@ -66,7 +77,7 @@ def _version_supported(version: str) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     patch = int(match.group(3) or 0)
-    return (major, minor, patch) >= (0, 10, 0) and (major, minor) == (0, 10)
+    return (major, minor, patch) >= (0, 10, 5) and (major, minor) == (0, 10)
 
 
 def _package_metadata() -> str | None:
@@ -193,6 +204,32 @@ def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
         for voice in capabilities.voices
     )
     provider = getattr(capabilities, "provider", None)
+    voice_mode = getattr(capabilities, "voice_mode", "static")
+    supports_reference = bool(
+        getattr(capabilities, "supports_reference_enrollment", False)
+    )
+    enrollers = tuple(
+        {
+            "id": str(getattr(item, "id", "")),
+            "kind": str(getattr(item, "kind", "")),
+            "transcript_required": bool(getattr(item, "transcript_required", False)),
+            "min_seconds": getattr(item, "min_seconds", None),
+            "max_seconds": getattr(item, "max_seconds", None),
+            "recommended_seconds": getattr(item, "recommended_seconds", None),
+            "output_format": getattr(item, "output_format", None),
+        }
+        for item in tuple(getattr(capabilities, "voice_enrollers", ()) or ())
+    )
+    supports_enrollment = bool(
+        getattr(capabilities, "supports_voice_enrollment", False) or enrollers
+    )
+    target_capabilities = {"pronunciation_overrides", "lexicons"}
+    if capabilities.voices:
+        target_capabilities.add("named_voices")
+    if supports_reference:
+        target_capabilities.add("reference_voice")
+    if supports_enrollment:
+        target_capabilities.add("voice_enrollment")
     return SynthesisTarget(
         engine=normalize_engine_id(getattr(capabilities, "engine", "kokoro")),
         id=capabilities.model_id,
@@ -206,7 +243,7 @@ def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
         default_voice=capabilities.default_voice,
         qualities=tuple(capabilities.qualities),
         aliases=getattr(capabilities, "aliases", ()),
-        capabilities=frozenset({"named_voices", "pronunciation_overrides", "lexicons"}),
+        capabilities=frozenset(target_capabilities),
         metadata={
             "source": capabilities.source,
             "g2p_backend": capabilities.g2p_backend,
@@ -221,8 +258,143 @@ def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
             ),
             "sample_rate": getattr(capabilities, "sample_rate", None),
             "max_tokens": getattr(capabilities, "max_tokens", None),
+            "voice_mode": voice_mode,
+            "supports_reference_enrollment": supports_reference,
+            "supports_voice_enrollment": supports_enrollment,
+            "voice_enrollers": enrollers,
+            "speed_supported": bool(getattr(capabilities, "speed_supported", True)),
         },
     )
+
+
+def _metadata_enrollers(model: Any) -> tuple[Mapping[str, Any], ...]:
+    metadata = getattr(model, "metadata", {})
+    if not isinstance(metadata, Mapping):
+        return ()
+    raw = metadata.get("voice_enrollers", ())
+    if not isinstance(raw, (tuple, list)):
+        return ()
+    return tuple(item for item in raw if isinstance(item, Mapping))
+
+
+def _supports_inno(model: Any) -> bool:
+    return any(
+        (item.get("id") == "inno-v0.2" or item.get("kind") == "inno")
+        and item.get("transcript_required") is False
+        for item in _metadata_enrollers(model)
+    )
+
+
+def _normalize_enrollment(raw: Any, model: Any, language: str) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise EngineSelectionError(
+            "voice_enrollment must be a table",
+            code="pykokoro.invalid_enrollment_options",
+        )
+    unknown = set(raw) - {"engine", "fmax", "reference_text"}
+    if unknown:
+        raise EngineSelectionError(
+            f"Unknown voice_enrollment option(s): {', '.join(sorted(unknown))}",
+            code="pykokoro.invalid_enrollment_options",
+            details={"fields": sorted(unknown)},
+        )
+    requested = raw.get("engine", "auto")
+    if requested not in {"auto", "inno", "akinvox"}:
+        raise EngineSelectionError(
+            "voice_enrollment.engine must be 'auto', 'inno', or 'akinvox'",
+            code="pykokoro.invalid_enrollment_options",
+        )
+    metadata = getattr(model, "metadata", {})
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    voice_mode = metadata.get("voice_mode", "static")
+    supports_reference = bool(metadata.get("supports_reference_enrollment"))
+    if requested == "auto":
+        if voice_mode == "reference":
+            requested = "akinvox"
+        elif voice_mode == "static" and _supports_inno(model):
+            requested = "inno"
+        else:
+            raise EngineSelectionError(
+                f"Target {model.id!r} has no supported reference enrollment engine",
+                code="pykokoro.enrollment_not_supported",
+                target_id=model.id,
+            )
+
+    result: dict[str, Any] = {"engine": requested}
+    reference_text = raw.get("reference_text")
+    fmax = raw.get("fmax")
+    if requested == "inno":
+        if voice_mode != "static" or not _supports_inno(model):
+            raise EngineSelectionError(
+                f"Target {model.id!r} does not advertise an Inno voice enroller",
+                code="pykokoro.enrollment_not_supported",
+                target_id=model.id,
+            )
+        if reference_text is not None:
+            raise EngineSelectionError(
+                "Inno enrollment does not accept reference_text",
+                code="pykokoro.reference_text_unsupported",
+                target_id=model.id,
+            )
+        if fmax is not None:
+            if (
+                isinstance(fmax, bool)
+                or not isinstance(fmax, (int, float))
+                or not math.isfinite(fmax)
+                or fmax <= 0
+            ):
+                raise EngineSelectionError(
+                    "Inno fmax must be a finite positive number",
+                    code="pykokoro.invalid_enrollment_options",
+                    target_id=model.id,
+                )
+            result["fmax"] = float(fmax)
+        return result
+
+    if voice_mode != "reference" or not supports_reference:
+        raise EngineSelectionError(
+            f"Target {model.id!r} does not support AkinVox reference enrollment",
+            code="pykokoro.reference_not_supported",
+            target_id=model.id,
+        )
+    if fmax is not None:
+        raise EngineSelectionError(
+            "fmax is only supported for Inno enrollment",
+            code="pykokoro.invalid_enrollment_options",
+            target_id=model.id,
+        )
+    if not isinstance(reference_text, str) or not reference_text.strip():
+        raise EngineSelectionError(
+            "AkinVox enrollment requires non-empty reference_text",
+            code="pykokoro.reference_text_required",
+            target_id=model.id,
+        )
+    if language_base(language) != "en":
+        raise EngineSelectionError(
+            "AkinVox reference enrollment currently supports English only",
+            code="pykokoro.reference_text_invalid_language",
+            target_id=model.id,
+            language=language,
+        )
+    result["reference_text"] = reference_text
+    return result
+
+
+def _reference_text_digest(enrollment: Mapping[str, Any]) -> str | None:
+    text = enrollment.get("reference_text")
+    if not isinstance(text, str):
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _reference_source_identity(options: Mapping[str, Any]) -> Mapping[str, str] | None:
+    source = options.get("voice_source")
+    if not isinstance(source, Mapping):
+        return None
+    return voice_source_identity(source)
 
 
 def _discover_targets(
@@ -269,6 +441,7 @@ def _translate_pykokoro_error(
     request: SpeechRequest | None = None,
     *,
     opening: bool = False,
+    failure_code: str | None = None,
 ) -> EngineError:
     import pykokoro
 
@@ -316,17 +489,21 @@ def _translate_pykokoro_error(
             text_length=getattr(
                 error, "text_length", len(request.text) if request else None
             ),
-            source="pykokoro.prepare",
+            source="pykokoro.measure_request",
         )
+    if failure_code is not None and error_type is EngineBackendError:
+        context["code"] = failure_code
     return error_type(str(error), **context)
 
 
-def _pykokoro_request(request: SpeechRequest, module: Any) -> Any:
+def _pykokoro_request(
+    request: SpeechRequest, module: Any, *, voice: Any | None = None
+) -> Any:
     return module.SynthesisRequest(
         id=request.id,
         text=request.text,
         language=request.language,
-        voice=request.voice,
+        voice=voice if voice is not None else request.voice,
         pronunciation_overrides=tuple(
             _pykokoro_override(item, module) for item in request.pronunciation_overrides
         ),
@@ -345,34 +522,122 @@ class PyKokoroEngineSession:
         self._selection = selection or EngineSelection(
             engine="kokoro", target_id="unknown", language="und"
         )
+        self._enrolled_voices: dict[str, Any] = {}
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
         import pykokoro
 
+        maximum = self._selection.metadata.get("max_tokens")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+            maximum = None
         try:
-            prepared = self._synthesizer.prepare(_pykokoro_request(request, pykokoro))
+            measured = self._synthesizer.measure_request(
+                _pykokoro_request(request, pykokoro), maximum=maximum
+            )
         except EngineSynthesisError:
             raise
         except Exception as exc:
             raise _translate_pykokoro_error(exc, self._selection, request) from exc
-        token_ids = tuple(getattr(prepared, "token_ids", ()))
-        amount = len(token_ids)
-        maximum = self._selection.metadata.get("max_tokens")
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
-            maximum = None
+        amount = getattr(measured, "amount", None)
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise EngineBackendError(
+                "PyKokoro returned an invalid request measurement",
+                engine="kokoro",
+                target_id=self._selection.target_id,
+                request_id=request.id,
+                code="pykokoro.measurement_invalid",
+            )
+        measured_maximum = getattr(measured, "maximum", maximum)
+        if (
+            isinstance(measured_maximum, bool)
+            or not isinstance(measured_maximum, int)
+            or measured_maximum <= 0
+        ):
+            measured_maximum = maximum
         return RequestMeasure(
-            fits=amount <= maximum if maximum is not None else None,
+            fits=amount <= measured_maximum if measured_maximum is not None else None,
             amount=amount,
-            maximum=maximum,
+            maximum=measured_maximum,
             unit="model_tokens",
-            source="pykokoro.prepare",
+            source="pykokoro.measure_request",
         )
+
+    def _reference_voice(
+        self, language: str
+    ) -> tuple[Any | None, Mapping[str, str] | None, str | None]:
+        source = self._selection.options.get("voice_source")
+        enrollment = self._selection.options.get("voice_enrollment")
+        if not isinstance(source, Mapping) or not isinstance(enrollment, Mapping):
+            return None, None, None
+        source_identity = voice_source_identity(source)
+        identity: dict[str, Any] = {
+            "engine": enrollment.get("engine"),
+            "target_id": self._selection.target_id,
+            "language": normalize_language_key(language),
+            "voice_source": dict(source_identity),
+        }
+        transcript_digest = _reference_text_digest(enrollment)
+        if transcript_digest is not None:
+            identity["reference_text_sha256"] = transcript_digest
+        if "fmax" in enrollment:
+            identity["fmax"] = enrollment["fmax"]
+        cache_key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        cached = self._enrolled_voices.get(cache_key)
+        if cached is not None:
+            return cached, source_identity, cache_key
+
+        import pykokoro
+
+        try:
+            resolved = resolve_reference_audio(
+                source,
+                cache_dir=self._selection.options.get("voice_cache_dir"),
+                offline=self._selection.offline,
+                catalog_paths=self._selection.options.get("voice_catalog_path"),
+            )
+            engine = enrollment.get("engine")
+            enrollment_options = None
+            reference_text = None
+            if engine == "inno":
+                enrollment_options = pykokoro.InnoEnrollmentOptions(
+                    fmax=enrollment.get("fmax")
+                )
+            elif engine == "akinvox":
+                reference_text = enrollment.get("reference_text")
+            else:
+                raise EngineSelectionError(
+                    f"Unsupported PyKokoro enrollment engine {engine!r}",
+                    code="pykokoro.invalid_enrollment_options",
+                    target_id=self._selection.target_id,
+                )
+            voice = self._synthesizer.enroll_voice(
+                resolved.path,
+                reference_text,
+                engine=engine,
+                language=language,
+                options=enrollment_options,
+            )
+        except EngineError:
+            raise
+        except Exception as exc:
+            raise _translate_pykokoro_error(
+                exc,
+                self._selection,
+                failure_code="pykokoro.reference_enrollment_failed",
+            ) from exc
+        self._enrolled_voices[cache_key] = voice
+        return voice, source_identity, cache_key
 
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
         import pykokoro
 
+        voice, source_identity, enrollment_identity = self._reference_voice(
+            request.language
+        )
         try:
-            result = self._synthesizer.synthesize(_pykokoro_request(request, pykokoro))
+            result = self._synthesizer.synthesize(
+                _pykokoro_request(request, pykokoro, voice=voice)
+            )
         except EngineSynthesisError:
             raise
         except Exception as exc:
@@ -401,6 +666,9 @@ class PyKokoroEngineSession:
                 revision_keys=("corpus", "catalog_revision"),
             ),
         }
+        if source_identity is not None:
+            metadata["reference_voice_identity"] = dict(source_identity)
+            metadata["reference_enrollment_identity"] = enrollment_identity
         if result.trace is not None:
             metadata["trace"] = result.trace
         rendered = RenderedSpeech(
@@ -452,7 +720,7 @@ class PyKokoroEngineAdapter:
         return distribution_version(self.package_name)
 
     def probe_api(self) -> EngineApiProbe:
-        return probe_public_api(
+        probe = probe_public_api(
             engine=self.id,
             package=self.package_name,
             required_symbols=(
@@ -464,12 +732,71 @@ class PyKokoroEngineAdapter:
                 "VoiceLevelConfig",
                 "SynthesisInputTooLongError",
                 "ShortSentenceConfig",
+                "RequestMeasure",
+                "ReferenceVoice",
+                "KokoroVoicePack",
+                "InnoEnrollmentOptions",
             ),
             required_methods={
-                "KokoroSynthesizer": ("prepare", "synthesize", "close"),
+                "KokoroSynthesizer": (
+                    "prepare",
+                    "measure_request",
+                    "enroll_voice",
+                    "synthesize",
+                    "close",
+                ),
             },
             expected_api_version=SUPPORTED_REQUEST_API_VERSION,
+            require_explicit_contract=True,
+            contract_required_symbols=("REQUEST_API_VERSION", "request_api_contract"),
+            contract_required_methods={
+                "KokoroSynthesizer": ("measure_request", "enroll_voice"),
+            },
         )
+        if not probe.compatible:
+            return probe
+        try:
+            import pykokoro
+
+            contract = pykokoro.request_api_contract()
+            required = {
+                "supports_request_measurement": True,
+                "supports_reference_voice": True,
+                "supports_voice_enrollment": True,
+            }
+            actual = {
+                name: (
+                    contract.get(name)
+                    if isinstance(contract, Mapping)
+                    else getattr(contract, name, None)
+                )
+                for name in required
+            }
+            mismatches = {
+                name: {"expected": expected, "actual": actual[name]}
+                for name, expected in required.items()
+                if actual[name] is not expected
+            }
+        except Exception as exc:  # noqa: BLE001 - API probes must fail closed.
+            return replace(
+                probe,
+                compatible=False,
+                status="api_probe_failed",
+                failed_stage="request_capability_contract",
+                failed_symbol="request_api_contract",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+        if mismatches:
+            return replace(
+                probe,
+                compatible=False,
+                status="api_incompatible",
+                failed_stage="request_capabilities",
+                failed_symbol="request_api_contract",
+                details={**dict(probe.details), "capability_mismatches": mismatches},
+            )
+        return probe
 
     def compatible_api(self) -> bool:
         return self.probe_api().compatible
@@ -492,9 +819,14 @@ class PyKokoroEngineAdapter:
                     "waveform_validation",
                     "trace",
                     "allow_experimental_frontend",
+                    "voice_source",
+                    "voice_enrollment",
+                    "voice_catalog_path",
+                    "voice_cache_dir",
                 }
             ),
             supports_named_voices=True,
+            supports_reference_voice=True,
             supports_pronunciation_overrides=True,
             pronunciation_alphabets=frozenset({"ipa"}),
             supports_linguistic_tokens=True,
@@ -572,18 +904,56 @@ class PyKokoroEngineAdapter:
     def resolve(self, request: Any) -> tuple[EngineSelection, tuple[Any, ...]]:
         options = dict(getattr(request, "options", {}) or {})
         options.update(dict(getattr(request, "engine_options", {}) or {}))
+        target_id = (
+            getattr(request, "target_id", None)
+            or options.get("model_variant")
+            or "v1.0"
+        )
+        language = getattr(request, "language", "en-us")
+        voice = getattr(request, "voice", None)
+        speaker = getattr(request, "speaker", None)
+        offline = bool(getattr(request, "offline", False))
+        refresh = bool(getattr(request, "refresh", False))
+        if "voice_source" in options:
+            try:
+                if voice is not None or speaker is not None:
+                    raise EngineSelectionError(
+                        "A reference voice source cannot be combined with a named voice or speaker",
+                        code="pykokoro.reference_voice_binding_conflict",
+                    )
+                source = normalize_voice_source(
+                    options["voice_source"], allow_named=False
+                )
+                options["voice_source"] = source.as_mapping()
+                from ..models import ModelDiscoveryError, get_model_info
+
+                try:
+                    model, _ = get_model_info(
+                        target_id,
+                        offline=offline,
+                        engine=self.id,
+                        refresh=refresh,
+                        preference=options.get("model_source", "auto"),
+                    )
+                except (ModelDiscoveryError, ImportError, OSError, ValueError):
+                    pass
+                else:
+                    options["voice_enrollment"] = _normalize_enrollment(
+                        options.get("voice_enrollment"), model, language
+                    )
+            except EngineError:
+                # validate_selection returns structured diagnostics for invalid bindings.
+                pass
         return (
             EngineSelection(
                 engine=self.id,
-                target_id=getattr(request, "target_id", None)
-                or options.get("model_variant")
-                or "v1.0",
-                language=getattr(request, "language", "en-us"),
-                voice=getattr(request, "voice", None),
-                speaker=getattr(request, "speaker", None),
+                target_id=target_id,
+                language=language,
+                voice=voice,
+                speaker=speaker,
                 options=options,
-                offline=bool(getattr(request, "offline", False)),
-                refresh=bool(getattr(request, "refresh", False)),
+                offline=offline,
+                refresh=refresh,
             ),
             (),
         )
@@ -628,6 +998,58 @@ class PyKokoroEngineAdapter:
                     field="render.target.voice",
                 )
             )
+        source_value = selection.options.get("voice_source")
+        enrollment_value = selection.options.get("voice_enrollment")
+        if source_value is not None:
+            try:
+                source = normalize_voice_source(source_value, allow_named=False)
+                diagnostics.extend(
+                    validate_voice_source(
+                        source,
+                        offline=selection.offline,
+                        catalog_paths=selection.options.get("voice_catalog_path"),
+                    )
+                )
+            except EngineError as exc:
+                diagnostics.append(
+                    EngineDiagnostic(
+                        code=exc.code,
+                        severity="error",
+                        message=str(exc),
+                        field="render.target.voice",
+                        details=exc.details,
+                    )
+                )
+            if selection.voice is not None or selection.speaker is not None:
+                diagnostics.append(
+                    EngineDiagnostic(
+                        code="pykokoro.reference_voice_binding_conflict",
+                        severity="error",
+                        message="A reference voice source cannot be combined with a named voice or speaker.",
+                        field="render.target.voice",
+                    )
+                )
+            try:
+                _normalize_enrollment(enrollment_value, model, selection.language)
+            except EngineError as exc:
+                diagnostics.append(
+                    EngineDiagnostic(
+                        code=exc.code,
+                        severity="error",
+                        message=str(exc),
+                        field="render.target.voice",
+                        details=exc.details,
+                    )
+                )
+        elif enrollment_value is not None:
+            diagnostics.append(
+                EngineDiagnostic(
+                    code="pykokoro.reference_source_required",
+                    severity="error",
+                    message="voice_enrollment requires a voice_source reference audio binding.",
+                    field="render.target.voice",
+                )
+            )
         quality = selection.options.get("quality")
         if quality is not None and quality not in model.qualities:
             diagnostics.append(
@@ -641,7 +1063,7 @@ class PyKokoroEngineAdapter:
         return tuple(diagnostics)
 
     def target_metadata(self, selection: EngineSelection) -> Mapping[str, Any]:
-        from ..models import get_model_info
+        from ..models import ModelDiscoveryError, get_model_info
 
         try:
             model, _ = get_model_info(
@@ -651,9 +1073,11 @@ class PyKokoroEngineAdapter:
                 refresh=selection.refresh,
                 preference=selection.options.get("model_source", "auto"),
             )
-        except (ImportError, OSError, ValueError):
+        except (ModelDiscoveryError, ImportError, OSError, ValueError):
             return {}
+        metadata = dict(model.metadata)
         return {
+            **metadata,
             "languages": tuple(model.languages),
             "voices": tuple(model.voices),
             "sample_rate": model.sample_rate,
@@ -666,15 +1090,42 @@ class PyKokoroEngineAdapter:
     def canonical_synthesis_identity(
         self, selection: EngineSelection
     ) -> Mapping[str, Any]:
-        return {
+        options = dict(selection.options)
+        source_identity = _reference_source_identity(options)
+        enrollment = options.get("voice_enrollment")
+        safe_options = {
+            key: value
+            for key, value in options.items()
+            if key
+            not in {
+                "voice_source",
+                "voice_enrollment",
+                "voice_catalog_path",
+                "voice_cache_dir",
+            }
+        }
+        enrollment_identity: dict[str, Any] | None = None
+        if isinstance(enrollment, Mapping):
+            enrollment_identity = {"engine": enrollment.get("engine")}
+            enrollment_identity["language"] = normalize_language_key(selection.language)
+            if "fmax" in enrollment:
+                enrollment_identity["fmax"] = enrollment["fmax"]
+            transcript_digest = _reference_text_digest(enrollment)
+            if transcript_digest is not None:
+                enrollment_identity["reference_text_sha256"] = transcript_digest
+        identity: dict[str, Any] = {
             "engine": self.id,
             "engine_version": self.version(),
             "target_id": selection.target_id,
-            "voice": selection.voice,
+            "voice": None if source_identity is not None else selection.voice,
             "speaker": selection.speaker,
-            "options": dict(selection.options),
+            "options": safe_options,
             "metadata": dict(selection.metadata),
         }
+        if source_identity is not None:
+            identity["voice_source"] = dict(source_identity)
+            identity["voice_enrollment"] = enrollment_identity
+        return identity
 
     def open(
         self, selection: EngineSelection
@@ -705,7 +1156,7 @@ class PyKokoroEngineAdapter:
                     ),
                 )
             config = pykokoro.SynthesisConfig(
-                voice=selection.voice,
+                voice=None if "voice_source" in options else selection.voice,
                 generation=generation,
                 model_quality=options.get("quality"),
                 model_source=options.get("model_source"),

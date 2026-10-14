@@ -31,6 +31,7 @@ from voicerender.renderprofile import (
     save_render_profile,
     validate_render_profile,
 )
+from voicerender.voice_sources import local_reference_source
 
 
 class _ProfileAdapter:
@@ -65,7 +66,8 @@ class _ProfileAdapter:
                 engine=self.id,
                 target_id=request.target_id or "target-v1",
                 language=request.language or "en-US",
-                voice=request.voice or "voice-a",
+                voice=request.voice
+                or ("voice-a" if "voice_source" not in request.options else None),
                 speaker=request.speaker,
                 options=request.options,
             ),
@@ -187,23 +189,35 @@ def test_refresh_updates_only_engine_facts_and_preserves_user_policy(
     assert validate_render_profile(proposal) == proposal
 
 
-def test_reference_audio_bindings_are_rejected_precisely(
-    monkeypatch: pytest.MonkeyPatch,
+def test_profile_creation_accepts_content_pinned_local_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     _install(monkeypatch)
-    with pytest.raises(
-        ProfileError, match="Reference-audio bindings are not supported"
-    ):
+    reference = tmp_path / "speaker.wav"
+    reference.write_bytes(b"reference wav")
+    source = local_reference_source(reference)
+
+    profile = create_render_profile(
+        engine="profile-test",
+        target_id="target-v1",
+        language="en-US",
+        voice_source=source,
+    )
+
+    role = profile.roles["narrator"]
+    assert role.binding["options"]["voice_source"] == source
+    assert "voice" not in role.binding
+    assert validate_render_profile(profile) == profile
+    refreshed = refresh_render_profile(profile)
+    assert refreshed.roles["narrator"].binding["options"]["voice_source"] == source
+
+    with pytest.raises(ProfileError, match="voice/speaker and voice_source"):
         create_render_profile(
             engine="profile-test",
             target_id="target-v1",
             language="en-US",
-            options={
-                "voice_source": {
-                    "kind": "reference",
-                    "value": "/tmp/profile-relative.wav",
-                }
-            },
+            voice="voice-a",
+            voice_source=source,
         )
 
 
@@ -223,7 +237,7 @@ def test_profile_validation_rejects_reference_audio_from_imported_profile(
     )
     profile = RenderProfile(roles={"narrator": role}, default_role="narrator")
     with pytest.raises(
-        ProfileError, match="Reference-audio bindings are not supported"
+        ProfileError, match="voice_source must be located in binding.options"
     ):
         validate_render_profile(profile)
 

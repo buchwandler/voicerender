@@ -39,6 +39,7 @@ from voicerender.renderplan_input import (
     speech_request_conversion_from_renderplan,
     speech_request_from_renderplan,
 )
+from voicerender.voice_sources import local_reference_source
 
 
 class _Adapter:
@@ -212,8 +213,8 @@ def test_request_conversion_preserves_exact_text_binding_and_token_semantics(
     assert all(token.language == "en-US" for token in request.tokens)
 
 
-def test_binding_resolver_rejects_unknown_target_and_reference_audio(
-    monkeypatch: pytest.MonkeyPatch,
+def test_binding_resolver_accepts_pinned_local_reference_and_rejects_unknown_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     _install(monkeypatch)
     with pytest.raises(EngineSelectionError, match="unknown target"):
@@ -222,19 +223,18 @@ def test_binding_resolver_rejects_unknown_target_and_reference_audio(
             language="en-US",
         )
 
-    with pytest.raises(
-        ProfileError, match="Reference-audio bindings are not supported"
-    ):
-        engine_selection_from_binding(
-            {
-                "renderer": "renderplan-input-test",
-                "target_id": "target-v1",
-                "options": {
-                    "voice_source": {"kind": "reference", "value": "old-profile.wav"}
-                },
-            },
-            language="en-US",
-        )
+    reference = tmp_path / "speaker.wav"
+    reference.write_bytes(b"reference audio")
+    source = local_reference_source(reference)
+    selection = engine_selection_from_binding(
+        {
+            "renderer": "renderplan-input-test",
+            "target_id": "target-v1",
+            "options": {"voice_source": source},
+        },
+        language="en-US",
+    )
+    assert selection.options["voice_source"] == source
 
 
 def test_missing_profile_required_token_fields_are_rejected(
@@ -323,11 +323,10 @@ def test_emphasis_without_downstream_policy_and_unknown_controls_fail_closed(
         controls=(SpeechControl(start=2, end=7, name="extension:example", params={}),),
     )
     with pytest.raises(
-        UnsupportedSynthesisFeatureError, match="does not declare support for 'extension:example'"
+        UnsupportedSynthesisFeatureError,
+        match="does not declare support for 'extension:example'",
     ):
-        speech_request_from_renderplan(
-            extension, emphasis_policy="defer-to-compose"
-        )
+        speech_request_from_renderplan(extension, emphasis_policy="defer-to-compose")
 
 
 @pytest.mark.parametrize(
@@ -413,9 +412,12 @@ def test_out_of_text_control_range_fails_closed_during_conversion(
 
 
 def test_speech_item_rejects_control_ranges_past_text() -> None:
-    control = SpeechControl(start=2, end=len(_item().text) + 1, name="emphasis", params={})
+    control = SpeechControl(
+        start=2, end=len(_item().text) + 1, name="emphasis", params={}
+    )
     with pytest.raises(ValidationError, match="exceeds speech text length"):
         _item(controls=(control,))
+
 
 def test_overlapping_emphasis_controls_are_only_deferred_once_each(
     monkeypatch: pytest.MonkeyPatch,
@@ -445,7 +447,9 @@ def test_native_pronunciation_is_preserved_alongside_deferred_emphasis(
     item = _item(
         tokens=_complete_tokens(),
         controls=(
-            SpeechControl(start=2, end=7, name="emphasis", params={"level": "moderate"}),
+            SpeechControl(
+                start=2, end=7, name="emphasis", params={"level": "moderate"}
+            ),
             SpeechControl(
                 start=9,
                 end=14,
@@ -471,6 +475,7 @@ def test_native_pronunciation_is_preserved_alongside_deferred_emphasis(
     )
     assert "renderplan_controls" not in conversion.request.options
     assert adapter.lowered_controls == []
+
 
 def test_measurement_outcomes_and_typed_too_long_exception_are_centralized() -> None:
     assert (

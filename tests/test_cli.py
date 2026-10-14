@@ -119,7 +119,6 @@ def test_shared_example_plan_and_profile_are_identity_matched() -> None:
     assert plan.speech[0].text == "A small shared RenderPlan example."
 
 
-
 def test_cli_emphasis_policy_defaults_to_reject_and_can_defer() -> None:
     from voicerender.cli import build_parser
 
@@ -144,3 +143,126 @@ def test_cli_emphasis_policy_defaults_to_reject_and_can_defer() -> None:
             ).emphasis_policy
             == "defer-to-compose"
         )
+
+
+def test_profile_create_reference_arguments_are_mutually_exclusive() -> None:
+    import pytest
+
+    from voicerender.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "profile",
+                "create",
+                "--engine",
+                "sopro",
+                "--target",
+                "target-v1",
+                "--language",
+                "en-US",
+                "--voice",
+                "voice-a",
+                "--reference-wav",
+                "speaker.wav",
+                "--output",
+                "profile.toml",
+            ]
+        )
+
+
+def test_cli_profile_create_reference_wav_persists_computed_pin(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import hashlib
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    reference = tmp_path / "speaker.wav"
+    audio = b"speaker reference"
+    reference.write_bytes(audio)
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(profile_id="profile-1")
+        ),
+    )
+    monkeypatch.setattr(cli, "save_render_profile", lambda profile, path: path)
+
+    result = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "sopro",
+            "--target",
+            "target-v1",
+            "--language",
+            "en-US",
+            "--reference-wav",
+            str(reference),
+            "--output",
+            str(tmp_path / "speaker.renderprofile.toml"),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    assert captured["voice_source"] == {
+        "kind": "reference",
+        "value": str(reference.resolve()),
+        "sha256": hashlib.sha256(audio).hexdigest(),
+    }
+
+
+def test_cli_profile_create_voicefolio_ref_uses_full_pinned_source(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    source = {
+        "kind": "managed_reference",
+        "resolver": "voicefolio",
+        "value": "catalog:voice-id",
+        "sha256": "a" * 64,
+        "source_revision": "revision-1",
+        "source_repository": "voice-repo",
+        "source_path": "voices/reference.wav",
+    }
+    captured = {}
+    monkeypatch.setattr(cli, "managed_reference_source", lambda ref: source)
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(profile_id="profile-2")
+        ),
+    )
+    monkeypatch.setattr(cli, "save_render_profile", lambda profile, path: path)
+
+    result = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "sopro",
+            "--target",
+            "target-v1",
+            "--language",
+            "en-US",
+            "--voicefolio-ref",
+            source["value"],
+            "--output",
+            str(tmp_path / "managed.renderprofile.toml"),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    assert captured["voice_source"] == source
