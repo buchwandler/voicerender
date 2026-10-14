@@ -75,7 +75,7 @@ def _fake_package(package: str) -> ModuleType:
     module.__file__ = f"/fake/{package}/__init__.py"
 
     owner_methods = {
-        "PiperVoice": ("from_pretrained", "synthesize", "close"),
+        "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
         "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
         "KokoroSynthesizer": ("prepare", "synthesize", "close"),
         "PocketRuntime": (
@@ -208,6 +208,34 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     status = engine_status(engine)
     assert status["compatible"] is True
     assert fake._probe_discovery_calls == []
+
+
+def test_piper_probe_rejects_measurement_disabled_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("pipersynth")
+    fake.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": False,
+    }
+    monkeypatch.setitem(sys.modules, "pipersynth", fake)
+
+    probe = get_adapter("piper").probe_api()
+
+    assert not probe.compatible
+    assert probe.status == "api_incompatible"
+    assert probe.details["supports_request_measurement"] is False
+
+
+def test_piper_probe_requires_measure_method(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _fake_package("pipersynth")
+    delattr(fake.PiperVoice, "measure")
+    monkeypatch.setitem(sys.modules, "pipersynth", fake)
+
+    probe = get_adapter("piper").probe_api()
+
+    assert not probe.compatible
+    assert "PiperVoice.measure" in probe.missing_methods
 
 
 @pytest.mark.parametrize("engine", sorted(ENGINE_IDS))

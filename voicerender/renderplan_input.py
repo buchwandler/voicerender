@@ -190,6 +190,10 @@ def speech_request_from_renderplan(item: SpeechItem) -> SpeechRequest:
     )
 
 
+def _is_exact_amount(value: RequestMeasure) -> bool:
+    return _nonnegative_int(value.amount) is not None
+
+
 def classify_measurement(
     value: RequestMeasure | Exception,
 ) -> MeasurementOutcome:
@@ -224,10 +228,12 @@ def classify_measurement(
             return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
         if value.fits is False:
             return MeasurementOutcome(PreflightDisposition.TOO_LONG, measurement=value)
+        if value.maximum is None and _is_exact_amount(value):
+            return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
         return MeasurementOutcome(
             PreflightDisposition.REJECT,
             measurement=value,
-            error="Engine did not provide an exact capacity measurement",
+            error="Engine did not provide an exact request measurement",
         )
     if isinstance(value, SpeechRequestTooLongError):
         raw_unit = getattr(value, "unit", None)

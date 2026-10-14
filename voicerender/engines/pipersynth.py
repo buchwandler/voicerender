@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from typing import Any, cast
 
 from ..errors import (
@@ -267,32 +267,48 @@ class PiperSynthEngineSession:
             engine="piper", target_id="unknown", language="und"
         )
 
+    def _native_request(self, request: SpeechRequest, module: Any) -> Any:
+        return module.SynthesisRequest(
+            id=request.id,
+            text=request.text,
+            language=_piper_request_language(request.language, self._voice),
+            speaker=request.speaker,
+            tokens=tuple(_piper_token(token, module) for token in request.tokens),
+            pronunciation_overrides=tuple(
+                _piper_pronunciation(span, module)
+                for span in request.pronunciation_overrides
+            ),
+        )
+
     def measure(self, request: SpeechRequest) -> RequestMeasure:
+        import pipersynth
+
+        try:
+            native = self._native_request(request, pipersynth)
+            measured = self._voice.measure(native)
+        except EngineSynthesisError:
+            raise
+        except Exception as exc:
+            raise _translate_piper_error(exc, self._selection, request) from exc
+
+        details = {"model_id": measured.model_id}
+        native_metadata = getattr(measured, "metadata", None)
+        if isinstance(native_metadata, Mapping):
+            details["native_metadata"] = dict(native_metadata)
         return RequestMeasure(
-            fits=None,
-            amount=None,
-            maximum=None,
+            fits=measured.fits,
+            amount=measured.phoneme_count,
+            maximum=measured.max_phonemes,
             unit="phoneme_ids",
-            source="pipersynth.strict_error_fallback",
+            source="pipersynth.measure",
+            details=details,
         )
 
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
         import pipersynth
 
         try:
-            native = pipersynth.SynthesisRequest(
-                id=request.id,
-                text=request.text,
-                language=_piper_request_language(request.language, self._voice),
-                speaker=request.speaker,
-                tokens=tuple(
-                    _piper_token(token, pipersynth) for token in request.tokens
-                ),
-                pronunciation_overrides=tuple(
-                    _piper_pronunciation(span, pipersynth)
-                    for span in request.pronunciation_overrides
-                ),
-            )
+            native = self._native_request(request, pipersynth)
             result = self._voice.synthesize(native, config=self._config)
         except EngineSynthesisError:
             raise
@@ -338,7 +354,7 @@ class PiperSynthEngineAdapter:
         return distribution_version(self.package_name)
 
     def probe_api(self) -> EngineApiProbe:
-        return probe_public_api(
+        probe = probe_public_api(
             engine=self.id,
             package=self.package_name,
             required_symbols=(
@@ -353,11 +369,53 @@ class PiperSynthEngineAdapter:
                 "SynthesisInputTooLongError",
             ),
             required_methods={
-                "PiperVoice": ("from_pretrained", "synthesize", "close"),
+                "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
                 "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
             },
             expected_api_version=SUPPORTED_REQUEST_API_VERSION,
         )
+        if not probe.compatible:
+            return probe
+
+        try:
+            import pipersynth
+
+            contract_factory = getattr(pipersynth, "request_api_contract", None)
+            if not callable(contract_factory):
+                return probe
+            contract = contract_factory()
+            missing = object()
+            if isinstance(contract, Mapping):
+                supports_measurement = contract.get(
+                    "supports_request_measurement", missing
+                )
+            else:
+                supports_measurement = getattr(
+                    contract, "supports_request_measurement", missing
+                )
+        except Exception as exc:  # noqa: BLE001 - API contract probes must fail closed.
+            return replace(
+                probe,
+                compatible=False,
+                status="api_probe_failed",
+                failed_stage="request_measurement_contract",
+                failed_symbol="request_api_contract",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+
+        if supports_measurement is not missing and supports_measurement is not True:
+            return replace(
+                probe,
+                compatible=False,
+                status="api_incompatible",
+                warnings=probe.warnings
+                + (
+                    "PiperSynth request API contract does not support request measurement.",
+                ),
+                details={"supports_request_measurement": supports_measurement},
+            )
+        return probe
 
     def compatible_api(self) -> bool:
         return self.probe_api().compatible
@@ -374,7 +432,7 @@ class PiperSynthEngineAdapter:
             supports_pronunciation_overrides=True,
             pronunciation_alphabets=frozenset({"ipa"}),
             supports_voice_level_calibration=True,
-            supports_request_measurement=False,
+            supports_request_measurement=True,
             supports_qualities=True,
             supports_live=True,
             supports_timestamps=False,

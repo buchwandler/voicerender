@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,6 +14,7 @@ from renderplan import (
     CapacityConstraint,
     RenderPlan,
     SourceSpan,
+    SpeechControl,
     SpeechItem,
     load_preflight,
     save_plan,
@@ -28,6 +32,7 @@ from voicerender.engines.base import (
     RequestMeasure,
     SpeechRequest,
 )
+from voicerender.engines.pipersynth import PiperSynthEngineAdapter
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineUnavailableError, SpeechRequestTooLongError
@@ -178,6 +183,84 @@ def _install(monkeypatch: pytest.MonkeyPatch) -> _Adapter:
     return adapter
 
 
+def _install_fake_pipersynth(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    amount: int,
+    maximum: int | None,
+    fits: bool | None,
+) -> list[tuple[str, Any]]:
+    events: list[tuple[str, Any]] = []
+    metadata = SimpleNamespace(
+        id="piper-test-model",
+        name="Piper test model",
+        language_code="en-US",
+        language_family="en",
+        quality="medium",
+        sample_rate=22050,
+        speaker_id_map={},
+    )
+
+    class FakeVoice:
+        config = SimpleNamespace(
+            espeak_voice="en-us", phoneme_type=SimpleNamespace(value="espeak")
+        )
+
+        @classmethod
+        def from_pretrained(cls, target_id: str, **kwargs: Any) -> FakeVoice:
+            return cls()
+
+        def measure(self, native: Any) -> Any:
+            events.append(("measure", native))
+            return SimpleNamespace(
+                fits=fits,
+                phoneme_count=amount,
+                max_phonemes=maximum,
+                model_id="piper-test-model",
+                metadata={"frontend": "fake-piper-g2p"},
+            )
+
+        def synthesize(self, *args: Any, **kwargs: Any) -> Any:
+            events.append(("synthesize", None))
+            raise AssertionError("preflight must not call PiperVoice.synthesize")
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    class FakeVoiceAssetManager:
+        def __init__(self, *, offline: bool = False) -> None:
+            pass
+
+        def list_voices(self, language: str | None = None, refresh: bool = False):
+            return ()
+
+        def get_voice_metadata(self, target_id: str, refresh: bool = False):
+            return metadata
+
+    module = ModuleType("pipersynth")
+    module.__version__ = "0.2.3"
+    module.__file__ = "/fake/pipersynth/__init__.py"
+    module.REQUEST_API_VERSION = 1
+    module.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": True,
+    }
+    module.PiperVoice = FakeVoice
+    module.VoiceAssetManager = FakeVoiceAssetManager
+    module.SynthesisRequest = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.SynthesisResult = object
+    module.SynthesisConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.VoiceLevelConfig = lambda mode: SimpleNamespace(mode=mode)
+    module.SynthesisInputTooLongError = type(
+        "SynthesisInputTooLongError", (Exception,), {}
+    )
+    monkeypatch.setitem(sys.modules, "pipersynth", module)
+    monkeypatch.setitem(_ADAPTERS, "piper", PiperSynthEngineAdapter())
+    return events
+
+
 def _plan(
     *texts: tuple[str, bool, str],
     binding: dict[str, Any] | None = None,
@@ -210,6 +293,63 @@ def _plan(
         render_profile_id="sha256:" + "2" * 64,
         flow=tuple(flow),
     ).with_identity()
+
+
+@pytest.mark.parametrize(
+    ("amount", "maximum", "fits", "expected_status"),
+    ((180, None, None, "ok"), (300, 256, False, "replan")),
+)
+def test_piper_preflight_uses_frontend_measurement_without_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    amount: int,
+    maximum: int | None,
+    fits: bool | None,
+    expected_status: str,
+) -> None:
+    events = _install_fake_pipersynth(
+        monkeypatch, amount=amount, maximum=maximum, fits=fits
+    )
+    binding = {"renderer": "piper", "target_id": "piper-test-model"}
+    plan = _plan(("Piper preflight", True, "sentence"), binding=binding)
+
+    report = preflight_render_plan(plan, tmp_path / f"piper-{expected_status}.toml")
+
+    check = report.checks[0]
+    assert report.status == expected_status
+    assert check.metric == "phoneme_ids"
+    assert check.measured == amount
+    assert check.maximum == maximum
+    assert check.source == "pipersynth.measure"
+    assert [event[0] for event in events] == ["measure", "close"]
+    assert events[0][1].id == check.segment_id
+    assert events[0][1].text == "Piper preflight"
+    if expected_status == "replan":
+        assert report.replan[0].metric == "phoneme_ids"
+        assert report.replan[0].measured == amount
+        assert report.replan[0].maximum == maximum
+
+
+def test_piper_preflight_keeps_emphasis_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=None, fits=None)
+    binding = {"renderer": "piper", "target_id": "piper-test-model"}
+    plan = _plan(("emphasis", True, "sentence"), binding=binding)
+    item = replace(
+        plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=4, name="emphasis", params={}),),
+    )
+    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
+
+    report = preflight_render_plan(plan, tmp_path / "piper-emphasis.toml")
+
+    assert report.status == "reject"
+    assert report.checks[0].status == "error"
+    assert report.checks[0].source == "synthesis.unsupported_feature"
+    assert "does not declare support for 'emphasis'" in report.checks[0].detail
+    assert events == []
 
 
 def test_preflight_persists_all_fit_report_reuses_session_and_never_synthesizes(
@@ -271,7 +411,7 @@ def test_too_long_preflight_preserves_source_and_planning_level(
     assert adapter.synthesized_texts == []
 
 
-def test_measurement_without_exact_fit_is_reject_not_replan(
+def test_fully_unknown_measurement_rejects(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     adapter = _install(monkeypatch)
@@ -284,12 +424,77 @@ def test_measurement_without_exact_fit_is_reject_not_replan(
         source="fake.no_measurement",
     )
 
-    report = preflight_render_plan(plan, tmp_path / "reject.toml")
+    report_path = tmp_path / "reject.toml"
+    report = preflight_render_plan(plan, report_path)
 
     assert report.status == "reject"
     assert preflight_exit_code(report) == 1
     assert report.checks[0].status == "error"
     assert report.checks[0].source == "fake.no_measurement"
+    assert (
+        report.checks[0].detail == "Engine did not provide an exact request measurement"
+    )
+    assert report.replan == ()
+    assert adapter.synthesized_texts == []
+
+
+def test_exact_measurement_without_hard_maximum_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan(("measured without maximum", True, "sentence"))
+    adapter.measurements["measured without maximum"] = RequestMeasure(
+        fits=None,
+        amount=42,
+        maximum=None,
+        unit="phoneme_ids",
+        source="fake.measure",
+    )
+    output = tmp_path / "exact-without-maximum.toml"
+
+    report = preflight_render_plan(plan, output)
+
+    assert report.status == "ok"
+    assert report.checks[0].status == "ok"
+    assert report.checks[0].measured == 42
+    assert report.checks[0].maximum is None
+    assert report.checks[0].source == "fake.measure"
+    persisted = load_preflight(output)
+    assert persisted.checks[0].status == "ok"
+    assert persisted.checks[0].measured == 42
+    assert persisted.checks[0].maximum is None
+    assert adapter.synthesized_texts == []
+
+
+@pytest.mark.parametrize(
+    ("fits", "amount", "maximum"),
+    ((True, 101, 100), (False, 100, 100)),
+)
+def test_contradictory_known_measurements_reject(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fits: bool,
+    amount: int,
+    maximum: int,
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan(("contradictory measurement", True, "sentence"))
+    adapter.measurements["contradictory measurement"] = RequestMeasure(
+        fits=fits,
+        amount=amount,
+        maximum=maximum,
+        unit="phoneme_ids",
+        source="fake.measure",
+    )
+
+    report = preflight_render_plan(plan, tmp_path / "contradictory.toml")
+
+    assert report.status == "reject"
+    assert report.checks[0].status == "error"
+    assert (
+        report.checks[0].detail
+        == "Engine capacity measurement contradicts its fit result"
+    )
     assert report.replan == ()
     assert adapter.synthesized_texts == []
 
