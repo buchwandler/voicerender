@@ -66,8 +66,11 @@ def atomic_wav(path: Path, audio: Any, sample_rate: int) -> dict[str, Any]:
     signal = np.asarray(audio, dtype=np.float32)
     if signal.ndim != 1 or not signal.size or not np.all(np.isfinite(signal)):
         raise ArtifactError("Engine must return nonempty, finite, mono audio")
-    if np.max(np.abs(signal)) > 1.00001:
-        raise ArtifactError("Engine returned audio outside [-1, 1]")
+    peak = float(np.max(np.abs(signal)))
+    if peak > float(np.float32(1.00001)):
+        raise ArtifactError(
+            f"Engine returned audio outside [-1, 1] (peak={peak:.6f})"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".wav", dir=path.parent)
     os.close(fd)

@@ -67,7 +67,7 @@ class _UnknownSession(_MeasuredSession):
 
 
 def _rendered(request: SpeechRequest, sample_rate: int, value: int) -> RenderedSpeech:
-    audio = np.full(len(request.text), value, dtype=np.float32)
+    audio = np.full(len(request.text), value / (value + 1), dtype=np.float32)
     start = len(request.text) - len(request.text.lstrip())
     end = len(request.text.rstrip())
     timings = ()

@@ -401,6 +401,12 @@ def validate_rendered_speech(
     if not np.isfinite(audio).all():
         raise invalid("audio must contain only finite samples")
 
+    peak = float(np.max(np.abs(audio)))
+    if peak > float(np.float32(1.00001)):
+        raise invalid(
+            f"audio exceeds PCM full-scale range [-1, 1] (peak={peak:.6f})"
+        )
+
     try:
         result.word_timings = validate_word_timings(
             text=request.text,

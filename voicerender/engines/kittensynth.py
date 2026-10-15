@@ -9,6 +9,8 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from typing import Any
 
+import numpy as np
+
 from ..errors import (
     EmptySpeechTextError,
     EngineBackendError,
@@ -26,6 +28,7 @@ from .base import (
     RequestMeasure,
     SpeechRequest,
     distribution_version,
+    validate_rendered_speech,
 )
 from .catalog import CatalogRequest, SynthesisTarget, TargetVoice
 from .metadata import (
@@ -49,6 +52,8 @@ KITTEN_OPTION_NAMES = frozenset(
         "session_options",
     }
 )
+
+KITTEN_PCM_RANGE_POLICY = "kitten-native-wav-clamp.v1"
 
 
 class KittenSelectionError(ValueError):
@@ -214,21 +219,61 @@ class KittenSynthEngineSession:
             raise
         except Exception as exc:
             raise _translate_kitten_error(exc, self._selection, request) from exc
+        try:
+            raw_audio = np.asarray(result.audio, dtype=np.float32)
+        except (TypeError, ValueError, OverflowError):
+            # Let the shared validator report native values that cannot convert.
+            raw_audio = result.audio
+
+        clipped_samples = 0
+        peak_before_clip: float | None = None
+        audio = raw_audio
+        if (
+            isinstance(raw_audio, np.ndarray)
+            and raw_audio.ndim == 1
+            and raw_audio.size
+            and np.isfinite(raw_audio).all()
+        ):
+            peak_before_clip = float(np.max(np.abs(raw_audio)))
+            clipped_samples = int(np.count_nonzero(np.abs(raw_audio) > 1.0))
+            audio = np.clip(raw_audio, -1.0, 1.0).astype(np.float32, copy=False)
+
         metadata = dict(result.metadata or {})
         metadata.update(
             {
                 "voice": result.voice,
                 "model_ref": result.model_ref,
                 "effective_speed": result.speed,
+                "pcm_range": {
+                    "policy": KITTEN_PCM_RANGE_POLICY,
+                    "peak_before_clip": peak_before_clip,
+                    "clipped_samples": clipped_samples,
+                },
             }
         )
-        return RenderedSpeech(
+        warnings = ()
+        if clipped_samples:
+            warnings = (
+                (
+                    "KittenSynth returned audio above full scale; "
+                    f"clamped {clipped_samples} sample(s) to [-1, 1] "
+                    f"(peak before clamp={peak_before_clip:.6f})."
+                ),
+            )
+        rendered = RenderedSpeech(
             id=request.id,
-            audio=result.audio,
+            audio=audio,
             sample_rate=result.sample_rate,
-            warnings=(),
+            warnings=warnings,
             word_timings=(),
             metadata=metadata,
+        )
+        return validate_rendered_speech(
+            request,
+            rendered,
+            engine="kitten",
+            engine_version=distribution_version("kittensynth"),
+            target_id=self._selection.target_id,
         )
 
 
@@ -551,6 +596,7 @@ class KittenSynthEngineAdapter:
             "language": selection.language,
             "options": pcm_options,
             "model_revision": selection.metadata.get("source_revision"),
+            "pcm_range_policy": KITTEN_PCM_RANGE_POLICY,
         }
 
     def open(
