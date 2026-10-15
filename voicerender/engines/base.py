@@ -150,6 +150,7 @@ class EngineCapabilities:
     supports_timestamps: bool = False
 
     supports_voice_level_calibration: bool = False
+    # True means a side-effect-free measurement API exists; result actionability is in RequestMeasure.
     supports_request_measurement: bool = False
     # Compatibility aliases retained for the original VoiceRender renderer.
     supports_builtin_voices: bool = True
@@ -403,9 +404,7 @@ def validate_rendered_speech(
 
     peak = float(np.max(np.abs(audio)))
     if peak > float(np.float32(1.00001)):
-        raise invalid(
-            f"audio exceeds PCM full-scale range [-1, 1] (peak={peak:.6f})"
-        )
+        raise invalid(f"audio exceeds PCM full-scale range [-1, 1] (peak={peak:.6f})")
 
     try:
         result.word_timings = validate_word_timings(

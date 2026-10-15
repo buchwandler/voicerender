@@ -74,9 +74,9 @@ class InflectSelectionError(ValueError):
 
 def _module() -> Any:
     """Import the optional engine only when an Inflect operation is requested."""
-    import inflectsynth
+    import importlib
 
-    return inflectsynth
+    return importlib.import_module(PACKAGE_NAME)
 
 
 def _effective_language(value: str | None) -> str:
@@ -137,6 +137,13 @@ def _target_from_model(model: Any) -> SynthesisTarget:
     max_input_tokens = metadata.get("max_input_tokens")
     if _valid_positive_int(max_input_tokens):
         metadata["max_input_tokens"] = max_input_tokens
+    policy_revision = metadata.get("capacity_policy_revision")
+    if not isinstance(policy_revision, str) or not policy_revision.strip():
+        policy_revision = metadata.get("capacity_revision")
+    if isinstance(policy_revision, str) and policy_revision.strip():
+        metadata["capacity_policy_revision"] = policy_revision.strip()
+    else:
+        metadata.pop("capacity_policy_revision", None)
     sample_rate = getattr(model, "sample_rate", None)
     return SynthesisTarget(
         engine=ENGINE_ID,
@@ -202,20 +209,75 @@ def _capacity_contract(module: Any) -> Mapping[str, Any] | None:
     return contract if isinstance(contract, Mapping) else None
 
 
-def _supports_actionable_capacity(module: Any | None = None) -> bool:
+def _contract_field(contract: Any, name: str, default: Any = None) -> Any:
+    if isinstance(contract, Mapping):
+        return contract.get(name, default)
+    return getattr(contract, name, default)
+
+
+def _request_measurement_contract(module: Any) -> Any:
+    factory = getattr(module, "request_api_contract", None)
+    if not callable(factory):
+        return None
+    try:
+        return factory()
+    except Exception:  # noqa: BLE001 - Contract inspection must fail closed.
+        return None
+
+
+def _supports_request_measurement(module: Any | None = None) -> bool:
     module = module or _module()
-    version = getattr(module, "CAPACITY_API_VERSION", None)
-    contract = _capacity_contract(module)
+    contract = _request_measurement_contract(module)
+    voice_type = getattr(module, "InflectVoice", None)
     return (
-        isinstance(version, int)
-        and not isinstance(version, bool)
-        and version == SUPPORTED_CAPACITY_API_VERSION
-        and contract is not None
-        and contract.get("supports_known_maximum") is True
-        and callable(
-            getattr(getattr(module, "InflectVoice", None), "measure_prepared", None)
-        )
+        _contract_field(contract, "supports_request_measurement") is True
+        and _contract_field(contract, "measurement_entrypoint")
+        == "InflectVoice.measure_prepared"
+        and _contract_field(contract, "measurement_metric") == "model_tokens"
+        and callable(getattr(voice_type, "measure_prepared", None))
     )
+
+
+def _measurement_value(measured: Any, name: str, default: Any = None) -> Any:
+    if isinstance(measured, Mapping):
+        return measured.get(name, default)
+    return getattr(measured, name, default)
+
+
+def _first_nonnegative_int(*values: Any) -> int | None:
+    return next(
+        (
+            value
+            for value in values
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        ),
+        None,
+    )
+
+
+def _first_positive_int(*values: Any) -> int | None:
+    return next(
+        (
+            value
+            for value in values
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        ),
+        None,
+    )
+
+
+def _has_invalid_integer(values: tuple[Any, ...], *, positive: bool) -> bool:
+    for value in values:
+        if value is None:
+            continue
+        valid = (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and (value > 0 if positive else value >= 0)
+        )
+        if not valid:
+            return True
+    return False
 
 
 def _error_context(
@@ -320,7 +382,6 @@ class InflectSynthEngineSession:
         self._config = config
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
-        module = _module()
         measure_method = getattr(self._voice, "measure_prepared", None)
         if not callable(measure_method):
             return RequestMeasure(
@@ -336,17 +397,51 @@ class InflectSynthEngineSession:
             raise
         except Exception as exc:
             raise _translate_error(exc, self._selection, request) from exc
-        amount = getattr(measured, "amount", None)
-        maximum = getattr(measured, "maximum", None)
-        fits = getattr(measured, "fits", None)
-        if (
-            not _supports_actionable_capacity(module)
-            or not isinstance(amount, int)
-            or isinstance(amount, bool)
-            or amount < 0
-            or not _valid_positive_int(maximum)
-            or not isinstance(fits, bool)
-        ):
+
+        amount_values = (
+            _measurement_value(measured, "amount"),
+            _measurement_value(measured, "token_count"),
+        )
+        maximum_values = (
+            _measurement_value(measured, "maximum"),
+            _measurement_value(measured, "max_tokens"),
+        )
+        amount = _first_nonnegative_int(*amount_values)
+        maximum = _first_positive_int(*maximum_values)
+        raw_fits = _measurement_value(measured, "fits")
+        fits = raw_fits if isinstance(raw_fits, bool) else None
+
+        invalid_fields: list[str] = []
+        if amount is None and _has_invalid_integer(amount_values, positive=False):
+            invalid_fields.append("amount")
+        if maximum is None and _has_invalid_integer(maximum_values, positive=True):
+            invalid_fields.append("maximum")
+        if raw_fits is not None and not isinstance(raw_fits, bool):
+            invalid_fields.append("fits")
+
+        if invalid_fields:
+            return RequestMeasure(
+                fits=None,
+                amount=amount,
+                maximum=maximum,
+                unit="model_tokens" if amount is not None else "unknown",
+                source="inflectsynth.invalid_measurement",
+                details={"invalid_fields": invalid_fields},
+            )
+        discovered_maximum = self._selection.metadata.get("max_input_tokens")
+        if _valid_positive_int(discovered_maximum) and maximum != discovered_maximum:
+            return RequestMeasure(
+                fits=None,
+                amount=amount,
+                maximum=maximum,
+                unit="model_tokens" if amount is not None else "unknown",
+                source="inflectsynth.capacity_metadata_mismatch",
+                details={
+                    "discovered_max_input_tokens": discovered_maximum,
+                    "runtime_maximum": maximum,
+                },
+            )
+        if amount is None:
             return RequestMeasure(
                 fits=None,
                 amount=None,
@@ -354,15 +449,29 @@ class InflectSynthEngineSession:
                 unit="unknown",
                 source="inflectsynth.no_capacity_measurement",
             )
+
+        details = {
+            "model_id": _measurement_value(
+                measured, "model_id", self._selection.target_id
+            )
+        }
+        policy_revision = _measurement_value(measured, "capacity_policy_revision")
+        if not isinstance(policy_revision, str) or not policy_revision.strip():
+            policy_revision = None
+            for key in ("capacity_policy_revision", "capacity_revision"):
+                candidate = self._selection.metadata.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    policy_revision = candidate
+                    break
+        if isinstance(policy_revision, str) and policy_revision.strip():
+            details["capacity_policy_revision"] = policy_revision.strip()
         return RequestMeasure(
             fits=fits,
             amount=amount,
             maximum=maximum,
             unit="model_tokens",
             source="inflectsynth.measure_prepared",
-            details={
-                "model_id": getattr(measured, "model_id", self._selection.target_id)
-            },
+            details=details,
         )
 
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
@@ -482,8 +591,6 @@ class InflectSynthEngineAdapter:
                 "request_api_contract",
                 "RequestMeasure",
                 "SynthesisInputTooLongError",
-                "CAPACITY_API_VERSION",
-                "capacity_api_contract",
             ),
             required_methods={
                 "InflectVoice": (
@@ -500,53 +607,60 @@ class InflectSynthEngineAdapter:
         )
         if not probe.compatible:
             return probe
+
         module = _module()
-        capacity_version = getattr(module, "CAPACITY_API_VERSION", None)
-        contract_fn = getattr(module, "capacity_api_contract", None)
-        try:
-            contract = contract_fn() if callable(contract_fn) else None
-        except Exception as exc:  # noqa: BLE001 - External API contracts may raise arbitrary errors.
-            return replace(
-                probe,
-                compatible=False,
-                status="api_probe_failed",
-                failed_stage="capacity_contract",
-                failed_symbol="capacity_api_contract",
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-            )
+        contract = _request_measurement_contract(module)
+        declared = {
+            "supports_request_measurement": _contract_field(
+                contract, "supports_request_measurement"
+            ),
+            "measurement_entrypoint": _contract_field(
+                contract, "measurement_entrypoint"
+            ),
+            "measurement_metric": _contract_field(contract, "measurement_metric"),
+        }
         if (
-            isinstance(capacity_version, bool)
-            or not isinstance(capacity_version, int)
-            or capacity_version != SUPPORTED_CAPACITY_API_VERSION
-            or not isinstance(contract, Mapping)
+            declared["supports_request_measurement"] is not True
+            or declared["measurement_entrypoint"] != "InflectVoice.measure_prepared"
+            or declared["measurement_metric"] != "model_tokens"
         ):
             return replace(
                 probe,
                 compatible=False,
-                status="api_version_incompatible",
-                failed_stage="capacity_contract",
-                failed_symbol="CAPACITY_API_VERSION",
-                details={
-                    "capacity_api_version": capacity_version,
-                    "expected_capacity_api_version": SUPPORTED_CAPACITY_API_VERSION,
-                },
+                status="api_incompatible",
+                failed_stage="request_measurement_contract",
+                failed_symbol="request_api_contract",
+                warnings=probe.warnings
+                + (
+                    "InflectSynth does not declare the model-token request measurement API.",
+                ),
+                details={**dict(probe.details), **declared},
             )
-        return replace(
-            probe,
-            details={
-                **dict(probe.details),
-                "capacity_api_version": capacity_version,
-                "capacity_contract": dict(contract),
-            },
+
+        capacity_version = getattr(module, "CAPACITY_API_VERSION", None)
+        capacity_contract = _capacity_contract(module)
+        capacity_compatible = (
+            isinstance(capacity_version, int)
+            and not isinstance(capacity_version, bool)
+            and capacity_version == SUPPORTED_CAPACITY_API_VERSION
+            and capacity_contract is not None
         )
+        details = {
+            **dict(probe.details),
+            **declared,
+            "capacity_api_compatible": capacity_compatible,
+            "capacity_api_version": capacity_version,
+        }
+        if capacity_contract is not None:
+            details["capacity_contract"] = dict(capacity_contract)
+        return replace(probe, details=details)
 
     def compatible_api(self) -> bool:
         return self.probe_api().compatible
 
     def capabilities(self) -> EngineCapabilities:
         try:
-            supports_measurement = _supports_actionable_capacity()
+            supports_measurement = _supports_request_measurement()
         except (ImportError, ModuleNotFoundError):
             supports_measurement = False
         return EngineCapabilities(
@@ -806,6 +920,7 @@ class InflectSynthEngineAdapter:
         capacity_contract = _capacity_contract(module) or {}
         capacity_policy_revision = (
             selection.metadata.get("capacity_policy_revision")
+            or selection.metadata.get("capacity_revision")
             or capacity_contract.get("policy_revision")
             or capacity_contract.get("revision")
         )

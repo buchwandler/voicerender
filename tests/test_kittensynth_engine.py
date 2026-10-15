@@ -33,6 +33,7 @@ class _FakeVoice:
         self.synthesize_calls.append((args, kwargs))
         return self.synthesis_result
 
+
 def _session(
     voice: _FakeVoice, selection: EngineSelection | None = None
 ) -> KittenSynthEngineSession:
@@ -44,6 +45,7 @@ def _session(
             voice="Jasper",
         )
     return KittenSynthEngineSession(voice, selection)
+
 
 def _request() -> SpeechRequest:
     return SpeechRequest(id="request-1", text="prepared speech", language="en-US")
@@ -100,6 +102,36 @@ def test_measure_maps_authoritative_known_maximum() -> None:
     assert voice.synthesize_calls == []
 
 
+@pytest.mark.parametrize(
+    ("measurement", "invalid_field"),
+    [
+        (SimpleNamespace(token_count=True, max_tokens=None, fits=None), "amount"),
+        (SimpleNamespace(token_count=27, max_tokens=0, fits=None), "maximum"),
+        (SimpleNamespace(token_count=27, max_tokens=100, fits="yes"), "fits"),
+    ],
+)
+def test_measure_rejects_malformed_values(measurement: Any, invalid_field: str) -> None:
+    measured = _session(_FakeVoice(measurement)).measure(_request())
+
+    assert measured.source == "kittensynth.invalid_measurement"
+    assert invalid_field in measured.details["invalid_fields"]
+
+
+def test_measure_missing_method_reports_no_measurement() -> None:
+    voice = _FakeVoice(None)
+    voice.measure_prepared = None  # type: ignore[method-assign]
+
+    measured = _session(voice).measure(_request())
+
+    assert measured == RequestMeasure(
+        fits=None,
+        amount=None,
+        maximum=None,
+        unit="unknown",
+        source="kittensynth.no_capacity_measurement",
+    )
+
+
 def test_measure_translates_native_empty_text_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,7 +148,6 @@ def test_measure_translates_native_empty_text_error(
     assert caught.value.native_error_type == "EmptyTextError"
     assert voice.measure_calls == ["prepared speech"]
     assert voice.synthesize_calls == []
-
 
 
 def _synthesis_result(audio: Any) -> SimpleNamespace:

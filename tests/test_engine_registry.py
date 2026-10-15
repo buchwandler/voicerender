@@ -226,7 +226,14 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     import importlib
 
     fake = _fake_package(package)
-    if engine == "kitten":
+    if engine == "inflect":
+        fake.request_api_contract = lambda: {
+            "version": 1,
+            "supports_request_measurement": True,
+            "measurement_entrypoint": "InflectVoice.measure_prepared",
+            "measurement_metric": "model_tokens",
+        }
+    elif engine == "kitten":
         fake.request_api_contract = lambda: {
             "version": 1,
             "supports_request_measurement": True,
@@ -263,6 +270,69 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     status = engine_status(engine)
     assert status["compatible"] is True
     assert fake._probe_discovery_calls == []
+
+
+def test_inflect_probe_accepts_common_measurement_contract_without_capacity_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("inflectsynth")
+    fake.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": True,
+        "measurement_entrypoint": "InflectVoice.measure_prepared",
+        "measurement_metric": "model_tokens",
+    }
+    del fake.CAPACITY_API_VERSION
+    del fake.capacity_api_contract
+    monkeypatch.setitem(sys.modules, "inflectsynth", fake)
+
+    adapter = get_adapter("inflect")
+    probe = adapter.probe_api()
+
+    assert probe.compatible, probe
+    assert probe.details["supports_request_measurement"] is True
+    assert probe.details["measurement_entrypoint"] == "InflectVoice.measure_prepared"
+    assert probe.details["measurement_metric"] == "model_tokens"
+    assert probe.details["capacity_api_compatible"] is False
+    assert adapter.capabilities().supports_request_measurement is True
+    assert fake._probe_discovery_calls == []
+
+
+def test_inflect_probe_rejects_measurement_without_declared_api_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("inflectsynth")
+    fake.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": True,
+        "measurement_entrypoint": "InflectVoice.measure_prepared",
+    }
+    monkeypatch.setitem(sys.modules, "inflectsynth", fake)
+
+    probe = get_adapter("inflect").probe_api()
+
+    assert not probe.compatible
+    assert probe.failed_stage == "request_measurement_contract"
+    assert probe.details["measurement_metric"] is None
+
+
+def test_inflect_probe_rejects_declared_measurement_without_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("inflectsynth")
+    fake.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": True,
+        "measurement_entrypoint": "InflectVoice.measure_prepared",
+        "measurement_metric": "model_tokens",
+    }
+    delattr(fake.InflectVoice, "measure_prepared")
+    monkeypatch.setitem(sys.modules, "inflectsynth", fake)
+
+    probe = get_adapter("inflect").probe_api()
+
+    assert not probe.compatible
+    assert "InflectVoice.measure_prepared" in probe.missing_methods
 
 
 def test_piper_probe_rejects_measurement_disabled_contract(

@@ -140,6 +140,7 @@ class BookRenderResult:
     @property
     def reused(self) -> int:
         return sum(outcome.reused for outcome in self.outcomes)
+
     @property
     def requested(self) -> int:
         return len(self.outcomes)

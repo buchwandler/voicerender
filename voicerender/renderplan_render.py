@@ -626,12 +626,16 @@ def _measurement_fingerprint(outcome: MeasurementOutcome) -> dict[str, Any] | No
     measurement = outcome.measurement
     if measurement is None:
         return None
-    return {
+    fingerprint = {
         "metric": measurement.unit,
         "measured": measurement.amount,
         "maximum": measurement.maximum,
         "source": measurement.source,
     }
+    policy_revision = measurement.details.get("capacity_policy_revision")
+    if isinstance(policy_revision, str) and policy_revision.strip():
+        fingerprint["capacity_policy_revision"] = policy_revision.strip()
+    return fingerprint
 
 
 def _finalize_execution_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:

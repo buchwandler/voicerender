@@ -179,6 +179,20 @@ def _translate_kitten_error(
     return error_type(str(error), **context, code=code)
 
 
+def _measurement_field(measured: Any, name: str, default: Any = None) -> Any:
+    if isinstance(measured, Mapping):
+        return measured.get(name, default)
+    return getattr(measured, name, default)
+
+
+def _valid_measurement_integer(value: Any, *, positive: bool) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and (value > 0 if positive else value >= 0)
+    )
+
+
 class KittenSynthEngineSession:
     """Adapt prepared VoiceRender requests to one open ``KittenVoice``."""
 
@@ -187,21 +201,78 @@ class KittenSynthEngineSession:
         self._selection = selection
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
+        measure_method = getattr(self._voice, "measure_prepared", None)
+        if not callable(measure_method):
+            return RequestMeasure(
+                fits=None,
+                amount=None,
+                maximum=None,
+                unit="unknown",
+                source="kittensynth.no_capacity_measurement",
+            )
         try:
-            measured = self._voice.measure_prepared(request.text)
+            measured = measure_method(request.text)
         except EngineSynthesisError:
             raise
         except Exception as exc:
             raise _translate_kitten_error(exc, self._selection, request) from exc
 
-        details: dict[str, Any] = {"model_id": measured.model_id}
-        native_metadata = getattr(measured, "metadata", None)
+        amount_value = _measurement_field(measured, "token_count")
+        maximum_value = _measurement_field(measured, "max_tokens")
+        raw_fits = _measurement_field(measured, "fits")
+        amount = (
+            amount_value
+            if _valid_measurement_integer(amount_value, positive=False)
+            else None
+        )
+        maximum = (
+            maximum_value
+            if _valid_measurement_integer(maximum_value, positive=True)
+            else None
+        )
+        fits = raw_fits if isinstance(raw_fits, bool) else None
+
+        invalid_fields: list[str] = []
+        if amount_value is not None and amount is None:
+            invalid_fields.append("amount")
+        if maximum_value is not None and maximum is None:
+            invalid_fields.append("maximum")
+        if raw_fits is not None and not isinstance(raw_fits, bool):
+            invalid_fields.append("fits")
+        unit = "model_tokens" if amount is not None else "unknown"
+        if invalid_fields:
+            return RequestMeasure(
+                fits=None,
+                amount=amount,
+                maximum=maximum,
+                unit=unit,
+                source="kittensynth.invalid_measurement",
+                details={"invalid_fields": invalid_fields},
+            )
+        if amount is None:
+            return RequestMeasure(
+                fits=None,
+                amount=None,
+                maximum=None,
+                unit="unknown",
+                source="kittensynth.no_capacity_measurement",
+            )
+
+        details: dict[str, Any] = {
+            "model_id": _measurement_field(
+                measured, "model_id", self._selection.target_id
+            )
+        }
+        native_metadata = _measurement_field(measured, "metadata")
         if isinstance(native_metadata, Mapping):
             details["native_metadata"] = dict(native_metadata)
+            policy_revision = native_metadata.get("capacity_policy_revision")
+            if isinstance(policy_revision, str) and policy_revision:
+                details["capacity_policy_revision"] = policy_revision
         return RequestMeasure(
-            fits=measured.fits,
-            amount=measured.token_count,
-            maximum=measured.max_tokens,
+            fits=fits,
+            amount=amount,
+            maximum=maximum,
             unit="model_tokens",
             source="kittensynth.measure_prepared",
             details=details,

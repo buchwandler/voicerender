@@ -251,14 +251,34 @@ def classify_measurement(
         valid = (
             (value.fits is None or isinstance(value.fits, bool))
             and value.unit in {"model_tokens", "phoneme_ids", "unknown"}
+            and (value.amount is None or value.unit != "unknown")
             and (isinstance(value.source, str) and bool(value.source.strip()))
             and (value.amount is None or _nonnegative_int(value.amount) is not None)
-            and (value.maximum is None or _nonnegative_int(value.maximum) is not None)
+            and (value.maximum is None or _positive_int(value.maximum) is not None)
             and isinstance(value.details, Mapping)
         )
         if not valid:
             return MeasurementOutcome(
                 PreflightDisposition.REJECT,
+                measurement=value,
+                error="Engine returned an invalid capacity measurement",
+            )
+        if value.source == "inflectsynth.capacity_metadata_mismatch":
+            discovered = value.details.get("discovered_max_input_tokens")
+            runtime = value.details.get("runtime_maximum")
+            return MeasurementOutcome(
+                PreflightDisposition.REJECT,
+                measurement=value,
+                error=(
+                    "InflectSynth capacity metadata mismatch: "
+                    f"discovered max_input_tokens={discovered}, "
+                    f"runtime maximum={runtime}"
+                ),
+            )
+        if value.source.endswith(".invalid_measurement"):
+            return MeasurementOutcome(
+                PreflightDisposition.REJECT,
+                measurement=value,
                 error="Engine returned an invalid capacity measurement",
             )
         if (
@@ -271,18 +291,30 @@ def classify_measurement(
         ):
             return MeasurementOutcome(
                 PreflightDisposition.REJECT,
+                measurement=value,
                 error="Engine capacity measurement contradicts its fit result",
+            )
+        if not _is_exact_amount(value):
+            return MeasurementOutcome(
+                PreflightDisposition.REJECT,
+                measurement=value,
+                error="Engine did not provide an exact request measurement",
             )
         if value.fits is True:
             return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
         if value.fits is False:
             return MeasurementOutcome(PreflightDisposition.TOO_LONG, measurement=value)
-        if value.maximum is None and _is_exact_amount(value):
-            return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
+        if value.maximum is None:
+            error = (
+                "Engine measured the exact request size but did not provide an "
+                "authoritative maximum/fit result"
+            )
+        else:
+            error = "Engine measured the exact request size but did not provide an authoritative fit result"
         return MeasurementOutcome(
             PreflightDisposition.REJECT,
             measurement=value,
-            error="Engine did not provide an exact request measurement",
+            error=error,
         )
     if isinstance(value, SpeechRequestTooLongError):
         raw_unit = getattr(value, "unit", None)
@@ -299,14 +331,32 @@ def classify_measurement(
             if isinstance(raw_source, str) and raw_source.strip()
             else "engine.request_too_long"
         )
+        raw_amount = getattr(value, "amount", None)
+        raw_maximum = getattr(value, "maximum", None)
+        amount = _nonnegative_int(raw_amount)
+        maximum = _positive_int(raw_maximum)
+        invalid_fields = []
+        if raw_amount is not None and amount is None:
+            invalid_fields.append("amount")
+        if raw_maximum is not None and maximum is None:
+            invalid_fields.append("maximum")
+        normalized_details = dict(details) if isinstance(details, Mapping) else {}
+        if invalid_fields:
+            normalized_details["invalid_fields"] = invalid_fields
         measurement = RequestMeasure(
-            fits=False,
-            amount=_nonnegative_int(getattr(value, "amount", None)),
-            maximum=_nonnegative_int(getattr(value, "maximum", None)),
+            fits=None if invalid_fields else False,
+            amount=amount,
+            maximum=maximum,
             unit=unit,  # type: ignore[arg-type]
-            source=source,
-            details=dict(details) if isinstance(details, Mapping) else {},
+            source=(f"{source}.invalid_measurement" if invalid_fields else source),
+            details=normalized_details,
         )
+        if invalid_fields:
+            return MeasurementOutcome(
+                PreflightDisposition.REJECT,
+                measurement=measurement,
+                error="Engine returned an invalid capacity measurement",
+            )
         return MeasurementOutcome(
             PreflightDisposition.TOO_LONG, measurement=measurement
         )
@@ -575,6 +625,12 @@ def _optional_string(value: Any, field_name: str) -> str | None:
 
 def _nonnegative_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
 

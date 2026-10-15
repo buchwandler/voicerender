@@ -386,7 +386,7 @@ def _plan(
 
 @pytest.mark.parametrize(
     ("amount", "maximum", "fits", "expected_status"),
-    ((180, None, None, "ok"), (300, 256, False, "replan")),
+    ((180, 256, True, "ok"), (300, 256, False, "replan")),
 )
 def test_piper_preflight_uses_frontend_measurement_without_synthesis(
     monkeypatch: pytest.MonkeyPatch,
@@ -444,7 +444,7 @@ def test_piper_preflight_keeps_emphasis_rejected(
 def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=None, fits=None)
+    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=256, fits=True)
     binding = {"renderer": "piper", "target_id": "piper-test-model"}
     plan = _plan(("Piper emphasis", True, "sentence"), binding=binding)
     item = replace(
@@ -475,7 +475,7 @@ def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
 def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=None, fits=None)
+    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=256, fits=True)
     binding = {
         "renderer": "kitten",
         "target_id": "kitten-test-model",
@@ -490,7 +490,7 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     assert check.status == "ok"
     assert check.metric == "model_tokens"
     assert check.measured == 180
-    assert check.maximum is None
+    assert check.maximum == 256
     assert check.source == "kittensynth.measure_prepared"
     assert [event[0] for event in events] == ["measure", "close"]
     assert events[0][1] == "Kitten preflight"
@@ -499,7 +499,7 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
 def test_kitten_preflight_defers_emphasis_to_composition(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=None, fits=None)
+    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=256, fits=True)
     binding = {
         "renderer": "kitten",
         "target_id": "kitten-test-model",
@@ -536,8 +536,8 @@ def test_piper_render_defers_emphasis_to_composition_without_native_option(
     events = _install_fake_pipersynth(
         monkeypatch,
         amount=20,
-        maximum=None,
-        fits=None,
+        maximum=256,
+        fits=True,
         allow_synthesis=True,
     )
     binding = {"renderer": "piper", "target_id": "piper-test-model"}
@@ -677,7 +677,7 @@ def test_fully_unknown_measurement_rejects(
     assert adapter.synthesized_texts == []
 
 
-def test_exact_measurement_without_hard_maximum_is_accepted(
+def test_exact_measurement_without_hard_maximum_is_rejected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     adapter = _install(monkeypatch)
@@ -686,22 +686,28 @@ def test_exact_measurement_without_hard_maximum_is_accepted(
         fits=None,
         amount=42,
         maximum=None,
-        unit="phoneme_ids",
-        source="fake.measure",
+        unit="model_tokens",
+        source="fake.measure_prepared",
     )
     output = tmp_path / "exact-without-maximum.toml"
 
     report = preflight_render_plan(plan, output)
 
-    assert report.status == "ok"
-    assert report.checks[0].status == "ok"
+    assert report.status == "reject"
+    assert report.checks[0].status == "error"
+    assert report.checks[0].metric == "model_tokens"
     assert report.checks[0].measured == 42
     assert report.checks[0].maximum is None
-    assert report.checks[0].source == "fake.measure"
+    assert report.checks[0].source == "fake.measure_prepared"
+    assert report.checks[0].detail == (
+        "Engine measured the exact request size but did not provide an "
+        "authoritative maximum/fit result"
+    )
     persisted = load_preflight(output)
-    assert persisted.checks[0].status == "ok"
+    assert persisted.checks[0].status == "error"
     assert persisted.checks[0].measured == 42
     assert persisted.checks[0].maximum is None
+    assert report.replan == ()
     assert adapter.synthesized_texts == []
 
 

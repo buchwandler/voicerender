@@ -384,6 +384,14 @@ def test_render_executes_exact_requests_in_order_and_writes_numbered_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     adapter = _install(monkeypatch)
+    adapter.measurements[" first "] = RequestMeasure(
+        fits=True,
+        amount=len(" first "),
+        maximum=100,
+        unit="model_tokens",
+        source="fake.frontend_measure",
+        details={"capacity_policy_revision": "budget.v1"},
+    )
     plan = _plan(" first ", "second ")
     report = _report(adapter, plan, tmp_path)
     adapter.measured_texts.clear()
@@ -421,6 +429,7 @@ def test_render_executes_exact_requests_in_order_and_writes_numbered_manifest(
         "measured": len(" first "),
         "maximum": 100,
         "source": "fake.frontend_measure",
+        "capacity_policy_revision": "budget.v1",
     }
     assert fingerprint["fingerprint_id"].startswith("sha256:")
     assert [item.wav for item in result.manifest.speech] == ["000001.wav", "000002.wav"]
@@ -561,6 +570,54 @@ def test_immediate_remeasurement_failure_stops_and_writes_valid_partial_manifest
     assert result.fresh_preflight.checks[0].segment_id == plan.speech[1].segment_id
     assert plan.speech[1].text == "fails next"
     assert result.execution_fingerprint[-1]["capacity"]["maximum"] == 100
+
+
+def test_immediate_unknown_fit_stops_before_artifact_and_keeps_prior_partial_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("fits first", "unknown capacity next")
+    report = _report(adapter, plan, tmp_path)
+    adapter.measured_texts.clear()
+    adapter.synthesized_texts.clear()
+    adapter.measurements["unknown capacity next"] = RequestMeasure(
+        fits=None,
+        amount=80,
+        maximum=None,
+        unit="model_tokens",
+        source="inflectsynth.measure_prepared",
+    )
+    recheck_path = tmp_path / "fresh-unknown-reject.toml"
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "partial-unknown",
+        cache_dir=tmp_path / "partial-unknown-cache",
+        recheck_report_path=recheck_path,
+    )
+
+    assert result.failed
+    assert result.error_code == "preflight.reject"
+    assert adapter.measured_texts == ["fits first", "unknown capacity next"]
+    assert adapter.synthesized_texts == ["fits first"]
+    assert result.manifest.complete is False
+    assert [artifact.segment_id for artifact in result.manifest.speech] == [
+        plan.speech[0].segment_id
+    ]
+    assert result.fresh_preflight is not None
+    assert result.fresh_preflight.status == "reject"
+    assert result.fresh_preflight.replan == ()
+    check = result.fresh_preflight.checks[0]
+    assert check.status == "error"
+    assert check.metric == "model_tokens"
+    assert check.measured == 80
+    assert check.maximum is None
+    assert check.source == "inflectsynth.measure_prepared"
+    assert "authoritative maximum/fit result" in check.detail
+    assert load_preflight(recheck_path).status == "reject"
+    assert (tmp_path / "partial-unknown" / "000001.wav").is_file()
+    assert not (tmp_path / "partial-unknown" / "000002.wav").exists()
 
 
 def test_session_open_failure_writes_fresh_reject_for_exact_occurrence(

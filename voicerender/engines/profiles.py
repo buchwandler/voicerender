@@ -61,6 +61,11 @@ def make_renderprofile_fragment(
         "frontend": frontend or str(metadata.get("frontend") or adapter.id),
         "pronunciation": pronunciation or "renderer",
     }
+    policy_revision = metadata.get("capacity_policy_revision") or metadata.get(
+        "capacity_revision"
+    )
+    if isinstance(policy_revision, str) and policy_revision.strip():
+        renderer_metadata["capacity_policy_revision"] = policy_revision.strip()
     binding: dict[str, Any] = {
         "renderer": adapter.id,
         "target_id": selection.target_id,

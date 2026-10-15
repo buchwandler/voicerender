@@ -514,6 +514,105 @@ def test_measurement_outcomes_and_typed_too_long_exception_are_centralized() -> 
     assert bare_outcome.disposition is PreflightDisposition.TOO_LONG
     assert bare_outcome.measurement is not None
     assert bare_outcome.measurement.unit == "unknown"
+    invalid_too_long = classify_measurement(
+        SpeechRequestTooLongError(
+            "malformed overflow",
+            amount=21,
+            maximum=0,
+            unit="model_tokens",
+            source="fake.prepare",
+        )
+    )
+    assert invalid_too_long.disposition is PreflightDisposition.REJECT
+    assert invalid_too_long.error == "Engine returned an invalid capacity measurement"
+    assert invalid_too_long.measurement is not None
+    assert invalid_too_long.measurement.source == "fake.prepare.invalid_measurement"
 
     invalid = InvalidSpeechRequestError("bad request")
     assert classify_measurement(invalid).disposition is PreflightDisposition.REJECT
+
+
+def test_measured_amount_without_authoritative_fit_is_rejected_with_details() -> None:
+    measurement = RequestMeasure(
+        fits=None,
+        amount=80,
+        maximum=None,
+        unit="model_tokens",
+        source="inflectsynth.measure_prepared",
+    )
+
+    outcome = classify_measurement(measurement)
+
+    assert outcome.disposition is PreflightDisposition.REJECT
+    assert outcome.measurement == measurement
+    assert outcome.error == (
+        "Engine measured the exact request size but did not provide an "
+        "authoritative maximum/fit result"
+    )
+
+
+def test_invalid_adapter_measurement_has_stable_rejection() -> None:
+    outcome = classify_measurement(
+        RequestMeasure(
+            fits=None,
+            amount=80,
+            maximum=None,
+            unit="model_tokens",
+            source="inflectsynth.invalid_measurement",
+            details={"invalid_fields": ["maximum"]},
+        )
+    )
+
+    assert outcome.disposition is PreflightDisposition.REJECT
+    assert outcome.error == "Engine returned an invalid capacity measurement"
+
+
+def test_fit_without_exact_amount_is_not_accepted() -> None:
+    outcome = classify_measurement(
+        RequestMeasure(
+            fits=True,
+            amount=None,
+            maximum=100,
+            unit="model_tokens",
+            source="fake.measure",
+        )
+    )
+
+    assert outcome.disposition is PreflightDisposition.REJECT
+    assert outcome.error == "Engine did not provide an exact request measurement"
+
+
+def test_zero_maximum_is_invalid() -> None:
+    outcome = classify_measurement(
+        RequestMeasure(
+            fits=None,
+            amount=1,
+            maximum=0,
+            unit="model_tokens",
+            source="fake.measure",
+        )
+    )
+
+    assert outcome.disposition is PreflightDisposition.REJECT
+    assert outcome.error == "Engine returned an invalid capacity measurement"
+
+
+def test_discovery_runtime_capacity_mismatch_is_rejected_with_both_values() -> None:
+    outcome = classify_measurement(
+        RequestMeasure(
+            fits=None,
+            amount=12,
+            maximum=90,
+            unit="model_tokens",
+            source="inflectsynth.capacity_metadata_mismatch",
+            details={
+                "discovered_max_input_tokens": 100,
+                "runtime_maximum": 90,
+            },
+        )
+    )
+
+    assert outcome.disposition is PreflightDisposition.REJECT
+    assert outcome.measurement is not None
+    assert "discovered max_input_tokens=100" in (outcome.error or "")
+    assert "runtime maximum=90" in (outcome.error or "")

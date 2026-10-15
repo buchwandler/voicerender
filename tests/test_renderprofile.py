@@ -81,6 +81,7 @@ class _ProfileAdapter:
         return {
             "max_tokens": self.maximum,
             "source_revision": self.source_revision,
+            "capacity_policy_revision": "budget.v1",
         }
 
     def renderprofile_fragment(
@@ -126,6 +127,7 @@ def test_profile_create_uses_adapter_facts_and_shared_codec(
     assert role.binding["target_id"] == "target-v1"
     assert role.binding["voice"] == "voice-a"
     assert role.binding["renderer_metadata"]["source_revision"] == "model-r1"
+    assert role.binding["renderer_metadata"]["capacity_policy_revision"] == "budget.v1"
     assert role.requirements == RoleRequirements(
         token_fields=("span", "pos"),
         frontend="profile-test.frontend",

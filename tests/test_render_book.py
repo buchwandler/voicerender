@@ -326,9 +326,7 @@ def test_book_propagates_explicit_emphasis_policy(
     assert ChapterRenderOutcome is book_module.ChapterRenderOutcome
     workspace, variant = _book(tmp_path)
 
-    result = render_book(
-        workspace, variant=variant, emphasis_policy="defer-to-compose"
-    )
+    result = render_book(workspace, variant=variant, emphasis_policy="defer-to-compose")
 
     assert result.exit_code == 0
     assert len(calls["policy"]) == 6
@@ -368,7 +366,9 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
     assert first.workspace == workspace.resolve()
     assert first.variant == variant
     assert first.output_variant_dir == workspace / "voicerender" / variant
-    assert first.report_path == first.output_variant_dir / book_module.BOOK_REPORT_FILENAME
+    assert (
+        first.report_path == first.output_variant_dir / book_module.BOOK_REPORT_FILENAME
+    )
     assert first.requested == 3
     assert first.written == sum(outcome.rendered for outcome in first.outcomes) == 6
     assert first.reused == sum(outcome.reused for outcome in first.outcomes) == 0
@@ -733,7 +733,6 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
     assert len(calls["preflight"]) == 1
 
 
-
 def test_public_api_and_render_book_cli_have_behavioral_parity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -772,7 +771,9 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
         code = main(args)
         return code, json.loads(capsys.readouterr().out)
 
-    def assert_parity(api_result: book_module.BookRenderResult, payload: dict[str, Any]) -> None:
+    def assert_parity(
+        api_result: book_module.BookRenderResult, payload: dict[str, Any]
+    ) -> None:
         assert payload["variant"] == api_result.variant == api_variant
         assert payload["pending_composition"] is api_result.pending_composition is True
         assert payload["emphasis_policy"] == "defer-to-compose"
@@ -800,10 +801,7 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
 
         api_manifest = load_manifest(outcome.manifest)
         cli_manifest = load_manifest(
-            cli_workspace
-            / "voicerender"
-            / cli_variant
-            / item["manifest"]
+            cli_workspace / "voicerender" / cli_variant / item["manifest"]
         )
         assert api_manifest.manifest_id == cli_manifest.manifest_id
         assert api_manifest.render_plan_id == cli_manifest.render_plan_id

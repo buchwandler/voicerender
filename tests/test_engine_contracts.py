@@ -31,7 +31,9 @@ def test_rendered_speech_preserves_existing_pcm_range_tolerance(peak: float) -> 
 
 
 def test_rendered_speech_rejects_audio_above_pcm_range_with_peak() -> None:
-    with pytest.raises(EngineBackendError, match=r"PCM full-scale range.*peak=1\.010000"):
+    with pytest.raises(
+        EngineBackendError, match=r"PCM full-scale range.*peak=1\.010000"
+    ):
         _validate(np.array([0.0, 1.01], dtype=np.float32))
 
 
