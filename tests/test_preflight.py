@@ -251,7 +251,7 @@ def _install_fake_pipersynth(
             return metadata
 
     module = ModuleType("pipersynth")
-    module.__version__ = "0.2.3"
+    module.__version__ = "0.2.5"
     module.__file__ = "/fake/pipersynth/__init__.py"
     module.REQUEST_API_VERSION = 1
     module.request_api_contract = lambda: {
@@ -386,7 +386,7 @@ def _plan(
 
 @pytest.mark.parametrize(
     ("amount", "maximum", "fits", "expected_status"),
-    ((180, 256, True, "ok"), (300, 256, False, "replan")),
+    ((180, 256, True, "ok"), (109, None, True, "ok"), (300, 256, False, "replan")),
 )
 def test_piper_preflight_uses_frontend_measurement_without_synthesis(
     monkeypatch: pytest.MonkeyPatch,
@@ -417,6 +417,30 @@ def test_piper_preflight_uses_frontend_measurement_without_synthesis(
         assert report.replan[0].metric == "phoneme_ids"
         assert report.replan[0].measured == amount
         assert report.replan[0].maximum == maximum
+
+
+def test_piper_preflight_rejects_unknown_capacity_without_synthesis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_pipersynth(monkeypatch, amount=109, maximum=None, fits=None)
+    binding = {"renderer": "piper", "target_id": "piper-test-model"}
+    plan = _plan(("Piper unknown capacity", True, "sentence"), binding=binding)
+
+    report = preflight_render_plan(plan, tmp_path / "piper-unknown-capacity.toml")
+
+    check = report.checks[0]
+    assert report.status == "reject"
+    assert check.status == "error"
+    assert check.metric == "phoneme_ids"
+    assert check.measured == 109
+    assert check.maximum is None
+    assert check.source == "pipersynth.measure"
+    assert check.detail == (
+        "Engine measured the exact request size but did not provide an "
+        "authoritative maximum/fit result"
+    )
+    assert report.replan == ()
+    assert [event[0] for event in events] == ["measure", "close"]
 
 
 def test_piper_preflight_keeps_emphasis_rejected(

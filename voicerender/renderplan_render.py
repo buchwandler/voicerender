@@ -207,7 +207,6 @@ def render_renderplan(
     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
     producer = Producer(name="voicerender", version=_voicerender_version())
 
-
     artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
     rendered = reused = 0
     failure: _RenderFailure | None = None

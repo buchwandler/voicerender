@@ -1193,7 +1193,6 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
     assert adapter.open_count == open_count
 
 
-
 def test_render_book_replans_then_activates_child_with_cache_reuse(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1282,7 +1281,10 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
     assert blocked.outcomes[0].replan_required is True
     assert blocked.outcomes[0].preflight_report == chapter_output / "preflight.toml"
     assert load_preflight(chapter_output / "preflight.toml").status == "replan"
-    assert load_manifest(chapter_output / "render-manifest.toml").render_plan_id == parent_plan.plan_id
+    assert (
+        load_manifest(chapter_output / "render-manifest.toml").render_plan_id
+        == parent_plan.plan_id
+    )
     assert adapter.synthesized_texts == ["stable exact request"]
 
     split_source = parent_plan.speech[1]
@@ -1342,7 +1344,10 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
     assert item["rendered"] == 2
     assert item["reused"] == 1
     assert item["replan_required"] is False
-    assert load_manifest(chapter_output / "render-manifest.toml").render_plan_id == child_plan.plan_id
+    assert (
+        load_manifest(chapter_output / "render-manifest.toml").render_plan_id
+        == child_plan.plan_id
+    )
     child_preflight = load_preflight(chapter_output / "preflight.toml")
     assert child_preflight.render_plan_id == child_plan.plan_id
     assert child_preflight.status == "ok"

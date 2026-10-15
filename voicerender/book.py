@@ -118,6 +118,7 @@ class ChapterRenderOutcome:
     preflight_report: Path | None = None
     replan_required: bool = False
 
+
 @dataclass(frozen=True, slots=True)
 class BookRenderResult:
     request: BookRenderRequest
@@ -856,7 +857,6 @@ def _failure_outcome(
         preflight_report=preflight_report,
         replan_required=replan_required,
     )
-
 
 
 def _skipped_outcome(chapter: _LoadedChapter, index: int) -> ChapterRenderOutcome:

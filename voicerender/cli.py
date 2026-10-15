@@ -282,7 +282,9 @@ def _print_book_result(result: BookRenderResult) -> None:
                 f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
             )
             if outcome.preflight_report is not None:
-                label = "replan report" if outcome.replan_required else "preflight report"
+                label = (
+                    "replan report" if outcome.replan_required else "preflight report"
+                )
                 print(f"       {label}: {outcome.preflight_report}")
         elif outcome.status == "skipped":
             print("       skipped after an earlier chapter failure")

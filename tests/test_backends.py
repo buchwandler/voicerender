@@ -148,7 +148,11 @@ def test_pipersynth_measure_and_synthesize_share_native_request(monkeypatch):
                 phoneme_count=42,
                 max_phonemes=None,
                 model_id="voice-model",
-                metadata={"frontend": "piper-g2p"},
+                metadata={
+                    "frontend": "piper-g2p",
+                    "capacity_kind": "variable",
+                    "capacity_source": "onnx.input.shape",
+                },
             )
 
         def synthesize(self, native, *, config):
@@ -220,5 +224,9 @@ def test_pipersynth_measure_and_synthesize_share_native_request(monkeypatch):
     assert measured.source == "pipersynth.measure"
     assert measured.details == {
         "model_id": "voice-model",
-        "native_metadata": {"frontend": "piper-g2p"},
+        "native_metadata": {
+            "frontend": "piper-g2p",
+            "capacity_kind": "variable",
+            "capacity_source": "onnx.input.shape",
+        },
     }

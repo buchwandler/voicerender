@@ -18,6 +18,19 @@ Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `sup
 
 KittenSynth owns Kitten text tokenization. VoiceRender delegates to `KittenVoice.measure_prepared()` and does not re-tokenize Kitten text. Kitten provides exact `model_tokens` measurement for preflight; a hard maximum is only available when the engine/model declares one. An unknown maximum means capacity is unknown, not infinite. The `.[kitten]` extra requires KittenSynth 0.1.4 or newer, which provides this measurement API.
 
+### Piper request measurement
+
+PiperSynth owns the authoritative phoneme-capacity decision, and the `.[piper]` extra requires PiperSynth `>=0.2.5,<0.3`. VoiceRender maps its exact measurement as follows:
+
+| Piper measurement                           | VoiceRender result |
+| ------------------------------------------- | ------------------ |
+| `fits=True`, finite maximum                 | `ok`               |
+| `fits=True`, `maximum=None`, variable graph | `ok`               |
+| `fits=False`, finite hard maximum           | `replan`           |
+| `fits=None`                                 | `reject`           |
+
+`maximum=None` is not itself an error. `fits=None` is the fail-closed state: VoiceRender rejects preflight without attempting synthesis. Native PiperSynth measurement metadata, including capacity kind/source when provided, is retained in `RequestMeasure.details.native_metadata`; VoiceRender does not infer fit from that metadata.
+
 ## CLI workflow
 
 A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
@@ -149,7 +162,6 @@ voicerender render-book "Novel.ssmdbook" \
 ```
 
 A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, and `--json` support alternate roots and automation. `--reset-stale` lets a rerun accept output whose manifest belongs to a different RenderPlan: it removes only VoiceRender-owned chapter artifacts and keeps the external cache available for verified exact-request reuse. `--force` is stronger: it synthesizes every selected request and bypasses cache.
-
 
 When a chapter fails with `preflight.replan`, VoiceRender stops before synthesizing requests under that plan and exposes the persisted report path. The chapter outcome includes `preflight_report` and `replan_required`; runtime immediate rechecks point to `preflight-recheck.toml` (also available as the compatibility field `recheck_report`). The JSON output and `voicerender-report.toml` include these fields, and human output prints the report path. Use the report with your planning tool to activate a child RenderPlan, then rerun VoiceRender with `--reset-stale`:
 
