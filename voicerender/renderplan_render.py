@@ -100,6 +100,7 @@ def render_renderplan(
     output_dir: str | Path,
     cache_dir: str | Path | None = None,
     force: bool = False,
+    reset_stale_output: bool = False,
     recheck_report_path: str | Path | None = None,
     speech_numbers: Collection[int] | None = None,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
@@ -206,16 +207,27 @@ def render_renderplan(
     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
     producer = Producer(name="voicerender", version=_voicerender_version())
 
+
     artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
     rendered = reused = 0
     failure: _RenderFailure | None = None
     execution_fingerprints: dict[tuple[int, str], dict[str, Any]] = {}
     with _exclusive_render(out):
         cache.mkdir(parents=True, exist_ok=True)
-        atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
-        artifact_map = _load_existing_artifacts(
-            parsed_plan, out, manifest_path, report_id, force=force
+        had_preflight = (out / "preflight.toml").exists() or (
+            out / "preflight.toml"
+        ).is_symlink()
+        artifact_map, stale_output_reset = _load_existing_artifacts(
+            parsed_plan,
+            out,
+            manifest_path,
+            report_id,
+            force=force,
+            reset_stale_output=reset_stale_output,
         )
+        if stale_output_reset and reset_stale_output and had_preflight:
+            save_preflight(report, out / "preflight.toml")
+        atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
         selected_keys = {
             (item.number, item.segment_id or item.computed_id())
             for item in selected_items
@@ -478,9 +490,10 @@ def _load_existing_artifacts(
     plan_id: str,
     *,
     force: bool,
-) -> dict[tuple[int, str], SpeechArtifact]:
+    reset_stale_output: bool,
+) -> tuple[dict[tuple[int, str], SpeechArtifact], bool]:
     if not manifest_path.exists() and not manifest_path.is_symlink():
-        return {}
+        return {}, False
     if manifest_path.is_symlink():
         if not force:
             raise ArtifactError(
@@ -488,17 +501,18 @@ def _load_existing_artifacts(
                 code="artifact.invalid",
             )
         _reset_owned_artifacts(output_dir)
-        return {}
+        return {}, True
     try:
         manifest = load_manifest(manifest_path)
         if manifest.render_plan_id != plan_id:
-            if not force:
+            if not (force or reset_stale_output):
                 raise ArtifactError(
-                    "Stale render output belongs to a different RenderPlan; use --force to reset it",
+                    "Stale render output belongs to a different RenderPlan; "
+                    "use --reset-stale or --force to reset it",
                     code="output.stale_plan",
                 )
             _reset_owned_artifacts(output_dir)
-            return {}
+            return {}, True
         manifest.validate_against(plan)
         expected = {
             (item.number, item.segment_id or item.computed_id()): item
@@ -524,7 +538,7 @@ def _load_existing_artifacts(
             }
             if verified_wav(output_dir / artifact.wav, metadata):
                 verified[key] = artifact
-        return verified
+        return verified, False
     except ArtifactError:
         raise
     except (OSError, ValueError, TypeError) as exc:
@@ -533,7 +547,7 @@ def _load_existing_artifacts(
                 f"Existing render manifest is invalid: {exc}", code="artifact.invalid"
             ) from exc
         _reset_owned_artifacts(output_dir)
-        return {}
+        return {}, True
 
 
 def _reset_owned_artifacts(output_dir: Path) -> None:

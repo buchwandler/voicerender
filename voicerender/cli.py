@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--cache-dir", type=Path)
     render.add_argument("--recheck-report", type=Path)
     render.add_argument("--force", action="store_true")
+    render.add_argument(
+        "--reset-stale",
+        action="store_true",
+        help="Reset output owned by a different RenderPlan while reusing cache entries",
+    )
     render.add_argument("--json", action="store_true")
     render.add_argument(
         "--emphasis-policy",
@@ -150,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
     book_render.add_argument("--output-root", type=Path)
     book_render.add_argument("--cache-dir", type=Path)
     book_render.add_argument("--force", action="store_true")
+    book_render.add_argument(
+        "--reset-stale",
+        action="store_true",
+        help="Reset chapter output owned by a different RenderPlan while reusing cache entries",
+    )
     book_render.add_argument(
         "--emphasis-policy",
         choices=("reject", "defer-to-compose"),
@@ -271,6 +281,9 @@ def _print_book_result(result: BookRenderResult) -> None:
             print(
                 f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
             )
+            if outcome.preflight_report is not None:
+                label = "replan report" if outcome.replan_required else "preflight report"
+                print(f"       {label}: {outcome.preflight_report}")
         elif outcome.status == "skipped":
             print("       skipped after an earlier chapter failure")
         else:
@@ -475,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
                 cache_dir=args.cache_dir,
                 recheck_report_path=args.recheck_report,
                 force=args.force,
+                reset_stale_output=args.reset_stale,
                 emphasis_policy=args.emphasis_policy,
             )
             payload = _render_payload(result)
@@ -512,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_root=args.output_root,
                     cache_dir=args.cache_dir,
                     force=args.force,
+                    reset_stale_output=args.reset_stale,
                     fail_fast=args.fail_fast,
                     emphasis_policy=args.emphasis_policy,
                 )

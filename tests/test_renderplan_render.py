@@ -987,6 +987,53 @@ def test_stale_plan_requires_force_and_force_resets_only_owned_artifacts(
     assert not (output / "preflight.toml").exists()
 
 
+def test_reset_stale_plan_reuses_exact_cache_and_preserves_unowned_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    output = tmp_path / "chapter"
+    cache = tmp_path / "shared-cache"
+    parent_plan = _plan("parent text to split", "stable exact request")
+    parent_report = preflight_render_plan(parent_plan, output / "preflight.toml")
+    parent = render_renderplan(
+        parent_plan,
+        preflight=parent_report,
+        output_dir=output,
+        cache_dir=cache,
+    )
+    assert not parent.failed
+    cache_before = {path.name for path in cache.iterdir()}
+    (output / "keep.txt").write_text("user data", encoding="utf-8")
+
+    child_plan = _plan(
+        "split child request one",
+        "split child request two",
+        "stable exact request",
+    )
+    child_report = preflight_render_plan(child_plan, tmp_path / "child-preflight.toml")
+    child = render_renderplan(
+        child_plan,
+        preflight=child_report,
+        output_dir=output,
+        cache_dir=cache,
+        reset_stale_output=True,
+    )
+
+    assert not child.failed
+    assert child.manifest.render_plan_id == child_plan.plan_id
+    assert child.rendered_count == 2
+    assert child.reused_count == 1
+    assert adapter.synthesized_texts.count("stable exact request") == 1
+    assert "split child request one" in adapter.synthesized_texts
+    assert "split child request two" in adapter.synthesized_texts
+    assert load_manifest(child.manifest_path).render_plan_id == child_plan.plan_id
+    saved_preflight = load_preflight(output / "preflight.toml")
+    assert saved_preflight.render_plan_id == child_plan.plan_id
+    assert (output / "keep.txt").read_text(encoding="utf-8") == "user data"
+    assert cache_before.issubset({path.name for path in cache.iterdir()})
+    assert all((output / f"{number:06d}.wav").is_file() for number in range(1, 4))
+
+
 def test_force_rerenders_only_selected_speech_and_keeps_unselected_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1144,3 +1191,165 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
     reused = invoke("--chapters", "1")
     assert reused["items"][0]["status"] == "reused"
     assert adapter.open_count == open_count
+
+
+
+def test_render_book_replans_then_activates_child_with_cache_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    adapter = _install(monkeypatch)
+    from voicerender.book import render_book
+    from voicerender.book_contract import load_renderplan_set
+    from voicerender.cli import main
+
+    profile = RenderProfile(
+        roles={"narrator": RoleProfile(language="en-US", binding=dict(_BINDING))},
+        default_role="narrator",
+    ).with_identity()
+    profile_id = profile.profile_id or profile.computed_id()
+    parent_plan = replace(
+        _plan("stable exact request", "parent text to split"),
+        render_profile_id=profile_id,
+        plan_id=None,
+    ).with_identity()
+
+    workspace = tmp_path / "replan-book"
+    fingerprint = profile_id.removeprefix("sha256:")[:12]
+    variant = f"narration--{fingerprint}"
+    variant_dir = workspace / "renderplan" / variant
+    variant_dir.mkdir(parents=True)
+    save_profile(profile, variant_dir / "renderprofile.toml")
+    plan_name = "chapter-0001.renderplan.toml"
+    plan_path = variant_dir / plan_name
+    save_plan(parent_plan, plan_path)
+    chapter = RenderPlanSetChapter(
+        id="chapter-0001",
+        source_number=1,
+        source="../../chapter-0001.md",
+        utterplan="../../utterplan/chapter-0001.toml",
+        source_plan_id=parent_plan.source_plan_id,
+        renderplan=plan_name,
+        render_plan_id=parent_plan.plan_id or parent_plan.computed_id(),
+    )
+    renderplan_set_path = variant_dir / "renderplan-set.toml"
+    save_renderplan_set(
+        renderplan_set_path,
+        RenderPlanSet(
+            variant="narration",
+            profile_fingerprint=fingerprint,
+            producer_version="test",
+            manifest="../../book.json",
+            utterplan_dir="../../utterplan",
+            profile_id=profile_id,
+            snapshot="renderprofile.toml",
+            source_profile="../../narration.renderprofile.toml",
+            chapters=(chapter,),
+        ),
+    )
+
+    output_root = tmp_path / "output"
+    cache_dir = tmp_path / "cache"
+    baseline = render_book(
+        workspace,
+        variant=variant,
+        speech="1",
+        output_root=output_root,
+        cache_dir=cache_dir,
+    )
+    assert baseline.outcomes[0].status == "partial"
+    assert adapter.synthesized_texts == ["stable exact request"]
+    cache_before = {path.name for path in cache_dir.iterdir()}
+    chapter_output = baseline.outcomes[0].output_dir
+    (chapter_output / "keep.txt").write_text("user data", encoding="utf-8")
+    (chapter_output / "preflight.toml").unlink()
+    adapter.measurements["parent text to split"] = RequestMeasure(
+        fits=False,
+        amount=101,
+        maximum=100,
+        unit="model_tokens",
+        source="fake.frontend_measure",
+    )
+
+    blocked = render_book(
+        workspace,
+        variant=variant,
+        output_root=output_root,
+        cache_dir=cache_dir,
+    )
+    assert blocked.outcomes[0].error_code == "preflight.replan"
+    assert blocked.outcomes[0].replan_required is True
+    assert blocked.outcomes[0].preflight_report == chapter_output / "preflight.toml"
+    assert load_preflight(chapter_output / "preflight.toml").status == "replan"
+    assert load_manifest(chapter_output / "render-manifest.toml").render_plan_id == parent_plan.plan_id
+    assert adapter.synthesized_texts == ["stable exact request"]
+
+    split_source = parent_plan.speech[1]
+    child_parts = tuple(
+        replace(
+            split_source,
+            number=number,
+            text=text,
+            source=(replace(split_source.source[0], end=len(text)),),
+            segment_id=None,
+        )
+        for number, text in (
+            (1, "split child part one"),
+            (2, "split child part two"),
+        )
+    )
+    stable_request = replace(parent_plan.speech[0], number=3)
+    child_plan = replace(
+        parent_plan,
+        flow=(*child_parts, stable_request),
+        plan_id=None,
+    ).with_identity()
+    save_plan(child_plan, plan_path)
+    active_set = load_renderplan_set(renderplan_set_path)
+    save_renderplan_set(
+        renderplan_set_path,
+        replace(
+            active_set,
+            chapters=(
+                replace(
+                    active_set.chapters[0],
+                    source_plan_id=child_plan.source_plan_id,
+                    render_plan_id=child_plan.plan_id or child_plan.computed_id(),
+                ),
+            ),
+        ),
+    )
+
+    exit_code = main(
+        [
+            "render-book",
+            str(workspace),
+            "--variant",
+            variant,
+            "--output-root",
+            str(output_root),
+            "--cache-dir",
+            str(cache_dir),
+            "--reset-stale",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    item = payload["items"][0]
+    assert exit_code == 0
+    assert item["status"] == "complete"
+    assert item["rendered"] == 2
+    assert item["reused"] == 1
+    assert item["replan_required"] is False
+    assert load_manifest(chapter_output / "render-manifest.toml").render_plan_id == child_plan.plan_id
+    child_preflight = load_preflight(chapter_output / "preflight.toml")
+    assert child_preflight.render_plan_id == child_plan.plan_id
+    assert child_preflight.status == "ok"
+    assert (chapter_output / "keep.txt").read_text(encoding="utf-8") == "user data"
+    assert cache_before.issubset({path.name for path in cache_dir.iterdir()})
+    assert adapter.synthesized_texts == [
+        "stable exact request",
+        "split child part one",
+        "split child part two",
+    ]

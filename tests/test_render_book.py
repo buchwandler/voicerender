@@ -201,11 +201,12 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         output_dir: str | Path,
         cache_dir: str | Path | None = None,
         force: bool = False,
+        reset_stale_output: bool = False,
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
     ) -> RenderPlanResult:
-        del cache_dir, recheck_report_path
+        del cache_dir, recheck_report_path, reset_stale_output
         policy_calls.append(f"render:{emphasis_policy.value}")
         selected = (
             tuple(plan.speech)
@@ -464,6 +465,95 @@ def test_partial_windows_accumulate_and_later_full_selection_finishes_chapter(
     assert len(calls["preflight"]) == 1
 
 
+@pytest.mark.parametrize(
+    ("status", "check_status", "error_code", "replan_required"),
+    (
+        ("replan", "too_long", "preflight.replan", True),
+        ("reject", "error", "preflight.reject", False),
+    ),
+)
+def test_book_preserves_initial_preflight_report_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    status: str,
+    check_status: str,
+    error_code: str,
+    replan_required: bool,
+) -> None:
+    calls = _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path, chapters=((5, 1),))
+
+    def initial_preflight(
+        plan: RenderPlan,
+        path: str | Path,
+        *,
+        emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+    ) -> PreflightReport:
+        del emphasis_policy
+        speech = plan.speech[0]
+        segment_id = speech.segment_id or speech.computed_id()
+        check = PreflightCheck(
+            segment_number=speech.number,
+            segment_id=segment_id,
+            status=check_status,
+            metric="model_tokens",
+            measured=101,
+            maximum=100,
+            source="test.initial_measurement",
+        )
+        requests = ()
+        if status == "replan":
+            requests = (
+                ReplanRequest(
+                    segment_number=speech.number,
+                    segment_id=segment_id,
+                    source=speech.source,
+                    current_level=speech.planning_level,
+                    action="split",
+                    reason="capacity",
+                    metric="model_tokens",
+                    measured=101,
+                    maximum=100,
+                ),
+            )
+        report = PreflightReport(
+            render_plan_id=plan.plan_id or plan.computed_id(),
+            source_plan_id=plan.source_plan_id,
+            render_profile_id=plan.render_profile_id,
+            status=status,
+            checks=(check,),
+            replan=requests,
+            producer=Producer(name="voicerender", version="test"),
+        ).with_identity()
+        save_preflight(report, path)
+        return report
+
+    monkeypatch.setattr(book_module, "preflight_render_plan", initial_preflight)
+    result = book_module.render_book(workspace, variant=variant)
+    outcome = result.outcomes[0]
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == error_code
+    assert outcome.replan_required is replan_required
+    assert outcome.preflight_report == outcome.output_dir / "preflight.toml"
+    assert outcome.preflight_report.is_file()
+    assert calls["render"] == []
+
+    item = result.to_dict()["items"][0]
+    assert item["replan_required"] is replan_required
+    assert item["preflight_report"] == "chapter-0005/preflight.toml"
+    report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["item"][0]["replan_required"] is replan_required
+    assert report["item"][0]["preflight_report"] == "chapter-0005/preflight.toml"
+
+    from voicerender.cli import _print_book_result
+
+    _print_book_result(result)
+    label = "replan report" if replan_required else "preflight report"
+    assert f"{label}: {outcome.preflight_report}" in capsys.readouterr().out
+
+
 def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -478,6 +568,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
         output_dir: str | Path,
         cache_dir: str | Path | None = None,
         force: bool = False,
+        reset_stale_output: bool = False,
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
@@ -488,6 +579,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
             output_dir=output_dir,
             cache_dir=cache_dir,
             force=force,
+            reset_stale_output=reset_stale_output,
             recheck_report_path=recheck_report_path,
             speech_numbers=speech_numbers,
             emphasis_policy=emphasis_policy,
@@ -540,6 +632,9 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
     assert outcome.error_code == "preflight.replan"
     assert outcome.recheck_report is not None
     assert outcome.recheck_report.name == "preflight-recheck.toml"
+    assert outcome.preflight_report == outcome.recheck_report
+    assert outcome.preflight_report.name == "preflight-recheck.toml"
+    assert outcome.replan_required is True
     fresh = book_module.load_preflight(outcome.recheck_report)
     assert fresh.status == "replan"
     assert fresh.render_plan_id == outcome.render_plan_id
@@ -552,6 +647,16 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
     ]
     report = tomllib.loads(rendered.report_path.read_text(encoding="utf-8"))
     assert report["item"][0]["error_code"] == "preflight.replan"
+    assert report["item"][0]["replan_required"] is True
+    assert report["item"][0]["preflight_report"] == (
+        "chapter-0005/preflight-recheck.toml"
+    )
+    assert report["item"][0]["recheck_report"] == (
+        "chapter-0005/preflight-recheck.toml"
+    )
+    payload_item = rendered.to_dict()["items"][0]
+    assert payload_item["replan_required"] is True
+    assert payload_item["preflight_report"] == "chapter-0005/preflight-recheck.toml"
     assert report["item"][0]["recheck_report"] == (
         "chapter-0005/preflight-recheck.toml"
     )

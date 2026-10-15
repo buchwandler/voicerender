@@ -90,6 +90,7 @@ class BookRenderRequest:
     speech_selector: str
     render_profile_id: str
     _loaded_chapters: tuple[_LoadedChapter, ...]
+    reset_stale_output: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,8 @@ class ChapterRenderOutcome:
     execution_fingerprint: tuple[dict[str, Any], ...] = ()
     pending_composition: bool = False
 
+    preflight_report: Path | None = None
+    replan_required: bool = False
 
 @dataclass(frozen=True, slots=True)
 class BookRenderResult:
@@ -224,6 +227,7 @@ def render_book(
     output_root: str | Path | None = None,
     cache_dir: str | Path | None = None,
     force: bool = False,
+    reset_stale_output: bool = False,
     fail_fast: bool = False,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
 ) -> BookRenderResult:
@@ -243,6 +247,7 @@ def render_book(
         output_root=output_root,
         cache_dir=cache_dir,
         force=force,
+        reset_stale_output=reset_stale_output,
         fail_fast=fail_fast,
         emphasis_policy=resolved_emphasis_policy,
     )
@@ -281,6 +286,7 @@ def _resolve_request(
     output_root: str | Path | None,
     cache_dir: str | Path | None,
     force: bool,
+    reset_stale_output: bool,
     fail_fast: bool,
     emphasis_policy: EmphasisPolicy,
 ) -> BookRenderRequest:
@@ -461,6 +467,7 @@ def _resolve_request(
         speech_selector=speech_selector,
         render_profile_id=profile_id,
         _loaded_chapters=tuple(loaded_chapters),
+        reset_stale_output=reset_stale_output,
     )
 
 
@@ -532,6 +539,8 @@ def _render_chapter(
             selected,
             code,
             f"RenderPlan preflight status is {preflight.status!r}",
+            preflight_report=preflight_path,
+            replan_required=preflight.status == "replan",
         )
 
     try:
@@ -542,6 +551,7 @@ def _render_chapter(
             output_dir=chapter.output_dir,
             cache_dir=request.cache_dir,
             force=request.force,
+            reset_stale_output=request.reset_stale_output,
             recheck_report_path=recheck_report_path,
             speech_numbers=chapter.speech_numbers,
             emphasis_policy=request.emphasis_policy,
@@ -583,6 +593,13 @@ def _render_chapter(
         ),
         execution_fingerprint=result.execution_fingerprint,
         pending_composition=result.pending_composition,
+        preflight_report=(
+            recheck_report_path if result.fresh_preflight is not None else None
+        ),
+        replan_required=(
+            result.fresh_preflight is not None
+            and result.fresh_preflight.status == "replan"
+        ),
     )
 
 
@@ -817,6 +834,8 @@ def _failure_outcome(
     error_message: str,
     *,
     manifest: Path | None = None,
+    preflight_report: Path | None = None,
+    replan_required: bool = False,
 ) -> ChapterRenderOutcome:
     return ChapterRenderOutcome(
         index=index,
@@ -834,7 +853,10 @@ def _failure_outcome(
         reused=0,
         error_code=error_code,
         error_message=error_message,
+        preflight_report=preflight_report,
+        replan_required=replan_required,
     )
+
 
 
 def _skipped_outcome(chapter: _LoadedChapter, index: int) -> ChapterRenderOutcome:
@@ -880,9 +902,14 @@ def _outcome_to_dict(
         "reused": outcome.reused,
         "manifest_complete": outcome.manifest_complete,
         "pending_composition": outcome.pending_composition,
+        "replan_required": outcome.replan_required,
     }
     if outcome.manifest is not None:
         item["manifest"] = _relative_posix(outcome.manifest, output_variant_dir)
+    if outcome.preflight_report is not None:
+        item["preflight_report"] = _relative_posix(
+            outcome.preflight_report, output_variant_dir
+        )
     if outcome.recheck_report is not None:
         item["recheck_report"] = _relative_posix(
             outcome.recheck_report, output_variant_dir

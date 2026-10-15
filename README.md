@@ -148,7 +148,18 @@ voicerender render-book "Novel.ssmdbook" \
   --variant "narration--<profile-id-prefix>" --chapters 5
 ```
 
-A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, `--force`, and `--json` support alternate roots, deliberate reset, and automation.
+A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, and `--json` support alternate roots and automation. `--reset-stale` lets a rerun accept output whose manifest belongs to a different RenderPlan: it removes only VoiceRender-owned chapter artifacts and keeps the external cache available for verified exact-request reuse. `--force` is stronger: it synthesizes every selected request and bypasses cache.
+
+
+When a chapter fails with `preflight.replan`, VoiceRender stops before synthesizing requests under that plan and exposes the persisted report path. The chapter outcome includes `preflight_report` and `replan_required`; runtime immediate rechecks point to `preflight-recheck.toml` (also available as the compatibility field `recheck_report`). The JSON output and `voicerender-report.toml` include these fields, and human output prints the report path. Use the report with your planning tool to activate a child RenderPlan, then rerun VoiceRender with `--reset-stale`:
+
+```bash
+voicerender render-book "Novel.ssmdbook" \
+  --variant "narration--<profile-id-prefix>" \
+  --chapters 5 --reset-stale
+```
+
+The reset does not delete `.voicerender-cache`; unchanged exact renderer requests can be restored from verified cache entries, while new child requests are synthesized normally. `render`/`render-book` and the `render_renderplan()`/`render_book()` APIs accept `reset_stale_output=True`. VoiceRender reports the replan handoff but does not invoke the planner or generate child plans.
 
 By default, output is kept separate from the RenderPlan inputs:
 
@@ -160,6 +171,7 @@ Novel.ssmdbook/
     ├── .voicerender-cache/
     └── chapter-0005/
         ├── preflight.toml                 # whole-chapter preflight
+        ├── preflight-recheck.toml           # runtime immediate capacity recheck, if any
         ├── render-manifest.toml            # cumulative verified artifacts
         ├── render-diagnostics.json          # deferred controls, if any, remain pending composition
         ├── 000001.wav
