@@ -10,6 +10,13 @@ from renderplan import (
     SpeechItem,
 )
 
+from .book import (
+    BookRenderError,
+    BookRenderRequest,
+    BookRenderResult,
+    ChapterRenderOutcome,
+    render_book,
+)
 from .engines.api_probe import EngineApiProbe
 from .engines.base import (
     EngineAdapter,
@@ -88,8 +95,12 @@ except PackageNotFoundError:
 
 __all__ = [
     "ArtifactError",
+    "BookRenderError",
+    "BookRenderRequest",
+    "BookRenderResult",
     "CatalogRequest",
     "CatalogResult",
+    "ChapterRenderOutcome",
     "EngineAdapter",
     "EngineApiIncompatibleError",
     "EngineApiProbe",
@@ -149,6 +160,7 @@ __all__ = [
     "preflight_render_plan",
     "refresh_render_profile",
     "render",
+    "render_book",
     "render_plan",
     "render_renderplan",
     "resolve_reference_audio",

@@ -10,6 +10,13 @@ from pathlib import Path
 from renderplan import RenderPlan, SourceSpan, SpeechItem, load_manifest
 
 import voicerender
+from voicerender import (
+    BookRenderError,
+    BookRenderRequest,
+    BookRenderResult,
+    ChapterRenderOutcome,
+    render_book,
+)
 from voicerender.engines.api_probe import EngineApiProbe
 from voicerender.engines.base import (
     EngineCapabilities,
@@ -164,6 +171,22 @@ def main() -> None:
 
     work = Path.cwd() / "voicerender-wheel-smoke"
     shutil.rmtree(work, ignore_errors=True)
+
+    assert BookRenderError.__module__ == "voicerender.book_contract"
+    assert (
+        BookRenderRequest.__module__
+        == BookRenderResult.__module__
+        == ChapterRenderOutcome.__module__
+        == "voicerender.book"
+    )
+    book_workspace = work / "book-workspace"
+    (book_workspace / "renderplan").mkdir(parents=True)
+    try:
+        render_book(book_workspace, variant="missing")
+    except BookRenderError as exc:
+        assert exc.code == "variant.not_found"
+    else:
+        raise AssertionError("render_book accepted a missing variant")
     report = preflight_render_plan(plan, work / "preflight.toml")
     assert report.status == "ok"
     result = render_renderplan(

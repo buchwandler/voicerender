@@ -36,9 +36,20 @@ from renderplan import (
 )
 
 import voicerender.book as book_module
+from voicerender import (
+    BookRenderError,
+    BookRenderRequest,
+    BookRenderResult,
+    ChapterRenderOutcome,
+    render_book,
+)
 from voicerender.book_contract import load_renderplan_set
 from voicerender.errors import ArtifactError
-from voicerender.renderplan_render import RENDER_MANIFEST_FILENAME, RenderPlanResult
+from voicerender.renderplan_render import (
+    RENDER_DIAGNOSTICS_FILENAME,
+    RENDER_MANIFEST_FILENAME,
+    RenderPlanResult,
+)
 from voicerender.storage import atomic_wav
 
 
@@ -250,6 +261,36 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         ).with_identity()
         manifest.validate_against(plan)
         save_manifest(manifest, manifest_path)
+        pending_composition = (
+            emphasis_policy is book_module.EmphasisPolicy.DEFER_TO_COMPOSE
+            and any(
+                control.name == "emphasis"
+                for item in plan.speech
+                for control in item.controls
+            )
+        )
+        if pending_composition:
+            diagnostics = {
+                "schema": "voicerender.render-diagnostics.v1",
+                "render_plan_id": plan.plan_id or plan.computed_id(),
+                "emphasis_policy": emphasis_policy.value,
+                "pending_composition": True,
+                "deferred_controls": [
+                    {
+                        "capability": book_module.EMPHASIS_COMPOSITION_CAPABILITY,
+                        "segment_number": item.number,
+                        "segment_id": item.segment_id or item.computed_id(),
+                        "count": sum(
+                            control.name == "emphasis" for control in item.controls
+                        ),
+                    }
+                    for item in plan.speech
+                    if any(control.name == "emphasis" for control in item.controls)
+                ],
+            }
+            (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
+                json.dumps(diagnostics), encoding="utf-8"
+            )
         selected_keys = {
             (item.number, item.segment_id or item.computed_id()) for item in selected
         }
@@ -262,14 +303,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             rendered_count=rendered,
             reused_count=reused,
             selection_complete=selected_keys.issubset(set(artifacts)),
-            pending_composition=(
-                emphasis_policy is book_module.EmphasisPolicy.DEFER_TO_COMPOSE
-                and any(
-                    control.name == "emphasis"
-                    for item in plan.speech
-                    for control in item.controls
-                )
-            ),
+            pending_composition=pending_composition,
         )
 
     monkeypatch.setattr(book_module, "preflight_render_plan", preflight)
@@ -285,9 +319,14 @@ def test_book_propagates_explicit_emphasis_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls = _install_fake_execution(monkeypatch)
+    assert render_book is book_module.render_book
+    assert BookRenderError is book_module.BookRenderError
+    assert BookRenderRequest is book_module.BookRenderRequest
+    assert BookRenderResult is book_module.BookRenderResult
+    assert ChapterRenderOutcome is book_module.ChapterRenderOutcome
     workspace, variant = _book(tmp_path)
 
-    result = book_module.render_book(
+    result = render_book(
         workspace, variant=variant, emphasis_policy="defer-to-compose"
     )
 
@@ -326,6 +365,15 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
 
     first = book_module.render_book(workspace, variant=variant)
     assert first.exit_code == 0
+    assert first.workspace == workspace.resolve()
+    assert first.variant == variant
+    assert first.output_variant_dir == workspace / "voicerender" / variant
+    assert first.report_path == first.output_variant_dir / book_module.BOOK_REPORT_FILENAME
+    assert first.requested == 3
+    assert first.written == sum(outcome.rendered for outcome in first.outcomes) == 6
+    assert first.reused == sum(outcome.reused for outcome in first.outcomes) == 0
+    assert first.failed == first.skipped == 0
+    assert first.success is True
     assert [item.id for item in first.outcomes] == [
         "chapter-0007",
         "chapter-0005",
@@ -351,6 +399,9 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
     second = book_module.render_book(workspace, variant=variant)
     assert second.exit_code == 0
     assert [item.status for item in second.outcomes] == ["reused"] * 3
+    assert second.written == 0
+    assert second.reused == 6
+    assert second.success is True
     assert len(calls["preflight"]) == 3
     assert len(calls["render"]) == 3
 
@@ -680,3 +731,101 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
     assert error_payload["code"] == "selection.invalid"
     assert error_payload["exit_code"] == 2
     assert len(calls["preflight"]) == 1
+
+
+
+def test_public_api_and_render_book_cli_have_behavioral_parity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_fake_execution(monkeypatch)
+    api_workspace, api_variant = _book(
+        tmp_path / "api", chapters=((5, 3), (7, 1)), emphasis_speech=2
+    )
+    cli_workspace, cli_variant = _book(
+        tmp_path / "cli", chapters=((5, 3), (7, 1)), emphasis_speech=2
+    )
+    assert api_variant == cli_variant
+
+    import voicerender.cli as cli_module
+    from voicerender.cli import main
+
+    assert cli_module.render_book is render_book
+
+    def run_cli(*, force: bool) -> tuple[int, dict[str, Any]]:
+        args = [
+            "render-book",
+            str(cli_workspace),
+            "--variant",
+            cli_variant,
+            "--chapters",
+            "5",
+            "--speech",
+            "2-3",
+            "--emphasis-policy",
+            "defer-to-compose",
+            "--json",
+        ]
+        if force:
+            args.append("--force")
+        code = main(args)
+        return code, json.loads(capsys.readouterr().out)
+
+    def assert_parity(api_result: book_module.BookRenderResult, payload: dict[str, Any]) -> None:
+        assert payload["variant"] == api_result.variant == api_variant
+        assert payload["pending_composition"] is api_result.pending_composition is True
+        assert payload["emphasis_policy"] == "defer-to-compose"
+        assert payload["selection"] == {"chapters": "5", "speech": "2-3"}
+        assert len(api_result.outcomes) == len(payload["items"]) == 1
+        outcome = api_result.outcomes[0]
+        item = payload["items"][0]
+        assert outcome.id == item["id"] == "chapter-0005"
+        assert outcome.render_plan_id == item["render_plan_id"]
+        assert outcome.status == item["status"]
+        assert outcome.selected_speech == item["selected_speech"] == 2
+        assert outcome.pending_composition is item["pending_composition"] is True
+        assert api_result.written == item["rendered"]
+        assert api_result.reused == item["reused"]
+
+        api_report = tomllib.loads(api_result.report_path.read_text(encoding="utf-8"))
+        cli_report_path = (
+            cli_workspace
+            / "voicerender"
+            / cli_variant
+            / book_module.BOOK_REPORT_FILENAME
+        )
+        cli_report = tomllib.loads(cli_report_path.read_text(encoding="utf-8"))
+        assert api_report == cli_report
+
+        api_manifest = load_manifest(outcome.manifest)
+        cli_manifest = load_manifest(
+            cli_workspace
+            / "voicerender"
+            / cli_variant
+            / item["manifest"]
+        )
+        assert api_manifest.manifest_id == cli_manifest.manifest_id
+        assert api_manifest.render_plan_id == cli_manifest.render_plan_id
+        assert [artifact.segment_number for artifact in api_manifest.speech] == [2, 3]
+        assert [artifact.segment_number for artifact in cli_manifest.speech] == [2, 3]
+
+    for force, expected_status, expected_written, expected_reused in (
+        (False, "partial", 2, 0),
+        (False, "reused", 0, 2),
+        (True, "partial", 2, 0),
+    ):
+        api_result = render_book(
+            api_workspace,
+            variant=api_variant,
+            chapters="5",
+            speech="2-3",
+            force=force,
+            emphasis_policy="defer-to-compose",
+        )
+        cli_code, cli_payload = run_cli(force=force)
+        assert cli_code == api_result.exit_code == 0
+        assert api_result.outcomes[0].status == expected_status
+        assert api_result.written == expected_written
+        assert api_result.reused == expected_reused
+        assert_parity(api_result, cli_payload)

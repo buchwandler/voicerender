@@ -122,6 +122,25 @@ class BookRenderResult:
     outcomes: tuple[ChapterRenderOutcome, ...]
 
     @property
+    def workspace(self) -> Path:
+        return self.request.workspace
+
+    @property
+    def variant(self) -> str:
+        return self.request.variant_name
+
+    @property
+    def output_variant_dir(self) -> Path:
+        return self.request.output_variant_dir
+
+    @property
+    def written(self) -> int:
+        return sum(outcome.rendered for outcome in self.outcomes)
+
+    @property
+    def reused(self) -> int:
+        return sum(outcome.reused for outcome in self.outcomes)
+    @property
     def requested(self) -> int:
         return len(self.outcomes)
 
@@ -154,6 +173,10 @@ class BookRenderResult:
     @property
     def exit_code(self) -> int:
         return 1 if self.failed else 0
+
+    @property
+    def success(self) -> bool:
+        return self.exit_code == 0
 
     @property
     def pending_composition(self) -> bool:

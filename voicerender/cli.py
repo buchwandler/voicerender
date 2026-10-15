@@ -10,8 +10,12 @@ from typing import Any
 
 from renderplan import load_manifest, load_plan
 
-from . import __version__
-from .book import BookRenderError, BookRenderResult, render_book
+from . import (
+    BookRenderError,
+    BookRenderResult,
+    __version__,
+    render_book,
+)
 from .engines.registry import (
     discover_targets,
     engine_status,
