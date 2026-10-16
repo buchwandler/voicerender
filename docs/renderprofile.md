@@ -100,3 +100,57 @@ voicerender profile create \
 Kokoro selects enrollment based on the target's discovered capabilities. `engine = "auto"` chooses Inno for a static target advertising the `inno-v0.2` enroller and AkinVox for a reference-only target. Inno accepts optional `fmax` and no transcript. AkinVox requires a non-empty exact `reference_text` and currently supports English only. A profile may also set `voice_enrollment` explicitly to `inno` or `akinvox`; unsupported target/engine combinations fail validation.
 
 Preflight verifies local hashes and Voicefolio catalog metadata, then measures the request without fetching managed audio or enrolling/conditioning a voice. At synthesis time, the engine resolves the verified audio and lazily enrolls it; the enrolled voice is reused within that session. Canonical synthesis identity includes content/provenance pins, the selected enrollment engine/options, and the exact AkinVox transcript hash, but excludes local/cache paths and raw transcript text.
+
+## Qwen3Synth Base and VoiceDesign
+
+Qwen3Synth is an optional renderer. Install `voicerender[qwen3]` and install model bundles explicitly with ONNXVoice before using them:
+
+```bash
+python -m pip install "voicerender[qwen3]"
+onnxvoice install qwen3:voice-design-1.7b --quality int4
+onnxvoice install qwen3:base-0.6b --quality int4
+```
+
+VoiceDesign is a separate, explicit asset-generation operation. It creates one reference WAV from a fixed utterance and may write a source sidecar with the exact prompt, transcript, model/runtime identity, and generation settings:
+
+```bash
+voicerender voice design \
+  --prompt "A warm, calm narrator with clear diction." \
+  --text "This fixed sentence will be spoken by the designed voice." \
+  --language en \
+  --output narrator.wav \
+  --source-output narrator.voice-source.toml
+voicerender voice inspect narrator.voice-source.toml --json
+```
+
+The WAV SHA-256 defines the ordinary reference identity. Prompt and seed are provenance, not identity. Output is not overwritten unless `--force` is explicit. Protect both files as sensitive voice data. The sidecar contains the prompt and exact spoken text.
+
+Qwen Base accepts a pinned reference WAV with its exact transcript, or a prepared `.qvoice` profile. Prepare a Qwen-origin reference by reusing the transcript in its sidecar; arbitrary WAVs require an explicit transcript:
+
+```bash
+voicerender voice prepare-qwen \
+  --voice-source narrator.voice-source.toml \
+  --output narrator.qvoice
+voicerender voice inspect narrator.qvoice --json
+voicerender profile create \
+  --engine qwen3 --target base-0.6b --language en-US \
+  --prepared-voice narrator.qvoice \
+  --output qwen-narrator.renderprofile.toml
+```
+
+Alternatively, create a profile with `--reference-wav PATH` and `--option 'reference_text=Exact words spoken.'`, or supply a verified source sidecar with `--voice-source PATH`. `.qvoice` uses the `qwen3.qvoice.v2` prepared format and its complete-file SHA-256 defines prepared-voice identity. Only the Qwen adapter accepts this format initially. Profile creation and validation inspect pins and metadata, they do not generate or prepare voices. Qwen operations use installed assets only; install them with `onnxvoice install` rather than expecting implicit acquisition.
+
+### Copying a designed WAV to PocketSynth
+
+On a weaker machine, install PocketSynth and create a fresh local profile from the copied WAV:
+
+```bash
+python -m pip install "voicerender[pocket]"
+voicerender voices list --engine pocket --offline
+voicerender profile create \
+  --engine pocket --target <pocket-target> --language en-US \
+  --reference-wav ./narrator.wav \
+  --output pocket-narrator.renderprofile.toml
+```
+
+The new profile computes a local content pin for the copied bytes. Do not reuse the creator's local RenderProfile or sidecar unchanged, since its absolute path points to the creator's machine. PocketSynth consumes the pinned WAV without importing or requiring Qwen3Synth. Qwen prompt and runtime provenance are not execution dependencies. If retaining that provenance matters, keep the protected source sidecar with the original asset records; the profile remains machine-local.

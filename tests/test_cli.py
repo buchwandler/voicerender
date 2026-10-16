@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -171,6 +173,26 @@ def test_profile_create_reference_arguments_are_mutually_exclusive() -> None:
             ]
         )
 
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "profile",
+                "create",
+                "--engine",
+                "qwen3",
+                "--target",
+                "base-0.6b",
+                "--language",
+                "en-US",
+                "--prepared-voice",
+                "speaker.qvoice",
+                "--voice-source",
+                "source.toml",
+                "--output",
+                "profile.toml",
+            ]
+        )
+
 
 def test_cli_profile_create_reference_wav_persists_computed_pin(
     monkeypatch, tmp_path: Path
@@ -266,3 +288,337 @@ def test_cli_profile_create_voicefolio_ref_uses_full_pinned_source(
 
     assert result == 0
     assert captured["voice_source"] == source
+
+
+def _qwen_origin() -> dict[str, object]:
+    return {
+        "schema": "voicerender.voice-origin.qwen3-design.v1",
+        "generator": "qwen3",
+        "target_id": "voice-design-1.7b",
+        "model_revision": "design-revision",
+        "qwen3synth_version": "0.1.0",
+        "onnxvoice_version": "0.1.0",
+        "prompt": "Warm, measured voice.",
+        "reference_text": "  This exact sample.  ",
+        "language": "en",
+        "quality": "int4",
+        "provider": "cpu",
+        "temperature": 0.9,
+        "top_k": 50,
+        "repetition_penalty": 1.05,
+        "max_new_tokens": 128,
+        "seed": 42,
+    }
+
+
+def _write_qwen_source(tmp_path: Path):
+    from voicerender.voice_source_codec import save_voice_source
+    from voicerender.voice_sources import local_reference_source
+
+    reference = tmp_path / "designed.wav"
+    reference.write_bytes(b"pinned reference")
+    source = local_reference_source(reference)
+    source["origin"] = _qwen_origin()
+    sidecar = tmp_path / "designed.voice-source.toml"
+    save_voice_source(source, sidecar)
+    return source, reference, sidecar
+
+
+def test_cli_profile_create_preserves_source_sidecar_and_rejects_output_collision(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from voicerender import cli
+    from voicerender.voice_source_codec import load_voice_source
+
+    source, _, sidecar = _write_qwen_source(tmp_path)
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(profile_id="profile-3")
+        ),
+    )
+    monkeypatch.setattr(cli, "save_render_profile", lambda profile, path: path)
+    monkeypatch.setattr(
+        cli,
+        "design_qwen3_reference",
+        lambda *args, **kwargs: pytest.fail(
+            "profile creation must not generate a voice"
+        ),
+    )
+
+    result = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "pocket",
+            "--target",
+            "pocket-test",
+            "--language",
+            "en-US",
+            "--voice-source",
+            str(sidecar),
+            "--output",
+            str(tmp_path / "pocket.renderprofile.toml"),
+            "--json",
+        ]
+    )
+    assert result == 0
+    assert captured["voice_source"] == load_voice_source(sidecar) == source
+
+    result = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "pocket",
+            "--target",
+            "pocket-test",
+            "--language",
+            "en-US",
+            "--voice-source",
+            str(sidecar),
+            "--output",
+            str(sidecar),
+        ]
+    )
+    assert result == 1
+    assert "must not overwrite" in capsys.readouterr().err
+
+
+def test_cli_prepared_voice_profile_inspects_without_opening_runtime(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    prepared = tmp_path / "speaker.qvoice"
+    prepared.write_bytes(b"qvoice bytes")
+    info = SimpleNamespace(
+        model_id="wavekat/base-0.6b",
+        model_revision="base-revision",
+        layout="qwen3-wavekat-v1",
+    )
+    fake_module = SimpleNamespace(
+        inspect_voice_profile=lambda path: info,
+        Qwen3Runtime=SimpleNamespace(
+            from_installed=lambda *args, **kwargs: pytest.fail(
+                "profile creation must not open a runtime"
+            )
+        ),
+    )
+    monkeypatch.setattr(cli, "_qwen3_module", lambda: fake_module)
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(profile_id="qwen-profile")
+        ),
+    )
+    monkeypatch.setattr(cli, "save_render_profile", lambda profile, path: path)
+
+    result = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "qwen3",
+            "--target",
+            "base-0.6b",
+            "--language",
+            "en-US",
+            "--prepared-voice",
+            str(prepared),
+            "--output",
+            str(tmp_path / "qwen.renderprofile.toml"),
+        ]
+    )
+
+    assert result == 0
+    assert captured["voice_source"] == {
+        "kind": "prepared",
+        "format": "qwen3.qvoice.v2",
+        "value": str(prepared.resolve()),
+        "sha256": __import__("hashlib").sha256(b"qvoice bytes").hexdigest(),
+        "model_id": info.model_id,
+        "model_revision": info.model_revision,
+        "layout": info.layout,
+    }
+
+
+def test_cli_prepare_qwen_reuses_exact_origin_transcript(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from types import ModuleType, SimpleNamespace
+
+    from voicerender import cli
+
+    _, _, sidecar = _write_qwen_source(tmp_path)
+    events = []
+
+    class FakePrepared:
+        model_id = "wavekat/base-0.6b"
+        model_revision = "base-revision"
+        layout = "qwen3-wavekat-v1"
+
+        def save(self, path: Path) -> None:
+            path.write_bytes(b"prepared qvoice")
+
+    class FakeRuntime:
+        @classmethod
+        def from_installed(cls, target_id: str, **kwargs):
+            events.append(("open", target_id, kwargs))
+            return cls()
+
+        def prepare_voice(self, reference):
+            events.append(("prepare", reference))
+            return FakePrepared()
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    module = ModuleType("qwen3synth")
+    module.__version__ = "0.1.0"
+    module.Qwen3Runtime = FakeRuntime
+    module.ReferenceVoice = lambda **kwargs: SimpleNamespace(**kwargs)
+    monkeypatch.setattr(cli, "_qwen3_module", lambda: module)
+    output = tmp_path / "prepared.qvoice"
+
+    result = cli.main(
+        [
+            "voice",
+            "prepare-qwen",
+            "--voice-source",
+            str(sidecar),
+            "--output",
+            str(output),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert (
+        payload["sha256"]
+        == __import__("hashlib").sha256(b"prepared qvoice").hexdigest()
+    )
+    assert [event[0] for event in events] == ["open", "prepare", "close"]
+    reference = events[1][1]
+    assert reference.transcript == "  This exact sample.  "
+    assert reference.language == "en"
+    assert reference.source_id
+
+
+def test_cli_prepare_qwen_rejects_arbitrary_wav_without_transcript(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from voicerender import cli
+
+    reference = tmp_path / "arbitrary.wav"
+    reference.write_bytes(b"audio without a transcript")
+    monkeypatch.setattr(
+        cli,
+        "_qwen3_module",
+        lambda: pytest.fail("runtime must not open without an exact transcript"),
+    )
+
+    result = cli.main(
+        [
+            "voice",
+            "prepare-qwen",
+            "--reference",
+            str(reference),
+            "--output",
+            str(tmp_path / "prepared.qvoice"),
+        ]
+    )
+
+    assert result == 1
+    assert "requires --transcript" in capsys.readouterr().err
+
+
+def test_cli_voice_inspect_handles_source_sidecar_and_qvoice(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    source, _, sidecar = _write_qwen_source(tmp_path)
+    result = cli.main(["voice", "inspect", str(sidecar), "--json"])
+    assert result == 0
+    source_payload = __import__("json").loads(capsys.readouterr().out)
+    assert source_payload["voice_source"] == source
+
+    profile = tmp_path / "speaker.qvoice"
+    profile.write_bytes(b"qvoice bytes")
+    info = SimpleNamespace(
+        profile_sha256="c" * 64,
+        model_id="wavekat/base-0.6b",
+        model_revision="base-revision",
+        layout="qwen3-wavekat-v1",
+        language="en",
+        reference_samples=24_000,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_qwen3_module",
+        lambda: SimpleNamespace(inspect_voice_profile=lambda path: info),
+    )
+    result = cli.main(["voice", "inspect", str(profile), "--json"])
+    assert result == 0
+    profile_payload = __import__("json").loads(capsys.readouterr().out)
+    assert profile_payload["kind"] == "prepared"
+    assert profile_payload["sha256"] == info.profile_sha256
+    assert profile_payload["model_id"] == info.model_id
+
+
+def test_cli_voice_design_preserves_recipe_text(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    captured = {}
+    output = tmp_path / "designed.wav"
+    monkeypatch.setattr(
+        cli,
+        "design_qwen3_reference",
+        lambda recipe, path, **kwargs: (
+            captured.update(recipe=recipe, path=path, options=kwargs)
+            or SimpleNamespace(
+                path=path,
+                sha256="a" * 64,
+                source={"kind": "reference"},
+                model_id="wavekat/voice-design-1.7b",
+                runtime_identity={"engine": "qwen3synth"},
+            )
+        ),
+    )
+
+    result = cli.main(
+        [
+            "voice",
+            "design",
+            "--prompt",
+            " Warm voice. ",
+            "--text",
+            "  Exact reference text.  ",
+            "--output",
+            str(output),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    assert captured["recipe"].prompt == " Warm voice. "
+    assert captured["recipe"].reference_text == "  Exact reference text.  "
+    assert captured["path"] == output
+    assert "runtime_identity" in __import__("json").loads(capsys.readouterr().out)

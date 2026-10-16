@@ -9,9 +9,14 @@ from renderplan import (
     CapacityConstraint,
     PausePolicy,
     PlanningPolicy,
+    RenderPlan,
     RenderProfile,
     RoleProfile,
     RoleRequirements,
+    SourceSpan,
+    SpeechItem,
+    load_plan,
+    save_plan,
 )
 
 from voicerender.engines.api_probe import EngineApiProbe
@@ -221,6 +226,75 @@ def test_profile_creation_accepts_content_pinned_local_reference(
             voice="voice-a",
             voice_source=source,
         )
+
+
+def test_qwen_origin_survives_profile_and_renderplan_projection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _install(monkeypatch)
+    reference = tmp_path / "designed.wav"
+    reference.write_bytes(b"materialized voice design")
+    source = local_reference_source(reference)
+    source["origin"] = {
+        "schema": "voicerender.voice-origin.qwen3-design.v1",
+        "generator": "qwen3",
+        "target_id": "voice-design-1.7b",
+        "model_revision": "revision-1",
+        "qwen3synth_version": "0.1.0",
+        "onnxvoice_version": "0.1.0",
+        "prompt": "A calm speaking voice.",
+        "reference_text": "This exact generated sample.",
+        "language": "en",
+        "quality": "int4",
+        "provider": "cpu",
+        "temperature": 0.9,
+        "top_k": 50,
+        "repetition_penalty": 1.05,
+        "max_new_tokens": 128,
+        "seed": 11,
+        "model_id": "wavekat/voice-design-1.7b",
+        "runtime_identity": {
+            "engine": "qwen3synth",
+            "engine_version": "0.1.0",
+            "request_api_version": 1,
+            "onnxvoice_version": "0.1.0",
+            "layouts": ["qwen3-wavekat-v1"],
+            "sample_rate": 24000,
+        },
+    }
+
+    profile = create_render_profile(
+        engine="profile-test",
+        target_id="target-v1",
+        language="en-US",
+        voice_source=source,
+    )
+    profile_path = tmp_path / "narrator.renderprofile.toml"
+    save_render_profile(profile, profile_path)
+    loaded_profile = load_render_profile(profile_path)
+    assert loaded_profile.roles["narrator"].binding["options"]["voice_source"] == source
+
+    text = "A sentence using the designed voice."
+    plan = RenderPlan(
+        source_plan_id="sha256:" + "1" * 64,
+        render_profile_id=profile.profile_id,
+        flow=(
+            SpeechItem(
+                number=1,
+                text=text,
+                language="en-US",
+                role="narrator",
+                binding=loaded_profile.roles["narrator"].binding,
+                source=(SourceSpan(locator="source", start=0, end=len(text)),),
+                planning_level="sentence",
+                preflight_required=True,
+            ),
+        ),
+    ).with_identity()
+    plan_path = tmp_path / "narration.renderplan.toml"
+    save_plan(plan, plan_path)
+    loaded_plan = load_plan(plan_path)
+    assert loaded_plan.speech[0].binding["options"]["voice_source"] == source
 
 
 def test_profile_validation_rejects_reference_audio_from_imported_profile(

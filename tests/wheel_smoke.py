@@ -7,6 +7,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import resources
+from importlib.util import find_spec
 from pathlib import Path
 
 from renderplan import RenderPlan, SourceSpan, SpeechItem, load_manifest
@@ -154,16 +155,22 @@ def main() -> None:
         "kokoro",
         "piper",
         "pocket",
+        "qwen3",
         "sopro",
         "supertonic",
     }
-    assert {item["id"] for item in list_engines()} == expected_engine_ids
+    assert find_spec("qwen3synth") is None
+    listed_engines = list_engines()
+    assert {item["id"] for item in listed_engines} == expected_engine_ids
+    by_id = {item["id"]: item for item in listed_engines}
+    assert by_id["qwen3"]["installed"] is False
     engine_sdks = {
         "inflectsynth",
         "kittensynth",
         "pykokoro",
         "pipersynth",
         "pocketsynth",
+        "qwen3synth",
         "soprosynth",
         "supertonicsynth",
     }

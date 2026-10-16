@@ -27,6 +27,7 @@ piper = ["pipersynth>=0.2.5,<0.3"]
 pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
 sopro = ["soprosynth[cpu]>=0.1.0,<0.2"]
 supertonic = ["supertonicsynth[cpu]>=0.1.2,<0.2"]
+qwen3 = ["qwen3synth[cpu]>=0.1.0,<0.2"]
 dev = [
   "build>=1.2",
   "mypy>=1.13",
@@ -73,6 +74,7 @@ module = [
   "pocketsynth",
   "pykokoro",
   "soprosynth",
+  "qwen3synth",
   "soundfile",
   "supertonicsynth",
   "renderplan",

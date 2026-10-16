@@ -14,7 +14,11 @@ from voicerender.engines.catalog import CatalogRequest
 from voicerender.engines.registry import normalize_engine_id
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineSelectionError, InvalidEngineVoiceError
-from voicerender.voice_sources import ResolvedReferenceAudio, local_reference_source
+from voicerender.voice_sources import (
+    ResolvedReferenceAudio,
+    local_prepared_voice_source,
+    local_reference_source,
+)
 
 
 def _managed_source() -> dict[str, str]:
@@ -386,6 +390,27 @@ def test_sopro_selection_requires_reference_and_rejects_named_voice(
             )
         )
     assert named.value.code == "sopro.named_voice_unsupported"
+
+
+def test_sopro_rejects_prepared_voice_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _ = _install(monkeypatch)
+    artifact = tmp_path / "voice.qvoice"
+    artifact.write_bytes(b"prepared voice artifact")
+    source = local_prepared_voice_source(artifact, format="qwen3.qvoice.v2")
+
+    with pytest.raises(EngineSelectionError) as prepared:
+        adapter.resolve(
+            EngineRequest(
+                engine="sopro",
+                target_id="model-v1",
+                language="en-US",
+                options={"voice_source": source},
+            )
+        )
+
+    assert prepared.value.code == "sopro.reference_required"
 
 
 def test_sopro_api_probe_rejects_missing_reference_measurement_contract(

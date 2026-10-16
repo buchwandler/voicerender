@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,10 @@ from voicerender.engines.pocketsynth import (
 from voicerender.engines.profiles import reject_reference_binding
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineBackendError, ProfileError
-from voicerender.voice_sources import local_reference_source
+from voicerender.voice_sources import (
+    ResolvedReferenceAudio,
+    local_reference_source,
+)
 
 
 def _entry() -> voicefolio.VoiceEntry:
@@ -182,6 +186,76 @@ def test_pocket_profile_fragment_accepts_local_reference(tmp_path: Path) -> None
 
     assert fragment.binding["options"]["voice_source"] == source
     reject_reference_binding(fragment.binding)
+
+
+def test_pocket_uses_copied_qwen_reference_without_qwen3synth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    reference = tmp_path / "copied-designed.wav"
+    reference.write_bytes(b"copied materialized voice")
+    source = local_reference_source(reference)
+    source["origin"] = {
+        "schema": "voicerender.voice-origin.qwen3-design.v1",
+        "generator": "qwen3",
+        "target_id": "voice-design-1.7b",
+        "model_revision": "revision-1",
+        "qwen3synth_version": "0.1.0",
+        "onnxvoice_version": "0.1.0",
+        "prompt": "A warm speaking voice.",
+        "reference_text": "This exact generated sample.",
+        "language": "en",
+        "quality": "int4",
+        "provider": "cpu",
+        "temperature": 0.9,
+        "top_k": 50,
+        "repetition_penalty": 1.05,
+        "max_new_tokens": 128,
+        "seed": 11,
+        "model_id": "wavekat/voice-design-1.7b",
+    }
+    original_import = builtins.__import__
+
+    def reject_qwen_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.split(".", 1)[0] == "qwen3synth":
+            raise AssertionError("PocketSynth must not import Qwen3Synth")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_qwen_import)
+    monkeypatch.setitem(sys.modules, "qwen3synth", None)
+    resolved = ResolvedReferenceAudio(
+        kind="reference",
+        path=reference.resolve(),
+        sha256=source["sha256"],
+    )
+    monkeypatch.setattr(
+        pocketsynth_adapter, "resolve_reference_audio", lambda _: resolved
+    )
+    prepared_inputs: list[Path] = []
+    prepared_voice = object()
+
+    class Runtime:
+        def prepare_voice(self, path: Path) -> object:
+            prepared_inputs.append(path)
+            return prepared_voice
+
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        metadata={"voice_source": source},
+    )
+    fragment = PocketSynthEngineAdapter().renderprofile_fragment(selection)
+    assert fragment.binding["options"]["voice_source"] == source
+
+    request = SpeechRequest(
+        id="request-1",
+        text="hello",
+        language="en-US",
+        options={"voice_source": source},
+    )
+    session = PocketSynthEngineSession(Runtime(), selection, None, None)
+    assert session._voice(request) is prepared_voice
+    assert prepared_inputs == [reference.resolve()]
 
 
 def test_managed_execution_resolves_once_passes_path_and_reuses_prepared_voice(

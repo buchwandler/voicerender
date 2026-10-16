@@ -25,6 +25,7 @@ ENGINE_IDS = {
     "pocket",
     "sopro",
     "supertonic",
+    "qwen3",
 }
 PACKAGES = {
     "inflect": "inflectsynth",
@@ -34,6 +35,7 @@ PACKAGES = {
     "pocket": "pocketsynth",
     "sopro": "soprosynth",
     "supertonic": "supertonicsynth",
+    "qwen3": "qwen3synth",
 }
 
 ADAPTER_MODULES = {
@@ -44,13 +46,14 @@ ADAPTER_MODULES = {
     "pocket": "voicerender.engines.pocketsynth",
     "sopro": "voicerender.engines.soprosynth",
     "supertonic": "voicerender.engines.supertonicsynth",
+    "qwen3": "voicerender.engines.qwen3synth",
 }
 
 
 def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
     script = r"""
 import builtins
-blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth"}
+blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
 seen = []
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -67,7 +70,7 @@ assert not seen
     # Keep the subprocess isolated from SDKs that may already be imported by pytest.
     script = script.replace(
         "blocked_to_ids",
-        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic'}",
+        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
     )
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -130,6 +133,15 @@ def _fake_package(package: str) -> ModuleType:
             "measure_prepared",
             "close",
         ),
+        "Qwen3Runtime": (
+            "from_installed",
+            "measure_request",
+            "prepare_voice",
+            "synthesize",
+            "close",
+            "design_voice",
+        ),
+        "PreparedVoice": ("load",),
     }
     symbols = {
         "PiperVoice",
@@ -167,6 +179,9 @@ def _fake_package(package: str) -> ModuleType:
         "DescribedVoice",
         "request_api_contract",
         "capacity_api_contract",
+        "Qwen3Runtime",
+        "VoiceDesignRequest",
+        "inspect_voice_profile",
     }
     for name in symbols:
         if name in owner_methods:
@@ -203,7 +218,7 @@ def _fake_package(package: str) -> ModuleType:
     return module
 
 
-def test_registry_lists_seven_engines_without_probing() -> None:
+def test_registry_lists_nine_engines_without_probing() -> None:
     listed = list_engines()
     assert {item["id"] for item in listed} == ENGINE_IDS
     assert {item["package"] for item in listed} == set(PACKAGES.values())
@@ -241,7 +256,13 @@ def test_all_engine_probes_use_public_api_without_loading_models(
             "measurement_entrypoint": "KittenVoice.measure_prepared",
             "measurement_metric": "model_tokens",
         }
-    if engine == "sopro":
+    if engine == "qwen3":
+        fake.request_api_contract = lambda: SimpleNamespace(
+            supports_reference_voice=True,
+            supports_request_measurement=True,
+            supports_voice_design=True,
+        )
+    elif engine == "sopro":
         fake.request_api_contract = lambda: SimpleNamespace(
             supports_reference_voice=True,
             supports_request_measurement=True,
@@ -535,6 +556,24 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
             ),
         )
         monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    elif engine == "qwen3":
+        fake = _fake_package(PACKAGES[engine])
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="base-0.6b",
+                ref="qwen3:base-0.6b",
+                display_name="Qwen Base",
+                model_type="base",
+                layout="qwen3-wavekat-v1",
+                sample_rate=24000,
+                languages=("en",),
+                precisions=("int4", "fp32"),
+                source_revision="revision-1",
+                runtime_available=True,
+                metadata={},
+            ),
+        )
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     else:
         target = SynthesisTarget(
             engine=engine,
@@ -555,7 +594,13 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
     targets = discover_targets(engine, language="en-US")
     assert len(targets) == 1
     assert targets[0].engine == engine
-    assert targets[0].id in {"piper-demo", "pocket-demo", "sopro-demo", "demo-model"}
+    assert targets[0].id in {
+        "base-0.6b",
+        "piper-demo",
+        "pocket-demo",
+        "sopro-demo",
+        "demo-model",
+    }
 
 
 @pytest.mark.parametrize("engine", sorted(ENGINE_IDS))
@@ -566,6 +611,30 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
 
     from voicerender.engines.selection import EngineRequest
 
+    if engine == "qwen3":
+        fake = _fake_package(PACKAGES[engine])
+        fake.request_api_contract = lambda: SimpleNamespace(
+            supports_reference_voice=True,
+            supports_request_measurement=True,
+            supports_voice_design=True,
+        )
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="demo-model",
+                ref="qwen3:demo-model",
+                display_name="Qwen Base",
+                model_type="base",
+                layout="qwen3-wavekat-v1",
+                sample_rate=24000,
+                languages=("en",),
+                precisions=("int4",),
+                source_revision="revision-1",
+                runtime_available=True,
+                metadata={},
+            ),
+        )
+        fake.GenerationConfig = lambda **values: SimpleNamespace(**values)
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     if engine == "sopro":
         fake = _fake_package(PACKAGES[engine])
         fake.request_api_contract = lambda: SimpleNamespace(
@@ -635,16 +704,17 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
         engine=engine,
         target_id="demo-model",
         language="en-US",
-        voice=None if engine == "sopro" else "demo-voice",
+        voice=None if engine in {"sopro", "qwen3"} else "demo-voice",
         options=(
             {
                 "voice_source": {
                     "kind": "reference",
                     "value": str((Path.cwd() / "demo-reference.wav").resolve()),
                     "sha256": "a" * 64,
-                }
+                },
+                **({"reference_text": "A reference."} if engine == "qwen3" else {}),
             }
-            if engine == "sopro"
+            if engine in {"sopro", "qwen3"}
             else {"speed": 2.0}
             if engine == "piper"
             else {}

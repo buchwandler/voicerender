@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -16,13 +20,24 @@ from . import (
     __version__,
     render_book,
 )
+from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
 from .engines.registry import (
     discover_targets,
     engine_status,
     get_adapter,
     list_engines,
 )
-from .errors import VoiceRenderError
+from .errors import (
+    ArtifactError,
+    EngineApiIncompatibleError,
+    EngineBackendError,
+    EngineError,
+    EngineUnavailableError,
+    InvalidEngineOptionError,
+    InvalidEngineVoiceError,
+    UnsupportedSynthesisFeatureError,
+    VoiceRenderError,
+)
 from .preflight import preflight_render_plan
 from .renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
@@ -37,7 +52,16 @@ from .renderprofile import (
     validate_render_profile,
 )
 from .storage import wav_info
-from .voice_sources import local_reference_source, managed_reference_source
+from .voice_design import Qwen3VoiceDesignRecipe, design_qwen3_reference
+from .voice_source_codec import load_voice_source
+from .voice_sources import (
+    local_prepared_voice_source,
+    local_reference_source,
+    managed_reference_source,
+    normalize_voice_source,
+    resolve_reference_audio,
+    voice_source_identity,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     voice_source_group.add_argument("--voice")
     voice_source_group.add_argument("--voicefolio-ref")
     voice_source_group.add_argument("--reference-wav", type=Path)
+    voice_source_group.add_argument("--prepared-voice", type=Path)
+    voice_source_group.add_argument("--voice-source", type=Path)
     profile_create.add_argument("--speaker")
     profile_create.add_argument(
         "--option",
@@ -104,6 +130,55 @@ def build_parser() -> argparse.ArgumentParser:
     profile_refresh.add_argument("profile", type=Path)
     profile_refresh.add_argument("-o", "--output", required=True, type=Path)
     profile_refresh.add_argument("--json", action="store_true")
+
+    voice = commands.add_parser("voice", help="Generate or inspect voice assets")
+    voice_commands = voice.add_subparsers(dest="voice_command", required=True)
+
+    voice_design = voice_commands.add_parser(
+        "design", help="Synthesize a persistent Qwen VoiceDesign reference WAV"
+    )
+    voice_design.add_argument(
+        "--engine", choices=("qwen3", "qwen3synth"), default="qwen3"
+    )
+    voice_design.add_argument("--prompt", required=True)
+    voice_design.add_argument("--text", required=True, help="Fixed reference utterance")
+    voice_design.add_argument("--language", default="en")
+    voice_design.add_argument("--quality", choices=("int4", "fp32"), default="int4")
+    voice_design.add_argument("--provider", default="cpu")
+    voice_design.add_argument("--seed", type=int)
+    voice_design.add_argument("--temperature", type=float, default=0.9)
+    voice_design.add_argument("--top-k", type=int, default=50)
+    voice_design.add_argument("--repetition-penalty", type=float, default=1.05)
+    voice_design.add_argument("--max-new-tokens", type=int, default=128)
+    voice_design.add_argument("--cache-dir", type=Path)
+    voice_design.add_argument("--catalog", type=Path)
+    voice_design.add_argument("--output", required=True, type=Path)
+    voice_design.add_argument("--source-output", type=Path)
+    voice_design.add_argument("--force", action="store_true")
+    voice_design.add_argument("--json", action="store_true")
+
+    prepare_qwen = voice_commands.add_parser(
+        "prepare-qwen", help="Prepare a pinned reference WAV as a Qwen .qvoice profile"
+    )
+    prepare_source = prepare_qwen.add_mutually_exclusive_group(required=True)
+    prepare_source.add_argument("--reference", type=Path)
+    prepare_source.add_argument("--voice-source", type=Path)
+    prepare_qwen.add_argument("--transcript")
+    prepare_qwen.add_argument("--language")
+    prepare_qwen.add_argument("--target", default="base-0.6b")
+    prepare_qwen.add_argument("--quality", choices=("int4", "fp32"), default="int4")
+    prepare_qwen.add_argument("--provider", default="cpu")
+    prepare_qwen.add_argument("--cache-dir", type=Path)
+    prepare_qwen.add_argument("--catalog", type=Path)
+    prepare_qwen.add_argument("--output", required=True, type=Path)
+    prepare_qwen.add_argument("--force", action="store_true")
+    prepare_qwen.add_argument("--json", action="store_true")
+
+    voice_inspect = voice_commands.add_parser(
+        "inspect", help="Inspect a voice-source sidecar or Qwen .qvoice profile"
+    )
+    voice_inspect.add_argument("path", type=Path)
+    voice_inspect.add_argument("--json", action="store_true")
 
     preflight = commands.add_parser(
         "preflight", help="Measure a RenderPlan without synthesis"
@@ -368,6 +443,238 @@ def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
     )
 
 
+def _qwen3_module() -> Any:
+    probe = get_adapter("qwen3").probe_api()
+    if not probe.compatible:
+        if probe.status == "package_missing":
+            raise EngineUnavailableError(
+                "Qwen3Synth is not installed; install the qwen3 extra to use this command.",
+                engine="qwen3",
+                engine_version=probe.module_version,
+                native_error_type=probe.error_type,
+                code="qwen3.package_missing",
+            )
+        raise EngineApiIncompatibleError(
+            f"Qwen3Synth public API is incompatible: {probe.error_message or probe.status}",
+            engine="qwen3",
+            engine_version=probe.module_version,
+            native_error_type=probe.error_type,
+            code="qwen3.api_incompatible",
+            details={
+                "missing_symbols": probe.missing_symbols,
+                "missing_methods": probe.missing_methods,
+            },
+        )
+    return importlib.import_module("qwen3synth")
+
+
+def _qwen_runtime_error(
+    exc: Exception, *, operation: str, target_id: str, engine_version: str | None
+) -> EngineError:
+    if isinstance(exc, EngineError):
+        return exc
+    native_name = type(exc).__name__
+    if native_name == "ModelNotInstalledError":
+        error_type: type[EngineError] = EngineUnavailableError
+        code = "qwen3.model_not_installed"
+    elif native_name == "CatalogError":
+        error_type = EngineUnavailableError
+        code = "qwen3.catalog_unavailable"
+    elif native_name == "UnsupportedModelCapabilityError":
+        error_type = UnsupportedSynthesisFeatureError
+        code = "qwen3.capability_unsupported"
+    elif native_name in {
+        "IncompatibleVoiceProfileError",
+        "InvalidReferenceAudioError",
+        "InvalidReferenceTranscriptError",
+    }:
+        error_type = InvalidEngineVoiceError
+        code = "qwen3.profile_incompatible"
+    else:
+        error_type = EngineBackendError
+        code = "qwen3.backend_failed"
+    return error_type(
+        f"Qwen3Synth {operation} failed: {exc}",
+        engine="qwen3",
+        engine_version=engine_version,
+        target_id=target_id,
+        native_error_type=native_name,
+        code=code,
+    )
+
+
+def _inspect_qwen_voice_profile(path: Path) -> Any:
+    module = _qwen3_module()
+    try:
+        return module.inspect_voice_profile(path)
+    except Exception as exc:
+        if isinstance(exc, EngineError):
+            raise
+        raise InvalidEngineVoiceError(
+            f"Qwen prepared voice is invalid: {exc}",
+            engine="qwen3",
+            native_error_type=type(exc).__name__,
+            code="qwen3.prepared_voice_invalid",
+        ) from exc
+
+
+def _prepared_voice_source(path: Path) -> tuple[dict[str, Any], Any]:
+    info = _inspect_qwen_voice_profile(path)
+    source = local_prepared_voice_source(
+        path,
+        format=QWEN3_QVOICE_FORMAT,
+        metadata={
+            "model_id": info.model_id,
+            "model_revision": info.model_revision,
+            "layout": info.layout,
+        },
+    )
+    return source, info
+
+
+def _cli_output_path(path: Path, *, suffix: str, force: bool, label: str) -> Path:
+    target = path.expanduser().absolute()
+    if target.suffix.casefold() != suffix:
+        raise ArtifactError(f"{label} must use the {suffix} extension")
+    if target.exists() and target.is_dir():
+        raise ArtifactError(f"{label} is a directory: {target}")
+    if (target.exists() or target.is_symlink()) and not force:
+        raise ArtifactError(
+            f"{label} already exists; pass --force to replace it",
+            code="qwen3.voice_design_output_exists",
+        )
+    return target
+
+
+def _prepare_qwen_voice(args: argparse.Namespace) -> dict[str, Any]:
+    source_value = (
+        load_voice_source(args.voice_source)
+        if args.voice_source is not None
+        else local_reference_source(args.reference)
+    )
+    source = normalize_voice_source(source_value, allow_named=False)
+    if source.kind not in {"reference", "managed_reference"}:
+        raise InvalidEngineVoiceError(
+            "Qwen prepare-qwen requires a reference audio source",
+            engine="qwen3",
+            target_id=args.target,
+            code="qwen3.reference_required",
+        )
+    origin = source.origin or {}
+    transcript = args.transcript
+    if transcript is None:
+        transcript = origin.get("reference_text")
+    if not isinstance(transcript, str) or not transcript.strip():
+        raise InvalidEngineOptionError(
+            "Qwen prepare-qwen requires --transcript or a Qwen VoiceDesign source transcript",
+            engine="qwen3",
+            target_id=args.target,
+            code="qwen3.reference_text_required",
+        )
+    language = args.language or origin.get("language") or "en"
+    if not isinstance(language, str) or not language.strip():
+        raise InvalidEngineOptionError(
+            "Qwen prepare-qwen requires a non-empty language",
+            engine="qwen3",
+            target_id=args.target,
+            code="qwen3.language_required",
+        )
+
+    output = _cli_output_path(
+        args.output,
+        suffix=".qvoice",
+        force=args.force,
+        label="Qwen prepared voice output",
+    )
+    resolved = resolve_reference_audio(source, offline=True)
+    source_id_payload = {
+        "voice": dict(voice_source_identity(source)),
+        "reference_text_sha256": hashlib.sha256(transcript.encode("utf-8")).hexdigest(),
+    }
+    source_id = hashlib.sha256(
+        json.dumps(source_id_payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    module = _qwen3_module()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".voicerender-prepare-qwen-", suffix=".qvoice", dir=output.parent
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    runtime: Any | None = None
+    try:
+        try:
+            runtime = module.Qwen3Runtime.from_installed(
+                args.target,
+                quality=args.quality,
+                provider=args.provider,
+                catalog=args.catalog,
+                cache_dir=args.cache_dir,
+            )
+        except Exception as exc:
+            raise _qwen_runtime_error(
+                exc,
+                operation="runtime opening",
+                target_id=args.target,
+                engine_version=getattr(module, "__version__", None),
+            ) from exc
+        try:
+            reference = module.ReferenceVoice(
+                audio=resolved.path,
+                transcript=transcript,
+                language=language,
+                source_id=source_id,
+            )
+            prepared = runtime.prepare_voice(reference)
+            prepared.save(temporary_path)
+        except Exception as exc:
+            if isinstance(exc, EngineError):
+                raise
+            raise _qwen_runtime_error(
+                exc,
+                operation="voice preparation",
+                target_id=args.target,
+                engine_version=getattr(module, "__version__", None),
+            ) from exc
+        finally:
+            runtime.close()
+        if args.force:
+            os.replace(temporary_path, output)
+        else:
+            try:
+                os.link(temporary_path, output)
+            except FileExistsError as exc:
+                raise ArtifactError(
+                    f"Qwen prepared voice output appeared during generation: {output}",
+                    code="qwen3.voice_design_output_exists",
+                ) from exc
+            temporary_path.unlink()
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    prepared_source = local_prepared_voice_source(
+        output,
+        format=QWEN3_QVOICE_FORMAT,
+        metadata={
+            "model_id": prepared.model_id,
+            "model_revision": prepared.model_revision,
+            "layout": prepared.layout,
+        },
+    )
+    return {
+        "output": str(output),
+        "format": QWEN3_QVOICE_FORMAT,
+        "sha256": prepared_source["sha256"],
+        "source": prepared_source,
+        "model_id": prepared.model_id,
+        "model_revision": prepared.model_revision,
+        "transcript": transcript,
+        "language": language,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -412,14 +719,100 @@ def main(argv: list[str] | None = None) -> int:
                     )
             return 0
 
+        if args.command == "voice":
+            if args.voice_command == "design":
+                recipe = Qwen3VoiceDesignRecipe(
+                    prompt=args.prompt,
+                    reference_text=args.text,
+                    language=args.language,
+                    quality=args.quality,
+                    provider=args.provider,
+                    seed=args.seed,
+                    temperature=args.temperature,
+                    top_k=args.top_k,
+                    repetition_penalty=args.repetition_penalty,
+                    max_new_tokens=args.max_new_tokens,
+                )
+                designed = design_qwen3_reference(
+                    recipe,
+                    args.output,
+                    cache_dir=args.cache_dir,
+                    catalog=args.catalog,
+                    source_output=args.source_output,
+                    force=args.force,
+                )
+                payload = {
+                    "output": str(designed.path),
+                    "sha256": designed.sha256,
+                    "source": dict(designed.source),
+                    "model_id": designed.model_id,
+                    "runtime_identity": dict(designed.runtime_identity),
+                }
+            elif args.voice_command == "prepare-qwen":
+                payload = _prepare_qwen_voice(args)
+            elif args.path.suffix.casefold() == ".qvoice":
+                info = _inspect_qwen_voice_profile(args.path)
+                payload = {
+                    "kind": "prepared",
+                    "format": QWEN3_QVOICE_FORMAT,
+                    "path": str(args.path),
+                    "sha256": info.profile_sha256,
+                    "model_id": info.model_id,
+                    "model_revision": info.model_revision,
+                    "layout": info.layout,
+                    "language": info.language,
+                    "reference_samples": info.reference_samples,
+                }
+            else:
+                source = load_voice_source(args.path)
+                payload = {
+                    "kind": source["kind"],
+                    "path": str(args.path),
+                    "voice_source": dict(source),
+                }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif args.voice_command == "design":
+                print(
+                    f"Designed reference {payload['output']} sha256={payload['sha256']}"
+                )
+            elif args.voice_command == "prepare-qwen":
+                print(
+                    f"Prepared Qwen voice {payload['output']} sha256={payload['sha256']}"
+                )
+            else:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "profile":
             if args.profile_command == "create":
                 profile_options = _json_options(args.option)
+                input_paths = (
+                    args.reference_wav,
+                    args.prepared_voice,
+                    args.voice_source,
+                )
+                if any(
+                    path is not None and args.output.resolve() == path.resolve()
+                    for path in input_paths
+                ):
+                    raise ValueError(
+                        "profile output must not overwrite a voice-source input"
+                    )
                 voice_source = None
                 if args.voicefolio_ref:
                     voice_source = managed_reference_source(args.voicefolio_ref)
                 elif args.reference_wav is not None:
                     voice_source = local_reference_source(args.reference_wav)
+                elif args.prepared_voice is not None:
+                    if get_adapter(args.engine).id != "qwen3":
+                        raise InvalidEngineOptionError(
+                            "--prepared-voice is only supported for Qwen3 profiles",
+                            code="qwen3.prepared_voice_engine_invalid",
+                        )
+                    voice_source, _ = _prepared_voice_source(args.prepared_voice)
+                elif args.voice_source is not None:
+                    voice_source = dict(load_voice_source(args.voice_source))
                 profile = create_render_profile(
                     engine=args.engine,
                     target_id=args.target,

@@ -51,6 +51,9 @@ _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
     "piper": BuiltinEngineSpec(
         "pipersynth", "voicerender.engines.pipersynth", "PiperSynthEngineAdapter"
     ),
+    "qwen3": BuiltinEngineSpec(
+        "qwen3synth", "voicerender.engines.qwen3synth", "Qwen3SynthEngineAdapter", True
+    ),
     "pocket": BuiltinEngineSpec(
         "pocketsynth",
         "voicerender.engines.pocketsynth",
@@ -76,6 +79,7 @@ def normalize_engine_id(engine: str) -> str:
         "pykokoro": "kokoro",
         "pipersynth": "piper",
         "pocketsynth": "pocket",
+        "qwen3synth": "qwen3",
         "soprosynth": "sopro",
     }
     return aliases.get(normalized, normalized)

@@ -130,7 +130,7 @@ def validate_voice_source_binding(binding: Mapping[str, Any]) -> None:
         source = normalize_voice_source(raw_source)
     except (EngineError, ValueError) as exc:
         raise ProfileError(str(exc)) from exc
-    if source.kind == "reference":
+    if source.kind in {"reference", "prepared"}:
         diagnostics = validate_voice_source(source)
         if diagnostics:
             raise ProfileError(diagnostics[0].message)

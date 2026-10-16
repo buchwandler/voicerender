@@ -25,7 +25,7 @@ For development from a checkout:
 python -m pip install -e ".[dev]"
 ```
 
-Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `supertonic`, and `inflect`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
+Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `supertonic`, `inflect`, and `qwen3`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
 
 ### Kitten request measurement
 
@@ -121,6 +121,60 @@ voicerender profile create \
 `engine="auto"` selects Inno for a static target advertising the `inno-v0.2` enroller, or AkinVox for a reference-only target. AkinVox is English-only. Install `.[kokoro]` for Kokoro or `.[sopro]` for SoproSynth and make model assets available using the engine's supported process; VoiceRender does not download models implicitly.
 
 Preflight validates local content pins and managed catalog metadata, and measures text without fetching managed audio, enrolling a voice, or conditioning a reference. Rendering resolves the verified reference and enrolls it lazily; the enrolled voice is reused within that synthesis session. Canonical identity retains content/provenance pins and the exact AkinVox transcript digest, but excludes local/cache paths and raw transcript text. See the [RenderProfile lifecycle](docs/renderprofile.md) and [examples](examples/README.md) for details.
+
+### Qwen3Synth Base and VoiceDesign
+
+Qwen3Synth is optional. Install its extra and the model bundles you intend to use. VoiceRender opens installed models only, and does not download them during profile creation, preflight, or rendering:
+
+```bash
+python -m pip install "voicerender[qwen3]"
+onnxvoice install qwen3:voice-design-1.7b --quality int4
+onnxvoice install qwen3:base-0.6b --quality int4
+```
+
+Generate one fixed reference utterance explicitly. The optional sidecar records the exact recipe and runtime/model provenance while pinning the resulting WAV bytes:
+
+```bash
+voicerender voice design \
+  --prompt "A warm, calm narrator with clear diction." \
+  --text "This fixed sentence will be spoken by the designed voice." \
+  --language en \
+  --output narrator.wav \
+  --source-output narrator.voice-source.toml
+
+voicerender voice inspect narrator.voice-source.toml --json
+```
+
+The materialized WAV hash is the reference voice identity. The prompt, seed, model revision, and runtime identity are regeneration provenance. Protect the WAV and sidecar as sensitive voice data. The sidecar includes the prompt and exact reference text.
+
+To prepare a Qwen Base `.qvoice`, reuse the exact transcript from a verified Qwen VoiceDesign sidecar, or provide `--transcript` for an ordinary WAV. VoiceRender never guesses a transcript:
+
+```bash
+voicerender voice prepare-qwen \
+  --voice-source narrator.voice-source.toml \
+  --output narrator.qvoice
+voicerender voice inspect narrator.qvoice --json
+
+voicerender profile create \
+  --engine qwen3 --target base-0.6b --language en-US \
+  --prepared-voice narrator.qvoice \
+  --output qwen-narrator.renderprofile.toml
+```
+
+You can use a pinned WAV directly with Qwen Base by passing `--reference-wav` and an exact `--option 'reference_text=...'`, or pass a Qwen-origin source sidecar with `--voice-source`. Prepared `.qvoice` profiles use their complete file hash as identity. Qwen Base requires the Qwen extra; profile creation and validation inspect metadata but do not synthesize.
+
+For a weaker machine, copy the materialized WAV and create a new local profile for an installed reference-capable engine such as PocketSynth:
+
+```bash
+python -m pip install "voicerender[pocket]"
+voicerender voices list --engine pocket --offline
+voicerender profile create \
+  --engine pocket --target <pocket-target> --language en-US \
+  --reference-wav ./narrator.wav \
+  --output pocket-narrator.renderprofile.toml
+```
+
+The new profile pins the copied WAV on that machine. Do not reuse the creator's local profile or source sidecar unchanged, because their absolute WAV path is machine-specific. PocketSynth consumes the pinned WAV and does not need or import Qwen3Synth; Qwen provenance is not an execution dependency. See the [RenderProfile lifecycle](docs/renderprofile.md) for source and portability details.
 
 ## SSMDBook RenderPlan collections from UtterPlan
 
