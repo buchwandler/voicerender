@@ -640,7 +640,7 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
             {
                 "voice_source": {
                     "kind": "reference",
-                    "value": "/tmp/demo-reference.wav",
+                    "value": str((Path.cwd() / "demo-reference.wav").resolve()),
                     "sha256": "a" * 64,
                 }
             }

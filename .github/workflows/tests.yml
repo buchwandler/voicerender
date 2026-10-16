@@ -80,7 +80,7 @@ jobs:
             "pipersynth==0.2.5" \
             "pocketsynth[cpu]==0.2.5" \
             "kittensynth[cpu]==0.1.4" \
-            "soprosynth[cpu]==0.1.0" \
+            "soprosynth[cpu]==0.1.1" \
             "supertonicsynth[cpu]==0.1.2" \
             "inflectsynth[cpu]==0.1.1"
       - name: Run released-set compatibility contracts
