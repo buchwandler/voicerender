@@ -25,6 +25,7 @@ from voicerender.engines.base import (
     EngineSelection,
     RenderProfileFragment,
 )
+from voicerender.engines.kittensynth import KittenSynthEngineAdapter
 from voicerender.engines.profiles import make_renderprofile_fragment
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
@@ -346,3 +347,50 @@ def test_kokoro_fragment_uses_discovered_capacity_and_exact_token_contract(
     assert fragment.binding["renderer"] == "kokoro"
     assert fragment.binding["voice"] == "af_heart"
     assert fragment.binding["renderer_metadata"]["source_revision"] == "kokoro-r4"
+
+
+
+def test_kittensynth_authoritative_capacity_survives_profile_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = KittenSynthEngineAdapter()
+    metadata = {
+        "max_tokens": 256,
+        "capacity_policy_revision": "kitten.capacity.v1",
+    }
+    probe = EngineApiProbe(
+        engine=adapter.id,
+        package=adapter.package_name,
+        compatible=True,
+        status="ready",
+        expected_api_version=1,
+        api_version=1,
+        contract_source="explicit",
+    )
+    monkeypatch.setattr(adapter, "probe_api", lambda: probe)
+    monkeypatch.setattr(adapter, "validate_selection", lambda selection: ())
+    monkeypatch.setattr(adapter, "target_metadata", lambda selection: dict(metadata))
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+
+    profile = create_render_profile(
+        engine="kitten",
+        target_id="nano-0.8-int8",
+        language="en-US",
+        role="narrator",
+        voice="Jasper",
+    )
+    metadata.update(
+        max_tokens=128,
+        capacity_policy_revision="kitten.capacity.v2",
+    )
+    refreshed = refresh_render_profile(profile)
+
+    role = refreshed.roles["narrator"]
+    assert role.renderer_capacity == CapacityConstraint(
+        metric="model_tokens", maximum=128, guarantee="hard"
+    )
+    assert role.binding["renderer_metadata"]["max_tokens"] == 128
+    assert (
+        role.binding["renderer_metadata"]["capacity_policy_revision"]
+        == "kitten.capacity.v2"
+    )

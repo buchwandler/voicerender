@@ -24,6 +24,7 @@ from renderplan import (
     SourceSpan,
     SpeechControl,
     SpeechItem,
+    TokenBundle,
     load_manifest,
     load_preflight,
     save_plan,
@@ -73,6 +74,7 @@ class _Session:
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
         self.adapter.measured_texts.append(request.text)
+        self.adapter.measured_requests.append(request)
         value = self.adapter.measurements.get(request.text)
         if isinstance(value, Exception):
             raise value
@@ -104,6 +106,7 @@ class _Adapter:
         self.open_count = 0
         self.close_count = 0
         self.measured_texts: list[str] = []
+        self.measured_requests: list[SpeechRequest] = []
         self.synthesized_texts: list[str] = []
         self.synthesized_requests: list[SpeechRequest] = []
         self.measurements: dict[str, RequestMeasure | Exception] = {}
@@ -203,7 +206,7 @@ def _install(monkeypatch: pytest.MonkeyPatch) -> _Adapter:
     return adapter
 
 
-def _plan(*texts: str) -> RenderPlan:
+def _plan(*texts: str, tokens: TokenBundle | None = None) -> RenderPlan:
     flow = tuple(
         SpeechItem(
             number=number,
@@ -218,6 +221,7 @@ def _plan(*texts: str) -> RenderPlan:
                     end=len(text),
                 ),
             ),
+            tokens=tokens,
             planning_level="sentence",
             preflight_required=True,
         )
@@ -233,6 +237,38 @@ def _plan(*texts: str) -> RenderPlan:
 def _report(adapter: _Adapter, plan: RenderPlan, tmp_path: Path) -> PreflightReport:
     del adapter
     return preflight_render_plan(plan, tmp_path / "preflight.toml")
+
+def test_preflight_and_render_share_optional_token_lowering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    tokens = TokenBundle(
+        span=((0, 6),),
+        pos=("NOUN",),
+        tag=("NN",),
+    )
+    plan = _plan("speech", tokens=tokens)
+    original_plan_id = plan.plan_id
+
+    report = preflight_render_plan(plan, tmp_path / "preflight.toml")
+
+    assert report.status == "ok"
+    assert adapter.measured_requests[0].tokens == ()
+    assert plan.speech[0].tokens == tokens
+    assert plan.plan_id == original_plan_id
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "render",
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert not result.failed
+    assert adapter.synthesized_requests[0].tokens == ()
+    assert plan.speech[0].tokens == tokens
+    assert plan.plan_id == original_plan_id
+
 
 
 def test_render_defers_emphasis_without_changing_wav_or_manifest_identity(

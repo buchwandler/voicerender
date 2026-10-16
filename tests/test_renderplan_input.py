@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,10 +24,27 @@ from voicerender.engines.base import (
     PronunciationSpan,
     RenderProfileFragment,
     RequestMeasure,
+    SpeechRequest,
+    SpeechToken,
+)
+from voicerender.engines.inflectsynth import (
+    InflectSynthEngineAdapter,
+    InflectSynthEngineSession,
+)
+from voicerender.engines.kokoro import PyKokoroEngineAdapter
+from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+from voicerender.engines.pocketsynth import (
+    PocketSynthEngineAdapter,
+    PocketSynthEngineSession,
 )
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
+from voicerender.engines.supertonicsynth import (
+    SupertonicSynthEngineAdapter,
+    SupertonicSynthEngineSession,
+)
 from voicerender.errors import (
+    EngineBackendError,
     EngineSelectionError,
     InvalidSpeechRequestError,
     ProfileError,
@@ -48,6 +67,7 @@ class _Adapter:
 
     def __init__(self) -> None:
         self.required_fields: tuple[str, ...] = ("span", "pos", "tag", "lemma", "morph")
+        self.supports_tokens = True
         self.native_semantics: frozenset[str] = frozenset()
         self.pronunciation = True
         self.lowered_controls: list[SpeechControl] = []
@@ -68,6 +88,7 @@ class _Adapter:
             id=self.id,
             supports_pronunciation_overrides=self.pronunciation,
             pronunciation_alphabets=frozenset({"ipa"}),
+            supports_linguistic_tokens=self.supports_tokens,
             native_semantics=self.native_semantics,
         )
 
@@ -149,16 +170,18 @@ def _item(
     text: str = "  Hello, world!  ",
     tokens: TokenBundle | None = None,
     controls: tuple[SpeechControl, ...] = (),
+    speaker: str | int | None = 2,
     binding_extra: dict[str, Any] | None = None,
 ) -> SpeechItem:
     binding: dict[str, Any] = {
         "renderer": "renderplan-input-test",
         "target_id": "target-v1",
         "voice": "voice-a",
-        "speaker": 2,
         "options": {"speed": 1.1},
         "renderer_metadata": {"frontend": "test-frontend"},
     }
+    if speaker is not None:
+        binding["speaker"] = speaker
     binding.update(binding_extra or {})
     return SpeechItem(
         number=1,
@@ -180,6 +203,240 @@ def _complete_tokens() -> TokenBundle:
         lemma=((0, "hello"), (1, ","), (2, "world")),
         morph=((0, "Number=Sing"), (1, "PunctType=Comm"), (2, "Number=Sing")),
     )
+
+
+def test_optional_tokens_are_dropped_for_adapter_without_token_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.supports_tokens = False
+    adapter.required_fields = ()
+    item = _item(tokens=_complete_tokens())
+    original_binding = dict(item.binding)
+    original_tokens = item.tokens
+    original_id = item.computed_id()
+
+    request = speech_request_from_renderplan(item)
+
+    assert request.tokens == ()
+    assert request.text == item.text
+    assert request.options == {"speed": 1.1}
+    assert item.binding == original_binding
+    assert item.tokens is original_tokens
+    assert item.computed_id() == original_id
+
+
+def test_optional_tokens_are_preserved_for_supporting_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.supports_tokens = True
+    adapter.required_fields = ()
+    item = _item(tokens=_complete_tokens())
+
+    request = speech_request_from_renderplan(item)
+
+    assert [token.text for token in request.tokens] == ["Hello", ",", "world"]
+    assert [token.pos for token in request.tokens] == ["NOUN", "PUNCT", "NOUN"]
+
+
+def test_required_tokens_rejected_when_adapter_declares_no_token_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.supports_tokens = False
+    adapter.required_fields = ("span",)
+
+    with pytest.raises(ProfileError, match="requires linguistic token fields"):
+        speech_request_from_renderplan(_item(tokens=_complete_tokens()))
+
+
+def _builtin_renderplan_request(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: Any,
+    *,
+    speaker: str | int | None = 2,
+) -> SpeechRequest:
+    from voicerender import renderplan_input
+
+    probe = EngineApiProbe(
+        engine=adapter.id,
+        package=adapter.package_name,
+        compatible=True,
+        status="ready",
+        expected_api_version=1,
+        api_version=1,
+        contract_source="explicit",
+    )
+    monkeypatch.setattr(renderplan_input, "get_adapter", lambda renderer: adapter)
+    monkeypatch.setattr(
+        renderplan_input,
+        "resolve_voice",
+        lambda request: (
+            EngineSelection(
+                engine=request.engine,
+                target_id=request.target_id or "target-v1",
+                language=request.language or "en-US",
+                voice=request.voice,
+                speaker=request.speaker,
+                options=request.options,
+            ),
+            (),
+        ),
+    )
+    monkeypatch.setattr(adapter, "probe_api", lambda: probe)
+    monkeypatch.setattr(adapter, "target_metadata", lambda selection: {})
+    item = _item(
+        tokens=_complete_tokens(),
+        binding_extra={"renderer": adapter.id},
+        speaker=speaker,
+    )
+    return speech_request_from_renderplan(item)
+
+
+@pytest.mark.parametrize(
+    ("adapter_factory", "supports_tokens"),
+    [
+        pytest.param(InflectSynthEngineAdapter, False, id="inflect"),
+        pytest.param(PocketSynthEngineAdapter, False, id="pocket"),
+        pytest.param(SupertonicSynthEngineAdapter, False, id="supertonic"),
+        pytest.param(PyKokoroEngineAdapter, True, id="kokoro"),
+        pytest.param(PiperSynthEngineAdapter, True, id="piper"),
+    ],
+)
+def test_builtin_adapter_capability_controls_renderplan_token_lowering(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_factory: Any,
+    supports_tokens: bool,
+) -> None:
+    adapter = adapter_factory()
+    assert adapter.capabilities().supports_linguistic_tokens is supports_tokens
+
+    request = _builtin_renderplan_request(monkeypatch, adapter)
+
+    if supports_tokens:
+        assert [token.text for token in request.tokens] == ["Hello", ",", "world"]
+    else:
+        assert request.tokens == ()
+    assert request.text == "  Hello, world!  "
+    assert request.options == {"speed": 1.1}
+
+
+def test_pocket_renderplan_request_reaches_capacity_measurement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PocketSynthEngineAdapter()
+    request = _builtin_renderplan_request(monkeypatch, adapter, speaker=None)
+    module = ModuleType("pocketsynth")
+    module.SynthesisRequest = lambda **values: SimpleNamespace(**values)
+    monkeypatch.setitem(sys.modules, "pocketsynth", module)
+    measured_requests: list[Any] = []
+
+    def measure_request(native: Any) -> Any:
+        measured_requests.append(native)
+        return SimpleNamespace(fits=True, amount=3, maximum=20)
+
+    session = PocketSynthEngineSession(
+        SimpleNamespace(measure_request=measure_request),
+        EngineSelection(engine="pocket", target_id="target-v1", language="en-US"),
+        generation=None,
+        voice_level=None,
+    )
+
+    measured = session.measure(request)
+
+    assert measured.fits is True
+    assert measured.amount == 3
+    assert measured_requests[0].text == request.text
+
+
+def test_inflect_renderplan_optional_tokens_reach_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = InflectSynthEngineAdapter()
+    request = _builtin_renderplan_request(monkeypatch, adapter, speaker=None)
+    monkeypatch.setitem(sys.modules, "inflectsynth", ModuleType("inflectsynth"))
+    calls: list[str] = []
+
+    class Voice:
+        def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
+            calls.append(text)
+            raise RuntimeError("synthesis reached")
+
+    session = InflectSynthEngineSession(
+        Voice(),
+        EngineSelection(
+            engine="inflect", target_id="target-v1", language="en-US", voice="voice-a"
+        ),
+        config=None,
+    )
+
+    with pytest.raises(EngineBackendError, match="synthesis reached"):
+        session.synthesize(request)
+
+    assert calls == [request.text]
+
+
+def test_supertonic_renderplan_optional_tokens_reach_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = SupertonicSynthEngineAdapter()
+    request = _builtin_renderplan_request(monkeypatch, adapter, speaker=None)
+    module = ModuleType("supertonicsynth")
+    module.SynthesisRequest = lambda **values: SimpleNamespace(**values)
+    monkeypatch.setitem(sys.modules, "supertonicsynth", module)
+    calls: list[Any] = []
+
+    def synthesize(native: Any, **kwargs: Any) -> Any:
+        calls.append(native)
+        raise RuntimeError("synthesis reached")
+
+    session = SupertonicSynthEngineSession(
+        SimpleNamespace(synthesize=synthesize),
+        EngineSelection(
+            engine="supertonic", target_id="target-v1", language="en-US", voice="voice-a"
+        ),
+        generation=None,
+        voice_level=SimpleNamespace(mode="off"),
+    )
+
+    with pytest.raises(EngineBackendError, match="synthesis reached"):
+        session.synthesize(request)
+
+    assert calls[0].text == request.text
+
+
+def test_unsupported_engine_sessions_retain_direct_token_rejection() -> None:
+    request = SpeechRequest(
+        id="direct-token-request",
+        text="hello",
+        language="en-US",
+        tokens=(SpeechToken(start=0, end=5, text="hello"),),
+    )
+    inflect = InflectSynthEngineSession(
+        object(),
+        EngineSelection(engine="inflect", target_id="target-v1", language="en-US"),
+        config=None,
+    )
+    pocket = PocketSynthEngineSession(
+        object(),
+        EngineSelection(engine="pocket", target_id="target-v1", language="en-US"),
+        generation=None,
+        voice_level=None,
+    )
+    supertonic = SupertonicSynthEngineSession(
+        object(),
+        EngineSelection(engine="supertonic", target_id="target-v1", language="en-US"),
+        generation=None,
+        voice_level=None,
+    )
+
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"):
+        inflect.synthesize(request)
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"):
+        pocket._native_request(request, object())
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"):
+        supertonic.synthesize(request)
 
 
 def test_request_conversion_preserves_exact_text_binding_and_token_semantics(

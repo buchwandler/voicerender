@@ -6,12 +6,14 @@ from typing import Any
 
 import numpy as np
 import pytest
+from renderplan import CapacityConstraint
 
 from voicerender.engines.base import EngineSelection, RequestMeasure, SpeechRequest
 from voicerender.engines.kittensynth import (
     KITTEN_PCM_RANGE_POLICY,
     KittenSynthEngineAdapter,
     KittenSynthEngineSession,
+    _target_from_model,
 )
 from voicerender.errors import EmptySpeechTextError, EngineBackendError
 
@@ -50,6 +52,99 @@ def _session(
 def _request() -> SpeechRequest:
     return SpeechRequest(id="request-1", text="prepared speech", language="en-US")
 
+
+_MISSING = object()
+
+
+def _discovered_model(
+    *, metadata: dict[str, Any] | None = None, max_tokens: Any = _MISSING
+) -> SimpleNamespace:
+    model = SimpleNamespace(
+        id="nano-0.8-int8",
+        display_name="Nano",
+        version="0.8",
+        language="en-US",
+        quality="int8",
+        sample_rate=24000,
+        aliases=(),
+        voices=(),
+        voice_ids=(),
+        default_voice=None,
+        metadata=dict(metadata or {}),
+        runtime_available=True,
+    )
+    if max_tokens is not _MISSING:
+        model.max_tokens = max_tokens
+    return model
+
+
+def test_discovery_normalizes_public_maximum_for_hard_profile_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _target_from_model(
+        _discovered_model(
+            metadata={"max_tokens": 200, "capacity_revision": "kitten.capacity.v1"},
+            max_tokens=256,
+        )
+    )
+    adapter = KittenSynthEngineAdapter()
+    selection = EngineSelection(
+        engine="kitten", target_id=target.id, language="en-US"
+    )
+    monkeypatch.setattr(adapter, "discover", lambda request: (target,))
+
+    metadata = adapter.target_metadata(selection)
+    fragment = adapter.renderprofile_fragment(selection)
+
+    assert target.metadata["max_tokens"] == 256
+    assert target.metadata["capacity_policy_revision"] == "kitten.capacity.v1"
+    assert metadata["max_tokens"] == 256
+    assert metadata["capacity_policy_revision"] == "kitten.capacity.v1"
+    assert fragment.renderer_capacity == CapacityConstraint(
+        metric="model_tokens", maximum=256, guarantee="hard"
+    )
+    assert fragment.binding["renderer_metadata"]["max_tokens"] == 256
+    assert (
+        fragment.binding["renderer_metadata"]["capacity_policy_revision"]
+        == "kitten.capacity.v1"
+    )
+
+
+def test_discovery_uses_documented_metadata_key_and_keeps_unknown_capacity_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _target_from_model(_discovered_model(metadata={"max_tokens": 128}))
+    unknown = _target_from_model(_discovered_model())
+    adapter = KittenSynthEngineAdapter()
+    selection = EngineSelection(
+        engine="kitten", target_id=target.id, language="en-US"
+    )
+    monkeypatch.setattr(adapter, "discover", lambda request: (target,))
+
+    fragment = adapter.renderprofile_fragment(selection)
+
+    assert target.metadata["max_tokens"] == 128
+    assert fragment.renderer_capacity == CapacityConstraint(
+        metric="model_tokens", maximum=128, guarantee="hard"
+    )
+    assert "max_tokens" not in unknown.metadata
+    unknown_adapter = KittenSynthEngineAdapter()
+    monkeypatch.setattr(unknown_adapter, "discover", lambda request: (unknown,))
+    unknown_fragment = unknown_adapter.renderprofile_fragment(
+        EngineSelection(engine="kitten", target_id=unknown.id, language="en-US")
+    )
+    assert unknown_fragment.renderer_capacity is None
+
+
+@pytest.mark.parametrize("maximum", [None, True, 0, -1, 1.5, "128"])
+def test_discovery_rejects_invalid_public_maximum_without_metadata_fallback(
+    maximum: Any,
+) -> None:
+    target = _target_from_model(
+        _discovered_model(metadata={"max_tokens": 128}, max_tokens=maximum)
+    )
+
+    assert "max_tokens" not in target.metadata
 
 def test_measure_maps_exact_amount_without_maximum_and_never_synthesizes() -> None:
     native_metadata = {"frontend": "kitteng2p"}

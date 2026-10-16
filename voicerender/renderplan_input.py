@@ -10,6 +10,7 @@ from typing import Any
 from renderplan import SpeechControl, SpeechItem, TokenBundle
 
 from .engines.base import (
+    EngineAdapter,
     EngineSelection,
     PronunciationSpan,
     RenderProfileFragment,
@@ -202,7 +203,7 @@ def speech_request_conversion_from_renderplan(
         raise ProfileError(
             f"Engine {adapter.id!r} returned an invalid RenderProfile fragment"
         )
-    tokens = _speech_tokens(item, fragment.token_fields)
+    tokens = _tokens_for_engine(item, adapter=adapter, fragment=fragment)
     overrides, control_options, deferred_count = _lower_controls(
         item, adapter, selection, emphasis_policy=policy
     )
@@ -364,6 +365,24 @@ def classify_measurement(
         PreflightDisposition.REJECT,
         error=str(value) or "Engine measurement failed",
     )
+
+
+def _tokens_for_engine(
+    item: SpeechItem,
+    *,
+    adapter: EngineAdapter,
+    fragment: RenderProfileFragment,
+) -> tuple[SpeechToken, ...]:
+    required_fields = fragment.token_fields
+    supports_tokens = adapter.capabilities().supports_linguistic_tokens
+    if required_fields and not supports_tokens:
+        raise ProfileError(
+            f"Engine {adapter.id!r} requires linguistic token fields "
+            "but declares supports_linguistic_tokens=False"
+        )
+    if not supports_tokens:
+        return ()
+    return _speech_tokens(item, required_fields)
 
 
 def _speech_tokens(

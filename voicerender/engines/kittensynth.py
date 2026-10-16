@@ -97,6 +97,22 @@ def _target_from_model(model: Any) -> SynthesisTarget:
         "quality": quality,
         "source": "kittensynth",
     }
+    missing = object()
+    maximum = getattr(model, "max_tokens", missing)
+    if maximum is missing:
+        maximum = normalized_metadata.get("max_tokens")
+    if _valid_measurement_integer(maximum, positive=True):
+        normalized_metadata["max_tokens"] = maximum
+    else:
+        normalized_metadata.pop("max_tokens", None)
+
+    policy_revision = normalized_metadata.get("capacity_policy_revision")
+    if not isinstance(policy_revision, str) or not policy_revision.strip():
+        policy_revision = normalized_metadata.get("capacity_revision")
+    if isinstance(policy_revision, str) and policy_revision.strip():
+        normalized_metadata["capacity_policy_revision"] = policy_revision.strip()
+    else:
+        normalized_metadata.pop("capacity_policy_revision", None)
     return SynthesisTarget(
         engine="kitten",
         id=str(model.id),
@@ -469,6 +485,8 @@ class KittenSynthEngineAdapter:
             selection,
             frontend="kittensynth",
             pronunciation="unsupported",
+            capacity_key="max_tokens",
+            capacity_metric="model_tokens",
         )
 
     def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:
