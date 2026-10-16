@@ -1,0 +1,147 @@
+ tests/test_kittensynth_engine.py   | 63 +++++++++++++++++++++++++++++++++++++-
+ voicerender/engines/kittensynth.py | 17 ++++++++--
+ 2 files changed, 76 insertions(+), 4 deletions(-)
+
+diff --git a/tests/test_kittensynth_engine.py b/tests/test_kittensynth_engine.py
+index 920e502..df1d11b 100644
+--- a/tests/test_kittensynth_engine.py
++++ b/tests/test_kittensynth_engine.py
+@@ -15,7 +15,12 @@ from voicerender.engines.kittensynth import (
+     KittenSynthEngineSession,
+     _target_from_model,
+ )
+-from voicerender.errors import EmptySpeechTextError, EngineBackendError
++from voicerender.errors import (
++    EmptySpeechTextError,
++    EngineBackendError,
++    SpeechRequestTooLongError,
++)
++from voicerender.renderplan_input import PreflightDisposition, classify_measurement
+
+
+ class _FakeVoice:
+@@ -197,6 +202,30 @@ def test_measure_maps_authoritative_known_maximum() -> None:
+     assert voice.synthesize_calls == []
+
+
++
++
++def test_over_limit_measurement_is_replanable_without_synthesis() -> None:
++    voice = _FakeVoice(
++        SimpleNamespace(
++            token_count=513,
++            max_tokens=512,
++            fits=False,
++            model_id="nano-0.8-int8",
++            metadata={"capacity_policy_revision": "kitten.capacity.v1"},
++        )
++    )
++
++    measured = _session(voice).measure(_request())
++    outcome = classify_measurement(measured)
++
++    assert measured.fits is False
++    assert outcome.disposition is PreflightDisposition.TOO_LONG
++    assert outcome.measurement is not None
++    assert outcome.measurement.amount == 513
++    assert outcome.measurement.maximum == 512
++    assert outcome.measurement.unit == "model_tokens"
++    assert voice.synthesize_calls == []
++
+ @pytest.mark.parametrize(
+     ("measurement", "invalid_field"),
+     [
+@@ -245,6 +274,38 @@ def test_measure_translates_native_empty_text_error(
+     assert voice.synthesize_calls == []
+
+
++
++def test_synthesis_too_long_error_translates_with_replan_details(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    native_error_type = type("SynthesisInputTooLongError", (Exception,), {})
++    module.SynthesisInputTooLongError = native_error_type  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    native_error = native_error_type("request exceeds model context")
++    native_error.amount = 513
++    native_error.maximum = 512
++    native_error.unit = "model_tokens"
++
++    class ErrorVoice(_FakeVoice):
++        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
++            raise native_error
++
++    with pytest.raises(SpeechRequestTooLongError) as caught:
++        _session(ErrorVoice(None)).synthesize(_request())
++
++    assert caught.value.code == "synthesis.request_too_long"
++    assert caught.value.amount == 513
++    assert caught.value.maximum == 512
++    assert caught.value.unit == "model_tokens"
++    assert caught.value.native_error_type == "SynthesisInputTooLongError"
++    outcome = classify_measurement(caught.value)
++    assert outcome.disposition is PreflightDisposition.TOO_LONG
++    assert outcome.measurement is not None
++    assert outcome.measurement.amount == 513
++    assert outcome.measurement.maximum == 512
++
++
+ def _synthesis_result(audio: Any) -> SimpleNamespace:
+     return SimpleNamespace(
+         audio=audio,
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index 28342be..9383225 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -14,10 +14,12 @@ import numpy as np
+ from ..errors import (
+     EmptySpeechTextError,
+     EngineBackendError,
++    EngineError,
+     EngineSynthesisError,
+     InvalidEngineModelError,
+     InvalidEngineOptionError,
+     InvalidEngineVoiceError,
++    SpeechRequestTooLongError,
+ )
+ from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
+ from .base import (
+@@ -157,20 +159,21 @@ def _translate_kitten_error(
+     request: SpeechRequest | None = None,
+     *,
+     opening: bool = False,
+-) -> EngineSynthesisError:
++) -> EngineError:
+     try:
+         import kittensynth
+     except ImportError:
+         kittensynth = None
+
+-    error_map: tuple[tuple[str, type[EngineSynthesisError], str | None], ...] = (
++    error_map: tuple[tuple[str, type[EngineError], str | None], ...] = (
+         ("EmptyTextError", EmptySpeechTextError, None),
++        ("SynthesisInputTooLongError", SpeechRequestTooLongError, None),
+         ("InvalidSpeedError", InvalidEngineOptionError, "kitten.invalid_speed"),
+         ("InvalidVoiceError", InvalidEngineVoiceError, "kitten.voice_unavailable"),
+         ("UnsupportedModelError", InvalidEngineModelError, "kitten.model_unsupported"),
+         ("OnnxVoiceContractError", EngineBackendError, "kitten.runtime_contract_error"),
+     )
+-    error_type: type[EngineSynthesisError] = EngineBackendError
++    error_type: type[EngineError] = EngineBackendError
+     code: str | None = "kitten.engine_error"
+     if kittensynth is not None:
+         for native_name, mapped_type, mapped_code in error_map:
+@@ -192,6 +195,14 @@ def _translate_kitten_error(
+         "request_id": request.id if request is not None else None,
+         "native_error_type": type(error).__name__,
+     }
++    if error_type is SpeechRequestTooLongError:
++        context.update(
++            amount=getattr(error, "amount", getattr(error, "token_count", None)),
++            maximum=getattr(error, "maximum", getattr(error, "max_tokens", None)),
++            unit=getattr(error, "unit", "model_tokens"),
++            text_length=len(request.text) if request is not None else None,
++            source="kittensynth.synthesize_prepared",
++        )
+     return error_type(str(error), **context, code=code)

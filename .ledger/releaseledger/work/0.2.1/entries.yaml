@@ -1,0 +1,107 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.1
+git_base_ref: a627d2d625bc3e6daae8e3bee58abb77231918ec
+git_base_sha: a627d2d625bc3e6daae8e3bee58abb77231918ec
+git_head_ref: 7f466cc98bb9644372a562b621411ba778a9dba5
+git_head_sha: 7f466cc98bb9644372a562b621411ba778a9dba5
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: "Added optional Qwen3Synth support for VoiceDesign references, prepared voice profiles, and Qwen Base rendering"
+    status: accepted
+    source_refs:
+      - git:3c82349993e1adc0073141215848ce0d3c10817c
+    paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_registry.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_qwen3_voice_design.py
+      - tests/test_qwen3synth_engine.py
+      - tests/test_renderprofile.py
+      - tests/test_soprosynth_engine.py
+      - tests/test_voice_source_codec.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/qwen3synth.py
+      - voicerender/engines/registry.py
+      - voicerender/voice_design.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    sources:
+      - git:3c82349993e1adc0073141215848ce0d3c10817c
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added KittenSynth model-token capacity metadata and preflight-aware request handling"
+    status: accepted
+    source_refs:
+      - git:84f629eb7c691e0d2025de4ea8018ec0dd56f3e6
+    paths:
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/renderplan_input.py
+    sources:
+      - git:84f629eb7c691e0d2025de4ea8018ec0dd56f3e6
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: "Fixed KittenSynth over-limit error reporting with replan details"
+    status: accepted
+    source_refs:
+      - git:b7e1917fea29831344af3900a3e26a49530fb21f
+    paths:
+      - tests/test_kittensynth_engine.py
+      - voicerender/engines/kittensynth.py
+    sources:
+      - git:b7e1917fea29831344af3900a3e26a49530fb21f
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    summary: "Changed a Qwen3Synth test fixture path"
+    status: accepted
+    internal: true
+    source_refs:
+      - git:3342e1569de143e9170971f38c4d3a22d2dedb1b
+    paths:
+      - tests/test_qwen3synth_engine.py
+    sources:
+      - git:3342e1569de143e9170971f38c4d3a22d2dedb1b
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    summary: "Changed backend tests and CI dependency checks"
+    status: accepted
+    internal: true
+    source_refs:
+      - git:7f466cc98bb9644372a562b621411ba778a9dba5
+    paths:
+      - .github/workflows/tests.yml
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+    sources:
+      - git:7f466cc98bb9644372a562b621411ba778a9dba5
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

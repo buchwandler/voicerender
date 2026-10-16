@@ -1,0 +1,100 @@
+{
+  "candidate_count": 5,
+  "candidates": [
+    {
+      "additions": 4180,
+      "deletions": 24,
+      "patch_file": "3c82349.patch",
+      "patch_sha256": "94d07a8965d72659c47f1494363b0948960ec3fc143ea7f11d8b347caf048555",
+      "paths": [
+        "README.md",
+        "docs/renderprofile.md",
+        "pyproject.toml",
+        "tests/test_cli.py",
+        "tests/test_engine_registry.py",
+        "tests/test_pocketsynth_managed.py",
+        "tests/test_qwen3_voice_design.py",
+        "tests/test_qwen3synth_engine.py",
+        "tests/test_renderprofile.py",
+        "tests/test_soprosynth_engine.py",
+        "tests/test_voice_source_codec.py",
+        "tests/wheel_smoke.py",
+        "voicerender/__init__.py",
+        "voicerender/cli.py",
+        "voicerender/engines/profiles.py",
+        "voicerender/engines/qwen3synth.py",
+        "voicerender/engines/registry.py",
+        "voicerender/voice_design.py",
+        "voicerender/voice_source_codec.py",
+        "voicerender/voice_sources.py"
+      ],
+      "sha": "3c82349993e1adc0073141215848ce0d3c10817c",
+      "short_sha": "3c82349",
+      "source_ref": "git:3c82349993e1adc0073141215848ce0d3c10817c"
+    },
+    {
+      "additions": 476,
+      "deletions": 3,
+      "patch_file": "84f629e.patch",
+      "patch_sha256": "f308371dafcbfb1bd30c90e22a1e00a04ebf59c6723477af8280c010fa71e73a",
+      "paths": [
+        "tests/test_kittensynth_engine.py",
+        "tests/test_renderplan_input.py",
+        "tests/test_renderplan_render.py",
+        "tests/test_renderprofile.py",
+        "voicerender/engines/kittensynth.py",
+        "voicerender/renderplan_input.py"
+      ],
+      "sha": "84f629eb7c691e0d2025de4ea8018ec0dd56f3e6",
+      "short_sha": "84f629e",
+      "source_ref": "git:84f629eb7c691e0d2025de4ea8018ec0dd56f3e6"
+    },
+    {
+      "additions": 76,
+      "deletions": 4,
+      "patch_file": "b7e1917.patch",
+      "patch_sha256": "e51a4d4af5c16a7e1556eab2bf9cdb591c38739b8c5d0b5e61944395da59148a",
+      "paths": [
+        "tests/test_kittensynth_engine.py",
+        "voicerender/engines/kittensynth.py"
+      ],
+      "sha": "b7e1917fea29831344af3900a3e26a49530fb21f",
+      "short_sha": "b7e1917",
+      "source_ref": "git:b7e1917fea29831344af3900a3e26a49530fb21f"
+    },
+    {
+      "additions": 5,
+      "deletions": 3,
+      "patch_file": "3342e15.patch",
+      "patch_sha256": "2ac85922426ebfc7b4274f90d0c8769c15ffd6a2980bf231bb27b5995e4f9ecd",
+      "paths": ["tests/test_qwen3synth_engine.py"],
+      "sha": "3342e1569de143e9170971f38c4d3a22d2dedb1b",
+      "short_sha": "3342e15",
+      "source_ref": "git:3342e1569de143e9170971f38c4d3a22d2dedb1b"
+    },
+    {
+      "additions": 21,
+      "deletions": 15,
+      "patch_file": "7f466cc.patch",
+      "patch_sha256": "31cd841b6c5be97056a1aa3d03ac65b91b8abf932ef2aaf6df9454aa65c79db6",
+      "paths": [
+        ".github/workflows/tests.yml",
+        "tests/test_kittensynth_engine.py",
+        "tests/test_renderplan_input.py",
+        "tests/test_renderplan_render.py",
+        "tests/test_renderprofile.py"
+      ],
+      "sha": "7f466cc98bb9644372a562b621411ba778a9dba5",
+      "short_sha": "7f466cc",
+      "source_ref": "git:7f466cc98bb9644372a562b621411ba778a9dba5"
+    }
+  ],
+  "git_base_ref": "a627d2d625bc3e6daae8e3bee58abb77231918ec",
+  "git_base_sha": "a627d2d625bc3e6daae8e3bee58abb77231918ec",
+  "git_head_ref": "7f466cc98bb9644372a562b621411ba778a9dba5",
+  "git_head_sha": "7f466cc98bb9644372a562b621411ba778a9dba5",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.2.1",
+  "schema_version": 1
+}

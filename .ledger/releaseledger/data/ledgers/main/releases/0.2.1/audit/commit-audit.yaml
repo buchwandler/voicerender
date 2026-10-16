@@ -1,0 +1,176 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.2.1
+git_base_ref: v0.2.0
+git_base_sha: a627d2d625bc3e6daae8e3bee58abb77231918ec
+git_head_ref: HEAD
+git_head_sha: 7f466cc98bb9644372a562b621411ba778a9dba5
+git_range: a627d2d625bc3e6daae8e3bee58abb77231918ec..7f466cc98bb9644372a562b621411ba778a9dba5
+commit_count: 5
+rows:
+  - sha: 3c82349993e1adc0073141215848ce0d3c10817c
+    source_ref: git:3c82349993e1adc0073141215848ce0d3c10817c
+    short_sha: 3c82349
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_registry.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_qwen3_voice_design.py
+      - tests/test_qwen3synth_engine.py
+      - tests/test_renderprofile.py
+      - tests/test_soprosynth_engine.py
+      - tests/test_voice_source_codec.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/qwen3synth.py
+      - voicerender/engines/registry.py
+      - voicerender/voice_design.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    stats:
+      files_changed: 20
+      insertions: 4180
+      deletions: 24
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_registry.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_qwen3_voice_design.py
+      - tests/test_qwen3synth_engine.py
+      - tests/test_renderprofile.py
+      - tests/test_soprosynth_engine.py
+      - tests/test_voice_source_codec.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/qwen3synth.py
+      - voicerender/engines/registry.py
+      - voicerender/voice_design.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    observed_behavior:
+      Adds optional Qwen3Synth support, including VoiceDesign reference
+      generation, prepared voice profiles, CLI commands, engine registration, and documentation.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add qwen3 engine"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 84f629eb7c691e0d2025de4ea8018ec0dd56f3e6
+    source_ref: git:84f629eb7c691e0d2025de4ea8018ec0dd56f3e6
+    short_sha: 84f629e
+    changed_paths:
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/renderplan_input.py
+    stats:
+      files_changed: 6
+      insertions: 476
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/renderplan_input.py
+    observed_behavior:
+      Carries KittenSynth maximum-token metadata into RenderPlan request
+      measurement and validates token capability handling.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add maximum token field for kittensynth"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: b7e1917fea29831344af3900a3e26a49530fb21f
+    source_ref: git:b7e1917fea29831344af3900a3e26a49530fb21f
+    short_sha: b7e1917
+    changed_paths:
+      - tests/test_kittensynth_engine.py
+      - voicerender/engines/kittensynth.py
+    stats:
+      files_changed: 2
+      insertions: 76
+      deletions: 4
+    inspected: true
+    inspected_paths:
+      - tests/test_kittensynth_engine.py
+      - voicerender/engines/kittensynth.py
+    observed_behavior:
+      Maps KittenSynth input-too-long failures to a typed replanable
+      error with measured amount, maximum, unit, and request context.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: kittensynth"
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: 3342e1569de143e9170971f38c4d3a22d2dedb1b
+    source_ref: git:3342e1569de143e9170971f38c4d3a22d2dedb1b
+    short_sha: 3342e15
+    changed_paths:
+      - tests/test_qwen3synth_engine.py
+    stats:
+      files_changed: 1
+      insertions: 5
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - tests/test_qwen3synth_engine.py
+    observed_behavior:
+      Adjusts a Qwen3Synth test fixture path without changing product
+      behavior.
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: fix path"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 7f466cc98bb9644372a562b621411ba778a9dba5
+    source_ref: git:7f466cc98bb9644372a562b621411ba778a9dba5
+    short_sha: 7f466cc
+    changed_paths:
+      - .github/workflows/tests.yml
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+    stats:
+      files_changed: 5
+      insertions: 21
+      deletions: 15
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+    observed_behavior:
+      Refines backend test cases and CI dependency checks; no product
+      behavior change.
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: pytest fix"
+    target_entry_id: entry-0005
+    notes: ""

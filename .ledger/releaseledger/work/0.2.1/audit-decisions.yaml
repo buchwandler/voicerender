@@ -1,0 +1,85 @@
+rows:
+  - sha: 3c82349993e1adc0073141215848ce0d3c10817c
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_registry.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_qwen3_voice_design.py
+      - tests/test_qwen3synth_engine.py
+      - tests/test_renderprofile.py
+      - tests/test_soprosynth_engine.py
+      - tests/test_voice_source_codec.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/qwen3synth.py
+      - voicerender/engines/registry.py
+      - voicerender/voice_design.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    observed_behavior: "Adds optional Qwen3Synth support, including VoiceDesign reference generation, prepared voice profiles, CLI commands, engine registration, and documentation."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 84f629eb7c691e0d2025de4ea8018ec0dd56f3e6
+    inspected: true
+    inspected_paths:
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/renderplan_input.py
+    observed_behavior: "Carries KittenSynth maximum-token metadata into RenderPlan request measurement and validates token capability handling."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: b7e1917fea29831344af3900a3e26a49530fb21f
+    inspected: true
+    inspected_paths:
+      - tests/test_kittensynth_engine.py
+      - voicerender/engines/kittensynth.py
+    observed_behavior: "Maps KittenSynth input-too-long failures to a typed replanable error with measured amount, maximum, unit, and request context."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 3342e1569de143e9170971f38c4d3a22d2dedb1b
+    inspected: true
+    inspected_paths:
+      - tests/test_qwen3synth_engine.py
+    observed_behavior: "Adjusts a Qwen3Synth test fixture path without changing product behavior."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 7f466cc98bb9644372a562b621411ba778a9dba5
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - tests/test_kittensynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+    observed_behavior: "Refines backend test cases and CI dependency checks; no product behavior change."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
