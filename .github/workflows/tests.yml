@@ -103,7 +103,7 @@ jobs:
             "soundfile==0.12.1" \
             "tomli==2.0.1" \
             "renderplan==0.1.2" \
-            "voicefolio==0.1.1" \
+            "voicefolio==0.1.1"
           python -m pip install --no-deps -e .
       - name: Run lower-bound tests
         run: python -m pytest -q
