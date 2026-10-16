@@ -238,6 +238,7 @@ def _report(adapter: _Adapter, plan: RenderPlan, tmp_path: Path) -> PreflightRep
     del adapter
     return preflight_render_plan(plan, tmp_path / "preflight.toml")
 
+
 def test_preflight_and_render_share_optional_token_lowering(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -268,7 +269,6 @@ def test_preflight_and_render_share_optional_token_lowering(
     assert adapter.synthesized_requests[0].tokens == ()
     assert plan.speech[0].tokens == tokens
     assert plan.plan_id == original_plan_id
-
 
 
 def test_render_defers_emphasis_without_changing_wav_or_manifest_identity(

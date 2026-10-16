@@ -349,7 +349,6 @@ def test_kokoro_fragment_uses_discovered_capacity_and_exact_token_contract(
     assert fragment.binding["renderer_metadata"]["source_revision"] == "kokoro-r4"
 
 
-
 def test_kittensynth_authoritative_capacity_survives_profile_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

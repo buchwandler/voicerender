@@ -199,6 +199,7 @@ jobs:
               engine_sdks = {
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
                   "pocketsynth", "soprosynth", "supertonicsynth",
+                  "qwen3synth",
               }
               assert not engine_sdks & base_requirements
               assert "utterplan" not in base_requirements
@@ -239,6 +240,7 @@ jobs:
               "kokoro",
               "piper",
               "pocket",
+              "qwen3",
               "sopro",
               "supertonic",
           }
@@ -246,6 +248,7 @@ jobs:
               name.split(".", 1)[0] in {
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
                   "pocketsynth", "soprosynth", "supertonicsynth", "utterplan",
+                  "qwen3synth",
               }
               for name in sys.modules
           )

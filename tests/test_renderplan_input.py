@@ -394,7 +394,10 @@ def test_supertonic_renderplan_optional_tokens_reach_synthesis(
     session = SupertonicSynthEngineSession(
         SimpleNamespace(synthesize=synthesize),
         EngineSelection(
-            engine="supertonic", target_id="target-v1", language="en-US", voice="voice-a"
+            engine="supertonic",
+            target_id="target-v1",
+            language="en-US",
+            voice="voice-a",
         ),
         generation=None,
         voice_level=SimpleNamespace(mode="off"),
@@ -431,11 +434,17 @@ def test_unsupported_engine_sessions_retain_direct_token_rejection() -> None:
         voice_level=None,
     )
 
-    with pytest.raises(UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"):
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
+    ):
         inflect.synthesize(request)
-    with pytest.raises(UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"):
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
+    ):
         pocket._native_request(request, object())
-    with pytest.raises(UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"):
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
+    ):
         supertonic.synthesize(request)
 
 

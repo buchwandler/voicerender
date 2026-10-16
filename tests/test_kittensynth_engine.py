@@ -93,9 +93,7 @@ def test_discovery_normalizes_public_maximum_for_hard_profile_capacity(
         )
     )
     adapter = KittenSynthEngineAdapter()
-    selection = EngineSelection(
-        engine="kitten", target_id=target.id, language="en-US"
-    )
+    selection = EngineSelection(engine="kitten", target_id=target.id, language="en-US")
     monkeypatch.setattr(adapter, "discover", lambda request: (target,))
 
     metadata = adapter.target_metadata(selection)
@@ -121,9 +119,7 @@ def test_discovery_uses_documented_metadata_key_and_keeps_unknown_capacity_unkno
     target = _target_from_model(_discovered_model(metadata={"max_tokens": 128}))
     unknown = _target_from_model(_discovered_model())
     adapter = KittenSynthEngineAdapter()
-    selection = EngineSelection(
-        engine="kitten", target_id=target.id, language="en-US"
-    )
+    selection = EngineSelection(engine="kitten", target_id=target.id, language="en-US")
     monkeypatch.setattr(adapter, "discover", lambda request: (target,))
 
     fragment = adapter.renderprofile_fragment(selection)
@@ -150,6 +146,7 @@ def test_discovery_rejects_invalid_public_maximum_without_metadata_fallback(
     )
 
     assert "max_tokens" not in target.metadata
+
 
 def test_measure_maps_exact_amount_without_maximum_and_never_synthesizes() -> None:
     native_metadata = {"frontend": "kitteng2p"}
@@ -202,8 +199,6 @@ def test_measure_maps_authoritative_known_maximum() -> None:
     assert voice.synthesize_calls == []
 
 
-
-
 def test_over_limit_measurement_is_replanable_without_synthesis() -> None:
     voice = _FakeVoice(
         SimpleNamespace(
@@ -225,6 +220,7 @@ def test_over_limit_measurement_is_replanable_without_synthesis() -> None:
     assert outcome.measurement.maximum == 512
     assert outcome.measurement.unit == "model_tokens"
     assert voice.synthesize_calls == []
+
 
 @pytest.mark.parametrize(
     ("measurement", "invalid_field"),
@@ -272,7 +268,6 @@ def test_measure_translates_native_empty_text_error(
     assert caught.value.native_error_type == "EmptyTextError"
     assert voice.measure_calls == ["prepared speech"]
     assert voice.synthesize_calls == []
-
 
 
 def test_synthesis_too_long_error_translates_with_replan_details(
