@@ -282,6 +282,7 @@ def test_resolve_rejects_voice_design_bundle_as_renderer(
 
 def test_resolve_selects_base_bundle_and_preserves_revision(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
 ) -> None:
     fake = _fake_package()
     fake.discover_bundles = lambda **kwargs: (_bundle(),)
@@ -295,7 +296,7 @@ def test_resolve_selects_base_bundle_and_preserves_revision(
             options={
                 "voice_source": {
                     "kind": "reference",
-                    "value": "/voices/narrator.wav",
+                    "value": str(tmp_path / "narrator.wav"),
                     "sha256": "a" * 64,
                 },
                 "reference_text": "A reference utterance.",
@@ -613,6 +614,7 @@ def test_native_reference_errors_are_typed_and_keep_the_cause(
 
 def test_resolve_uses_origin_transcript_and_rejects_missing_or_wrong_sources(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
 ) -> None:
     fake = _fake_package()
     fake.discover_bundles = lambda **kwargs: (_bundle(),)
@@ -638,7 +640,7 @@ def test_resolve_uses_origin_transcript_and_rejects_missing_or_wrong_sources(
     }
     source = {
         "kind": "reference",
-        "value": "/voices/designed.wav",
+        "value": str(tmp_path / "designed.wav"),
         "sha256": "a" * 64,
         "origin": origin,
     }
@@ -677,7 +679,7 @@ def test_resolve_uses_origin_transcript_and_rejects_missing_or_wrong_sources(
                     "voice_source": {
                         "kind": "prepared",
                         "format": "unsupported.qvoice.v1",
-                        "value": "/voices/profile.qvoice",
+                        "value": str(tmp_path / "profile.qvoice"),
                         "sha256": "b" * 64,
                     }
                 },
