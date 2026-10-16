@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from renderplan import (
     PausePolicy,
@@ -109,7 +109,10 @@ def load_render_profile(profile: str | Path | RenderProfile) -> RenderProfile:
 def save_render_profile(profile: RenderProfile, path: str | Path) -> Path:
     """Persist a shared RenderProfile using the RenderPlan codec."""
     try:
-        return cast(Path, save_profile(profile, path))
+        saved = save_profile(profile, path)
+        if not isinstance(saved, Path):
+            raise TypeError("RenderProfile codec did not return a Path")
+        return saved
     except Exception as exc:
         raise ProfileError(f"Cannot write RenderProfile {path}: {exc}") from exc
 

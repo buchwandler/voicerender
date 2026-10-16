@@ -7,7 +7,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from renderplan import (
     PreflightCheck,
@@ -119,6 +119,7 @@ def preflight_render_plan(
 
         has_error = any(check.status == "error" for check in checks)
         too_long = [check for check in checks if check.status == "too_long"]
+        status: Literal["ok", "replan", "reject"]
         if has_error:
             status = "reject"
             replans: tuple[ReplanRequest, ...] = ()
@@ -196,11 +197,12 @@ def _measurement_check(
     deferred_control_count: int = 0,
 ) -> PreflightCheck:
     measurement = outcome.measurement
-    status = {
-        PreflightDisposition.OK: "ok",
-        PreflightDisposition.TOO_LONG: "too_long",
-        PreflightDisposition.REJECT: "error",
-    }[outcome.disposition]
+    if outcome.disposition is PreflightDisposition.OK:
+        status: Literal["ok", "too_long", "error"] = "ok"
+    elif outcome.disposition is PreflightDisposition.TOO_LONG:
+        status = "too_long"
+    else:
+        status = "error"
     detail = outcome.error
     if deferred_capability is not None and deferred_control_count:
         deferred_detail = (

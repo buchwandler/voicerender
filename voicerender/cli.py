@@ -371,6 +371,7 @@ def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    payload: dict[str, Any]
     try:
         if args.command == "engines":
             if args.engines_command == "list":

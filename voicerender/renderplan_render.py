@@ -10,7 +10,7 @@ from collections.abc import Collection, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal
 
 from renderplan import (
     PreflightCheck,
@@ -461,7 +461,8 @@ def _select_speech_items(
     plan: RenderPlan, speech_numbers: Collection[int] | None
 ) -> tuple[SpeechItem, ...]:
     if speech_numbers is None:
-        return cast(tuple[SpeechItem, ...], plan.speech)
+        speech_items: tuple[SpeechItem, ...] = plan.speech
+        return speech_items
     try:
         requested = tuple(speech_numbers)
     except TypeError as exc:
@@ -715,6 +716,8 @@ def _failure_report(
     outcome: MeasurementOutcome,
 ) -> PreflightReport:
     measurement = outcome.measurement
+    status: Literal["ok", "too_long", "error"]
+    report_status: Literal["ok", "replan", "reject"]
     if outcome.disposition is PreflightDisposition.TOO_LONG:
         status = "too_long"
         report_status = "replan"
