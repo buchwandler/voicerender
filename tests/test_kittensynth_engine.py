@@ -15,7 +15,12 @@ from voicerender.engines.kittensynth import (
     KittenSynthEngineSession,
     _target_from_model,
 )
-from voicerender.errors import EmptySpeechTextError, EngineBackendError
+from voicerender.errors import (
+    EmptySpeechTextError,
+    EngineBackendError,
+    SpeechRequestTooLongError,
+)
+from voicerender.renderplan_input import PreflightDisposition, classify_measurement
 
 
 class _FakeVoice:
@@ -197,6 +202,30 @@ def test_measure_maps_authoritative_known_maximum() -> None:
     assert voice.synthesize_calls == []
 
 
+
+
+def test_over_limit_measurement_is_replanable_without_synthesis() -> None:
+    voice = _FakeVoice(
+        SimpleNamespace(
+            token_count=513,
+            max_tokens=512,
+            fits=False,
+            model_id="nano-0.8-int8",
+            metadata={"capacity_policy_revision": "kitten.capacity.v1"},
+        )
+    )
+
+    measured = _session(voice).measure(_request())
+    outcome = classify_measurement(measured)
+
+    assert measured.fits is False
+    assert outcome.disposition is PreflightDisposition.TOO_LONG
+    assert outcome.measurement is not None
+    assert outcome.measurement.amount == 513
+    assert outcome.measurement.maximum == 512
+    assert outcome.measurement.unit == "model_tokens"
+    assert voice.synthesize_calls == []
+
 @pytest.mark.parametrize(
     ("measurement", "invalid_field"),
     [
@@ -243,6 +272,38 @@ def test_measure_translates_native_empty_text_error(
     assert caught.value.native_error_type == "EmptyTextError"
     assert voice.measure_calls == ["prepared speech"]
     assert voice.synthesize_calls == []
+
+
+
+def test_synthesis_too_long_error_translates_with_replan_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    native_error_type = type("SynthesisInputTooLongError", (Exception,), {})
+    module.SynthesisInputTooLongError = native_error_type  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    native_error = native_error_type("request exceeds model context")
+    native_error.amount = 513
+    native_error.maximum = 512
+    native_error.unit = "model_tokens"
+
+    class ErrorVoice(_FakeVoice):
+        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
+            raise native_error
+
+    with pytest.raises(SpeechRequestTooLongError) as caught:
+        _session(ErrorVoice(None)).synthesize(_request())
+
+    assert caught.value.code == "synthesis.request_too_long"
+    assert caught.value.amount == 513
+    assert caught.value.maximum == 512
+    assert caught.value.unit == "model_tokens"
+    assert caught.value.native_error_type == "SynthesisInputTooLongError"
+    outcome = classify_measurement(caught.value)
+    assert outcome.disposition is PreflightDisposition.TOO_LONG
+    assert outcome.measurement is not None
+    assert outcome.measurement.amount == 513
+    assert outcome.measurement.maximum == 512
 
 
 def _synthesis_result(audio: Any) -> SimpleNamespace:

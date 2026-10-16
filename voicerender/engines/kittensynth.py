@@ -14,10 +14,12 @@ import numpy as np
 from ..errors import (
     EmptySpeechTextError,
     EngineBackendError,
+    EngineError,
     EngineSynthesisError,
     InvalidEngineModelError,
     InvalidEngineOptionError,
     InvalidEngineVoiceError,
+    SpeechRequestTooLongError,
 )
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
@@ -157,20 +159,21 @@ def _translate_kitten_error(
     request: SpeechRequest | None = None,
     *,
     opening: bool = False,
-) -> EngineSynthesisError:
+) -> EngineError:
     try:
         import kittensynth
     except ImportError:
         kittensynth = None
 
-    error_map: tuple[tuple[str, type[EngineSynthesisError], str | None], ...] = (
+    error_map: tuple[tuple[str, type[EngineError], str | None], ...] = (
         ("EmptyTextError", EmptySpeechTextError, None),
+        ("SynthesisInputTooLongError", SpeechRequestTooLongError, None),
         ("InvalidSpeedError", InvalidEngineOptionError, "kitten.invalid_speed"),
         ("InvalidVoiceError", InvalidEngineVoiceError, "kitten.voice_unavailable"),
         ("UnsupportedModelError", InvalidEngineModelError, "kitten.model_unsupported"),
         ("OnnxVoiceContractError", EngineBackendError, "kitten.runtime_contract_error"),
     )
-    error_type: type[EngineSynthesisError] = EngineBackendError
+    error_type: type[EngineError] = EngineBackendError
     code: str | None = "kitten.engine_error"
     if kittensynth is not None:
         for native_name, mapped_type, mapped_code in error_map:
@@ -192,6 +195,14 @@ def _translate_kitten_error(
         "request_id": request.id if request is not None else None,
         "native_error_type": type(error).__name__,
     }
+    if error_type is SpeechRequestTooLongError:
+        context.update(
+            amount=getattr(error, "amount", getattr(error, "token_count", None)),
+            maximum=getattr(error, "maximum", getattr(error, "max_tokens", None)),
+            unit=getattr(error, "unit", "model_tokens"),
+            text_length=len(request.text) if request is not None else None,
+            source="kittensynth.synthesize_prepared",
+        )
     return error_type(str(error), **context, code=code)
 
 
