@@ -1,0 +1,176 @@
+ README.md             | 28 +++++++++++++++++-
+ docs/index.md         | 14 +++++++--
+ docs/renderprofile.md | 82 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 121 insertions(+), 3 deletions(-)
+
+diff --git a/README.md b/README.md
+index 8325efb..5742fdd 100644
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@ Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `supertonic`,
+
+ ## CLI workflow
+
+-A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed:
++A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
+
+ ```bash
+ voicerender engines list
+@@ -53,6 +53,32 @@ voicerender profile refresh narration.renderprofile.toml \
+
+ The shared RenderProfile workflow rejects reference-audio bindings because this execution path does not define a portable reference-audio contract.
+
++## SSMDBook RenderPlan collections from UtterPlan
++
++For a book, [UtterPlan](https://pypi.org/project/utterplan/) can project already-saved
++chapter plans into one RenderPlan variant per RenderProfile. It does not call
++VoiceRender or preflight during projection. The collection index
++`renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned
++workspace metadata, not RenderPlan artifacts; VoiceRender consumes the individual
++`.renderplan.toml` files through its unchanged single-plan workflow.
++
++```bash
++utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
++  --profile narration.renderprofile.toml
++
++voicerender preflight \
++  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
++  -o chapter-0005.preflight.toml
++voicerender render \
++  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
++  --preflight chapter-0005.preflight.toml \
++  --out-dir renders/chapter-0005
++```
++
++Repeat the ordinary preflight/render flow for each selected plan. Different profile
++identities produce distinct UtterPlan variant directories, while each individual
++RenderPlan retains the same shared contract and exact request semantics.
++
+ ## Python API
+
+ ```python
+diff --git a/docs/index.md b/docs/index.md
+index 07bcd68..4d237ed 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -5,13 +5,16 @@ VoiceRender consumes shared RenderPlan and RenderProfile contracts. See `README.
+ ```{toctree}
+ :maxdepth: 1
+
++renderprofile
+ changelog
+ ```
+
+ ## Workflow
+
+-1. Create or update a RenderProfile and review engine-derived binding metadata.
+-2. Produce a RenderPlan that references the profile identity.
++1. Create or update a RenderProfile and review engine-derived binding metadata (see the [RenderProfile lifecycle](renderprofile.md)).
++2. Produce RenderPlans that reference the profile identity: use UtterPlan
++   `render-plan` for one saved plan or `render-book` for selected SSMDBook
++   chapters; both emit the same shared RenderPlan contract.
+ 3. Run `voicerender preflight PLAN -o REPORT`; this measures requests and never synthesizes.
+ 4. Render only when the report is `ok`: `voicerender render PLAN --preflight REPORT --out-dir OUTPUT`.
+ 5. Verify the bundle with `voicerender inspect-manifest OUTPUT/render-manifest.toml`.
+@@ -20,6 +23,13 @@ The RenderPlan renderer preserves request order and identity: one speech item be
+
+ The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
+
++
++For book-level projection, UtterPlan owns the `renderplan-set.toml` collection index
++and per-invocation report; they are workspace metadata, not inputs to VoiceRender.
++VoiceRender continues to preflight and render each individual `.renderplan.toml` file.
++See [UtterPlan](https://pypi.org/project/utterplan/) and the shared
++[RenderPlan](https://pypi.org/project/renderplan/) package.
++
+ ## Engine integration
+
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+new file mode 100644
+index 0000000..0e5afd2
+--- /dev/null
++++ b/docs/renderprofile.md
+@@ -0,0 +1,82 @@
++# RenderProfile lifecycle
++
++A RenderProfile is the portable, user-owned renderer configuration shared by
++[RenderPlan](https://pypi.org/project/renderplan/) producers and VoiceRender. It
++captures engine-backed role bindings, renderer requirements, and planning policy;
++it is data, not a loaded engine or synthesis session. Create profiles with
++VoiceRender so bindings are seeded from installed adapter metadata, then review and
++validate them before planning:
++
++```bash
++voicerender engines list
++voicerender voices list --engine piper --lang en-US --offline --json
++voicerender profile create \
++  --engine piper --target en_US-amy-medium --language en-US \
++  --offline --output narration.renderprofile.toml
++voicerender profile validate narration.renderprofile.toml
++```
++
++A profile has a canonical `profile_id`; RenderPlans carry that identity and copy
++the resolved role bindings needed to execute without reopening the profile.
++Refreshing engine metadata writes a proposal rather than overwriting user policy:
++
++```bash
++voicerender profile refresh narration.renderprofile.toml \
++  -o narration.refreshed.renderprofile.toml
++voicerender profile validate narration.refreshed.renderprofile.toml
++```
++
++Review refreshed bindings and policy before using the proposal. If identity-bearing
++profile semantics change, regenerate the associated RenderPlan using the refreshed
++profile. Keep the original profile with its plans for provenance and inspection.
++
++## UtterPlan book variants
++
++[UtterPlan](https://pypi.org/project/utterplan/) can compile an SSMDBook into one
++renderer-neutral semantic plan per chapter, then use `render-book` to project
++selected saved plans for one profile identity:
++
++```bash
++utterplan compile-book "Novel.ssmdbook" --chapters 5-17
++utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
++  --profile narration.renderprofile.toml
++```
++
++The command writes to a profile-specific variant directory such as
++`Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/`. The directory contains
++a canonical `renderprofile.toml` snapshot, one ordinary `.renderplan.toml` per
++successful chapter, an UtterPlan-owned `renderplan-set.toml` collection index, and
++an invocation-level `render-report.toml`. The set index and report are workspace
++metadata—not RenderPlan contracts, RenderProfiles, or inputs to VoiceRender.
++
++A different canonical profile identity selects a distinct default variant, so
++multiple voices or policies can coexist while sharing the same `utterplan/`
++semantic plans. Repeated invocations for the same profile incrementally update the
++set index. The snapshot preserves the profile used by that collection, but a later
++`utterplan render-book` invocation still takes a profile path with `--profile`.
++UtterPlan loads the shared profile and emits RenderPlans; it does not call
++VoiceRender, inspect engine availability, preflight, synthesize, or require
++VoiceRender to be installed.
++
++## Preflight and render each plan
++
++VoiceRender consumes each chapter's ordinary RenderPlan independently. The
++collection directory does not change the single-plan execution contract; the
++`renderplan-set.toml` is not passed to these commands:
++
++```bash
++voicerender preflight \
++  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
++  -o chapter-0005.preflight.toml
++voicerender render \
++  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
++  --preflight chapter-0005.preflight.toml \
++  --out-dir renders/chapter-0005
++```
++
++Install the selected engine extra and make its model assets available before
++preflight/render. VoiceRender preflight measures requests but never synthesizes;
++rendering requires a matching all-`ok` report. See the
++[UtterPlan SSMDBook workflow](https://pypi.org/project/utterplan/) and the
++[RenderPlan package contract](https://pypi.org/project/renderplan/) for the
++producer/consumer boundary.

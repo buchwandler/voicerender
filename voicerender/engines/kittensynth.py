@@ -7,7 +7,7 @@ import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -239,7 +239,9 @@ class KittenSynthEngineSession:
             invalid_fields.append("maximum")
         if raw_fits is not None and not isinstance(raw_fits, bool):
             invalid_fields.append("fits")
-        unit = "model_tokens" if amount is not None else "unknown"
+        unit: Literal["model_tokens", "unknown"] = (
+            "model_tokens" if amount is not None else "unknown"
+        )
         if invalid_fields:
             return RequestMeasure(
                 fits=None,
@@ -322,7 +324,7 @@ class KittenSynthEngineSession:
                 },
             }
         )
-        warnings = ()
+        warnings: tuple[str, ...] = ()
         if clipped_samples:
             warnings = (
                 (

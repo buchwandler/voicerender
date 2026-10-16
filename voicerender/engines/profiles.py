@@ -124,6 +124,8 @@ def validate_voice_source_binding(binding: Mapping[str, Any]) -> None:
     if binding.get("voice") is not None or binding.get("speaker") is not None:
         raise ProfileError("voice/speaker and voice_source cannot both be set")
     raw_source = options.get("voice_source")
+    if not isinstance(raw_source, Mapping):
+        raise ProfileError("RenderPlan binding options.voice_source must be a table")
     try:
         source = normalize_voice_source(raw_source)
     except (EngineError, ValueError) as exc:

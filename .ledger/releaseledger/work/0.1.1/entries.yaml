@@ -1,0 +1,25 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.1.1
+git_base_ref: 46cea5077ac2b81c4c96b1c41ceb4e78c53d960c
+git_base_sha: 46cea5077ac2b81c4c96b1c41ceb4e78c53d960c
+git_head_ref: eaa3bc4964996281a156eda9aebe5a32d5f56201
+git_head_sha: eaa3bc4964996281a156eda9aebe5a32d5f56201
+include_merges: nontrivial
+entries:
+  - kind: internal
+    internal: true
+    summary: "Improved release artifact validation for VoiceRender package metadata and contents"
+    status: accepted
+    source_refs:
+      - git:eaa3bc4964996281a156eda9aebe5a32d5f56201
+    paths:
+      - .github/workflows/python-publish.yml
+    sources:
+      - git:eaa3bc4964996281a156eda9aebe5a32d5f56201
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

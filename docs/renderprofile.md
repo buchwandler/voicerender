@@ -74,6 +74,8 @@ voicerender render \
   --out-dir renders/chapter-0005
 ```
 
+Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference.
+
 Install the selected engine extra and make its model assets available before
 preflight/render. VoiceRender preflight measures requests but never synthesizes;
 rendering requires a matching all-`ok` report. See the

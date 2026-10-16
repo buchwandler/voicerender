@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib import resources
 from pathlib import Path
 
 from renderplan import RenderPlan, SourceSpan, SpeechItem, load_manifest
@@ -28,7 +30,7 @@ from voicerender.engines.base import (
     RequestMeasure,
     SpeechRequest,
 )
-from voicerender.engines.registry import register_adapter
+from voicerender.engines.registry import list_engines, register_adapter
 from voicerender.engines.selection import EngineRequest
 from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_render import render_renderplan
@@ -145,6 +147,28 @@ def main() -> None:
     checkout = Path(__file__).resolve().parents[1]
     installed_package = Path(voicerender.__file__).resolve()
     assert not installed_package.is_relative_to(checkout), installed_package
+    assert resources.files("voicerender").joinpath("py.typed").is_file()
+    expected_engine_ids = {
+        "inflect",
+        "kitten",
+        "kokoro",
+        "piper",
+        "pocket",
+        "sopro",
+        "supertonic",
+    }
+    assert {item["id"] for item in list_engines()} == expected_engine_ids
+    engine_sdks = {
+        "inflectsynth",
+        "kittensynth",
+        "pykokoro",
+        "pipersynth",
+        "pocketsynth",
+        "soprosynth",
+        "supertonicsynth",
+    }
+    loaded_engine_sdks = {name.split(".", 1)[0] for name in sys.modules} & engine_sdks
+    assert not loaded_engine_sdks, loaded_engine_sdks
     register_adapter(_Adapter())
 
     text = "Installed wheel executes the shared RenderPlan contract."

@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        extra: [kokoro, piper, pocket, kitten, supertonic, inflect]
+        extra: [kokoro, piper, pocket, kitten, sopro, supertonic, inflect]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -76,10 +76,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip pytest
           python -m pip install -e . \
-            "pykokoro==0.10.2" \
-            "pipersynth==0.2.1" \
+            "pykokoro==0.10.5" \
+            "pipersynth==0.2.5" \
             "pocketsynth[cpu]==0.2.5" \
-            "kittensynth[cpu]==0.1.1" \
+            "kittensynth[cpu]==0.1.4" \
+            "soprosynth[cpu]==0.1.0" \
             "supertonicsynth[cpu]==0.1.2" \
             "inflectsynth[cpu]==0.1.1"
       - name: Run released-set compatibility contracts
@@ -101,7 +102,8 @@ jobs:
             "numpy==1.23.0" \
             "soundfile==0.12.1" \
             "tomli==2.0.1" \
-            "renderplan==0.1.1"
+            "renderplan==0.1.2" \
+            "voicefolio==0.1.1" \
           python -m pip install --no-deps -e .
       - name: Run lower-bound tests
         run: python -m pytest -q
@@ -183,7 +185,7 @@ jobs:
                   for value in metadata.get_all("Requires-Dist", [])
                   if Requirement(value).name.lower() == "renderplan"
               )
-              assert {">=0.1.1", "<0.2"} <= {
+              assert {">=0.1.2", "<0.2"} <= {
                   str(specifier) for specifier in renderplan_requirement.specifier
               }
               base_requirements = set()
@@ -196,7 +198,7 @@ jobs:
                       base_requirements.add(requirement.name.lower())
               engine_sdks = {
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
-                  "pocketsynth", "supertonicsynth",
+                  "pocketsynth", "soprosynth", "supertonicsynth",
               }
               assert not engine_sdks & base_requirements
               assert "utterplan" not in base_requirements
@@ -231,11 +233,19 @@ jobs:
           assert resources.files("voicerender").joinpath("book_contract.py").is_file()
           assert resources.files("voicerender").joinpath("book_layout.py").is_file()
           assert RenderPlanSet is not None
-          assert len(list_engines()) == 6
+          assert {item["id"] for item in list_engines()} == {
+              "inflect",
+              "kitten",
+              "kokoro",
+              "piper",
+              "pocket",
+              "sopro",
+              "supertonic",
+          }
           assert not any(
               name.split(".", 1)[0] in {
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
-                  "pocketsynth", "supertonicsynth", "utterplan",
+                  "pocketsynth", "soprosynth", "supertonicsynth", "utterplan",
               }
               for name in sys.modules
           )

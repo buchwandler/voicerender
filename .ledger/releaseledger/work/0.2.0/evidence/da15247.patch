@@ -1,0 +1,1489 @@
+ tests/test_engine_contracts.py      |   4 +-
+ tests/test_engine_registry.py       |  72 +++++++++-
+ tests/test_inflectsynth_engine.py   | 264 ++++++++++++++++++++++++++++++++++++
+ tests/test_kittensynth_engine.py    |  33 ++++-
+ tests/test_preflight.py             |  34 +++--
+ tests/test_render_book.py           |  18 ++-
+ tests/test_renderplan_input.py      |  99 ++++++++++++++
+ tests/test_renderplan_render.py     |  57 ++++++++
+ tests/test_renderprofile.py         |   2 +
+ voicerender/book.py                 |   1 +
+ voicerender/engines/base.py         |   5 +-
+ voicerender/engines/inflectsynth.py | 241 +++++++++++++++++++++++---------
+ voicerender/engines/kittensynth.py  |  83 +++++++++++-
+ voicerender/engines/profiles.py     |   5 +
+ voicerender/renderplan_input.py     |  74 ++++++++--
+ voicerender/renderplan_render.py    |   6 +-
+ voicerender/storage.py              |   4 +-
+ 17 files changed, 890 insertions(+), 112 deletions(-)
+
+diff --git a/tests/test_engine_contracts.py b/tests/test_engine_contracts.py
+index 7d6f68e..0ad904f 100644
+--- a/tests/test_engine_contracts.py
++++ b/tests/test_engine_contracts.py
+@@ -31,7 +31,9 @@ def test_rendered_speech_preserves_existing_pcm_range_tolerance(peak: float) ->
+
+
+ def test_rendered_speech_rejects_audio_above_pcm_range_with_peak() -> None:
+-    with pytest.raises(EngineBackendError, match=r"PCM full-scale range.*peak=1\.010000"):
++    with pytest.raises(
++        EngineBackendError, match=r"PCM full-scale range.*peak=1\.010000"
++    ):
+         _validate(np.array([0.0, 1.01], dtype=np.float32))
+
+
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index bd6ad30..1366a0e 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -226,7 +226,14 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+     import importlib
+
+     fake = _fake_package(package)
+-    if engine == "kitten":
++    if engine == "inflect":
++        fake.request_api_contract = lambda: {
++            "version": 1,
++            "supports_request_measurement": True,
++            "measurement_entrypoint": "InflectVoice.measure_prepared",
++            "measurement_metric": "model_tokens",
++        }
++    elif engine == "kitten":
+         fake.request_api_contract = lambda: {
+             "version": 1,
+             "supports_request_measurement": True,
+@@ -265,6 +272,69 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+     assert fake._probe_discovery_calls == []
+
+
++def test_inflect_probe_accepts_common_measurement_contract_without_capacity_api(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    fake = _fake_package("inflectsynth")
++    fake.request_api_contract = lambda: {
++        "version": 1,
++        "supports_request_measurement": True,
++        "measurement_entrypoint": "InflectVoice.measure_prepared",
++        "measurement_metric": "model_tokens",
++    }
++    del fake.CAPACITY_API_VERSION
++    del fake.capacity_api_contract
++    monkeypatch.setitem(sys.modules, "inflectsynth", fake)
++
++    adapter = get_adapter("inflect")
++    probe = adapter.probe_api()
++
++    assert probe.compatible, probe
++    assert probe.details["supports_request_measurement"] is True
++    assert probe.details["measurement_entrypoint"] == "InflectVoice.measure_prepared"
++    assert probe.details["measurement_metric"] == "model_tokens"
++    assert probe.details["capacity_api_compatible"] is False
++    assert adapter.capabilities().supports_request_measurement is True
++    assert fake._probe_discovery_calls == []
++
++
++def test_inflect_probe_rejects_measurement_without_declared_api_fields(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    fake = _fake_package("inflectsynth")
++    fake.request_api_contract = lambda: {
++        "version": 1,
++        "supports_request_measurement": True,
++        "measurement_entrypoint": "InflectVoice.measure_prepared",
++    }
++    monkeypatch.setitem(sys.modules, "inflectsynth", fake)
++
++    probe = get_adapter("inflect").probe_api()
++
++    assert not probe.compatible
++    assert probe.failed_stage == "request_measurement_contract"
++    assert probe.details["measurement_metric"] is None
++
++
++def test_inflect_probe_rejects_declared_measurement_without_method(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    fake = _fake_package("inflectsynth")
++    fake.request_api_contract = lambda: {
++        "version": 1,
++        "supports_request_measurement": True,
++        "measurement_entrypoint": "InflectVoice.measure_prepared",
++        "measurement_metric": "model_tokens",
++    }
++    delattr(fake.InflectVoice, "measure_prepared")
++    monkeypatch.setitem(sys.modules, "inflectsynth", fake)
++
++    probe = get_adapter("inflect").probe_api()
++
++    assert not probe.compatible
++    assert "InflectVoice.measure_prepared" in probe.missing_methods
++
++
+ def test_piper_probe_rejects_measurement_disabled_contract(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_inflectsynth_engine.py b/tests/test_inflectsynth_engine.py
+new file mode 100644
+index 0000000..129b18d
+--- /dev/null
++++ b/tests/test_inflectsynth_engine.py
+@@ -0,0 +1,264 @@
++"""Prepared-text request measurement tests for InflectSynth."""
++
++from __future__ import annotations
++
++import sys
++from types import ModuleType, SimpleNamespace
++from typing import Any
++
++import pytest
++
++from voicerender.engines.base import EngineSelection, RequestMeasure, SpeechRequest
++from voicerender.engines.inflectsynth import (
++    InflectSynthEngineAdapter,
++    InflectSynthEngineSession,
++    _target_from_model,
++)
++from voicerender.errors import SpeechRequestTooLongError
++
++
++class _Voice:
++    def __init__(self, measured: Any = None, error: Exception | None = None) -> None:
++        self.measured = measured
++        self.error = error
++        self.measure_calls: list[str] = []
++        self.synthesis_calls = 0
++
++    def measure_prepared(self, text: str) -> Any:
++        self.measure_calls.append(text)
++        if self.error is not None:
++            raise self.error
++        return self.measured
++
++    def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
++        self.synthesis_calls += 1
++        raise AssertionError("measurement must not synthesize")
++
++
++def _session(voice: Any) -> InflectSynthEngineSession:
++    return InflectSynthEngineSession(
++        voice,
++        EngineSelection(engine="inflect", target_id="managed-model", language="en-US"),
++        config=None,
++    )
++
++
++def _request() -> SpeechRequest:
++    return SpeechRequest(id="request-1", text="hello world", language="en-US")
++
++
++def test_legacy_measurement_fields_are_normalized_without_synthesis() -> None:
++    voice = _Voice(
++        SimpleNamespace(
++            amount=12,
++            maximum=20,
++            fits=True,
++            model_id="managed-model",
++        )
++    )
++
++    measured = _session(voice).measure(_request())
++
++    assert measured == RequestMeasure(
++        fits=True,
++        amount=12,
++        maximum=20,
++        unit="model_tokens",
++        source="inflectsynth.measure_prepared",
++        details={"model_id": "managed-model"},
++    )
++    assert voice.measure_calls == ["hello world"]
++    assert voice.synthesis_calls == 0
++
++
++def test_common_measurement_fields_preserve_overflow_and_support_mapping() -> None:
++    voice = _Voice(
++        {
++            "token_count": 21,
++            "max_tokens": 20,
++            "fits": False,
++            "model_id": "managed-model",
++        }
++    )
++
++    measured = _session(voice).measure(_request())
++
++    assert measured.fits is False
++    assert measured.amount == 21
++    assert measured.maximum == 20
++    assert measured.unit == "model_tokens"
++    assert measured.source == "inflectsynth.measure_prepared"
++
++
++def test_exact_amount_survives_unknown_maximum_and_fit() -> None:
++    measured = _session(
++        _Voice(SimpleNamespace(amount=80, maximum=None, fits=None))
++    ).measure(_request())
++
++    assert measured.amount == 80
++    assert measured.maximum is None
++    assert measured.fits is None
++    assert measured.unit == "model_tokens"
++    assert measured.source == "inflectsynth.measure_prepared"
++
++
++@pytest.mark.parametrize(
++    ("result", "invalid_field"),
++    [
++        (SimpleNamespace(amount="80", maximum=None, fits=None), "amount"),
++        (SimpleNamespace(amount=True, maximum=None, fits=None), "amount"),
++        (SimpleNamespace(amount=80, maximum=0, fits=None), "maximum"),
++        (SimpleNamespace(amount=80, maximum=100, fits="yes"), "fits"),
++    ],
++)
++def test_malformed_measurement_fields_are_reported(
++    result: Any, invalid_field: str
++) -> None:
++    measured = _session(_Voice(result)).measure(_request())
++
++    assert measured.source == "inflectsynth.invalid_measurement"
++    assert invalid_field in measured.details["invalid_fields"]
++
++
++def test_missing_measurement_method_uses_no_measurement_source() -> None:
++    measured = _session(object()).measure(_request())
++
++    assert measured == RequestMeasure(
++        fits=None,
++        amount=None,
++        maximum=None,
++        unit="unknown",
++        source="inflectsynth.no_capacity_measurement",
++    )
++
++
++def test_typed_too_long_exception_is_translated_without_synthesis(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    class NativeTooLong(Exception):
++        pass
++
++    fake_module = ModuleType("inflectsynth")
++    fake_module.SynthesisInputTooLongError = NativeTooLong
++    monkeypatch.setitem(sys.modules, "inflectsynth", fake_module)
++    error = NativeTooLong("request exceeds model capacity")
++    error.token_count = 101
++    error.max_tokens = 100
++    voice = _Voice(error=error)
++
++    with pytest.raises(SpeechRequestTooLongError) as raised:
++        _session(voice).measure(_request())
++
++    assert raised.value.amount == 101
++    assert raised.value.maximum == 100
++    assert raised.value.unit == "model_tokens"
++    assert voice.synthesis_calls == 0
++
++
++def test_runtime_capacity_must_match_discovered_managed_maximum() -> None:
++    voice = _Voice(SimpleNamespace(amount=12, maximum=90, fits=True))
++    selection = EngineSelection(
++        engine="inflect",
++        target_id="managed-model",
++        language="en-US",
++        metadata={"max_input_tokens": 100, "capacity_policy_revision": "budget.v1"},
++    )
++
++    measured = InflectSynthEngineSession(voice, selection, config=None).measure(
++        _request()
++    )
++
++    assert measured.source == "inflectsynth.capacity_metadata_mismatch"
++    assert measured.amount == 12
++    assert measured.maximum == 90
++    assert measured.details == {
++        "discovered_max_input_tokens": 100,
++        "runtime_maximum": 90,
++    }
++    assert voice.synthesis_calls == 0
++
++
++def test_measurement_provenance_includes_selection_policy_revision() -> None:
++    voice = _Voice(SimpleNamespace(amount=12, maximum=100, fits=True))
++    selection = EngineSelection(
++        engine="inflect",
++        target_id="managed-model",
++        language="en-US",
++        metadata={"max_input_tokens": 100, "capacity_policy_revision": "budget.v1"},
++    )
++
++    measured = InflectSynthEngineSession(voice, selection, config=None).measure(
++        _request()
++    )
++
++    assert measured.details["capacity_policy_revision"] == "budget.v1"
++    assert measured.amount == 12
++    assert measured.maximum == 100
++    assert measured.fits is True
++
++
++def test_discovered_target_normalizes_capacity_policy_identity() -> None:
++    target = _target_from_model(
++        SimpleNamespace(
++            id="managed-model",
++            language="en-US",
++            voices=(),
++            metadata={
++                "max_input_tokens": 128,
++                "capacity_revision": "budget.v2",
++            },
++            sample_rate=24000,
++            runtime_available=True,
++        )
++    )
++
++    assert target.metadata["max_input_tokens"] == 128
++    assert target.metadata["capacity_policy_revision"] == "budget.v2"
++
++
++def test_renderprofile_carries_discovered_capacity_and_policy_revision(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = InflectSynthEngineAdapter()
++    monkeypatch.setattr(
++        adapter,
++        "target_metadata",
++        lambda selection: {
++            "max_input_tokens": 128,
++            "capacity_policy_revision": "budget.v2",
++        },
++    )
++    selection = EngineSelection(
++        engine="inflect",
++        target_id="managed-model",
++        language="en-US",
++    )
++
++    fragment = adapter.renderprofile_fragment(selection)
++
++    assert fragment.renderer_capacity is not None
++    assert fragment.renderer_capacity.maximum == 128
++    assert fragment.binding["renderer_metadata"]["max_input_tokens"] == 128
++    assert (
++        fragment.binding["renderer_metadata"]["capacity_policy_revision"] == "budget.v2"
++    )
++
++
++def test_canonical_identity_includes_capacity_policy_revision(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    fake_module = ModuleType("inflectsynth")
++    fake_module.DEFAULT_VOICE = "default"
++    fake_module.runtime_identity = lambda: {"runtime": "runtime.v1"}
++    fake_module.capacity_api_contract = lambda: {"policy_revision": "budget.v2"}
++    monkeypatch.setitem(sys.modules, "inflectsynth", fake_module)
++    selection = EngineSelection(
++        engine="inflect",
++        target_id="managed-model",
++        language="en-US",
++        metadata={"capacity_policy_revision": "budget.v2"},
++    )
++
++    identity = InflectSynthEngineAdapter().canonical_synthesis_identity(selection)
++
++    assert identity["capacity_policy_revision"] == "budget.v2"
+diff --git a/tests/test_kittensynth_engine.py b/tests/test_kittensynth_engine.py
+index a8638ba..c3fc68b 100644
+--- a/tests/test_kittensynth_engine.py
++++ b/tests/test_kittensynth_engine.py
+@@ -33,6 +33,7 @@ class _FakeVoice:
+         self.synthesize_calls.append((args, kwargs))
+         return self.synthesis_result
+
++
+ def _session(
+     voice: _FakeVoice, selection: EngineSelection | None = None
+ ) -> KittenSynthEngineSession:
+@@ -45,6 +46,7 @@ def _session(
+         )
+     return KittenSynthEngineSession(voice, selection)
+
++
+ def _request() -> SpeechRequest:
+     return SpeechRequest(id="request-1", text="prepared speech", language="en-US")
+
+@@ -100,6 +102,36 @@ def test_measure_maps_authoritative_known_maximum() -> None:
+     assert voice.synthesize_calls == []
+
+
++@pytest.mark.parametrize(
++    ("measurement", "invalid_field"),
++    [
++        (SimpleNamespace(token_count=True, max_tokens=None, fits=None), "amount"),
++        (SimpleNamespace(token_count=27, max_tokens=0, fits=None), "maximum"),
++        (SimpleNamespace(token_count=27, max_tokens=100, fits="yes"), "fits"),
++    ],
++)
++def test_measure_rejects_malformed_values(measurement: Any, invalid_field: str) -> None:
++    measured = _session(_FakeVoice(measurement)).measure(_request())
++
++    assert measured.source == "kittensynth.invalid_measurement"
++    assert invalid_field in measured.details["invalid_fields"]
++
++
++def test_measure_missing_method_reports_no_measurement() -> None:
++    voice = _FakeVoice(None)
++    voice.measure_prepared = None  # type: ignore[method-assign]
++
++    measured = _session(voice).measure(_request())
++
++    assert measured == RequestMeasure(
++        fits=None,
++        amount=None,
++        maximum=None,
++        unit="unknown",
++        source="kittensynth.no_capacity_measurement",
++    )
++
++
+ def test_measure_translates_native_empty_text_error(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -118,7 +150,6 @@ def test_measure_translates_native_empty_text_error(
+     assert voice.synthesize_calls == []
+
+
+-
+ def _synthesis_result(audio: Any) -> SimpleNamespace:
+     return SimpleNamespace(
+         audio=audio,
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 29d933c..3d6eba7 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -386,7 +386,7 @@ def _plan(
+
+ @pytest.mark.parametrize(
+     ("amount", "maximum", "fits", "expected_status"),
+-    ((180, None, None, "ok"), (300, 256, False, "replan")),
++    ((180, 256, True, "ok"), (300, 256, False, "replan")),
+ )
+ def test_piper_preflight_uses_frontend_measurement_without_synthesis(
+     monkeypatch: pytest.MonkeyPatch,
+@@ -444,7 +444,7 @@ def test_piper_preflight_keeps_emphasis_rejected(
+ def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+-    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=None, fits=None)
++    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=256, fits=True)
+     binding = {"renderer": "piper", "target_id": "piper-test-model"}
+     plan = _plan(("Piper emphasis", True, "sentence"), binding=binding)
+     item = replace(
+@@ -475,7 +475,7 @@ def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
+ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+-    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=None, fits=None)
++    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=256, fits=True)
+     binding = {
+         "renderer": "kitten",
+         "target_id": "kitten-test-model",
+@@ -490,7 +490,7 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+     assert check.status == "ok"
+     assert check.metric == "model_tokens"
+     assert check.measured == 180
+-    assert check.maximum is None
++    assert check.maximum == 256
+     assert check.source == "kittensynth.measure_prepared"
+     assert [event[0] for event in events] == ["measure", "close"]
+     assert events[0][1] == "Kitten preflight"
+@@ -499,7 +499,7 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+ def test_kitten_preflight_defers_emphasis_to_composition(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+-    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=None, fits=None)
++    events = _install_fake_kittensynth(monkeypatch, amount=180, maximum=256, fits=True)
+     binding = {
+         "renderer": "kitten",
+         "target_id": "kitten-test-model",
+@@ -536,8 +536,8 @@ def test_piper_render_defers_emphasis_to_composition_without_native_option(
+     events = _install_fake_pipersynth(
+         monkeypatch,
+         amount=20,
+-        maximum=None,
+-        fits=None,
++        maximum=256,
++        fits=True,
+         allow_synthesis=True,
+     )
+     binding = {"renderer": "piper", "target_id": "piper-test-model"}
+@@ -677,7 +677,7 @@ def test_fully_unknown_measurement_rejects(
+     assert adapter.synthesized_texts == []
+
+
+-def test_exact_measurement_without_hard_maximum_is_accepted(
++def test_exact_measurement_without_hard_maximum_is_rejected(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     adapter = _install(monkeypatch)
+@@ -686,22 +686,28 @@ def test_exact_measurement_without_hard_maximum_is_accepted(
+         fits=None,
+         amount=42,
+         maximum=None,
+-        unit="phoneme_ids",
+-        source="fake.measure",
++        unit="model_tokens",
++        source="fake.measure_prepared",
+     )
+     output = tmp_path / "exact-without-maximum.toml"
+
+     report = preflight_render_plan(plan, output)
+
+-    assert report.status == "ok"
+-    assert report.checks[0].status == "ok"
++    assert report.status == "reject"
++    assert report.checks[0].status == "error"
++    assert report.checks[0].metric == "model_tokens"
+     assert report.checks[0].measured == 42
+     assert report.checks[0].maximum is None
+-    assert report.checks[0].source == "fake.measure"
++    assert report.checks[0].source == "fake.measure_prepared"
++    assert report.checks[0].detail == (
++        "Engine measured the exact request size but did not provide an "
++        "authoritative maximum/fit result"
++    )
+     persisted = load_preflight(output)
+-    assert persisted.checks[0].status == "ok"
++    assert persisted.checks[0].status == "error"
+     assert persisted.checks[0].measured == 42
+     assert persisted.checks[0].maximum is None
++    assert report.replan == ()
+     assert adapter.synthesized_texts == []
+
+
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index d52044b..ac46832 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -326,9 +326,7 @@ def test_book_propagates_explicit_emphasis_policy(
+     assert ChapterRenderOutcome is book_module.ChapterRenderOutcome
+     workspace, variant = _book(tmp_path)
+
+-    result = render_book(
+-        workspace, variant=variant, emphasis_policy="defer-to-compose"
+-    )
++    result = render_book(workspace, variant=variant, emphasis_policy="defer-to-compose")
+
+     assert result.exit_code == 0
+     assert len(calls["policy"]) == 6
+@@ -368,7 +366,9 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
+     assert first.workspace == workspace.resolve()
+     assert first.variant == variant
+     assert first.output_variant_dir == workspace / "voicerender" / variant
+-    assert first.report_path == first.output_variant_dir / book_module.BOOK_REPORT_FILENAME
++    assert (
++        first.report_path == first.output_variant_dir / book_module.BOOK_REPORT_FILENAME
++    )
+     assert first.requested == 3
+     assert first.written == sum(outcome.rendered for outcome in first.outcomes) == 6
+     assert first.reused == sum(outcome.reused for outcome in first.outcomes) == 0
+@@ -733,7 +733,6 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
+     assert len(calls["preflight"]) == 1
+
+
+-
+ def test_public_api_and_render_book_cli_have_behavioral_parity(
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+@@ -772,7 +771,9 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
+         code = main(args)
+         return code, json.loads(capsys.readouterr().out)
+
+-    def assert_parity(api_result: book_module.BookRenderResult, payload: dict[str, Any]) -> None:
++    def assert_parity(
++        api_result: book_module.BookRenderResult, payload: dict[str, Any]
++    ) -> None:
+         assert payload["variant"] == api_result.variant == api_variant
+         assert payload["pending_composition"] is api_result.pending_composition is True
+         assert payload["emphasis_policy"] == "defer-to-compose"
+@@ -800,10 +801,7 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
+
+         api_manifest = load_manifest(outcome.manifest)
+         cli_manifest = load_manifest(
+-            cli_workspace
+-            / "voicerender"
+-            / cli_variant
+-            / item["manifest"]
++            cli_workspace / "voicerender" / cli_variant / item["manifest"]
+         )
+         assert api_manifest.manifest_id == cli_manifest.manifest_id
+         assert api_manifest.render_plan_id == cli_manifest.render_plan_id
+diff --git a/tests/test_renderplan_input.py b/tests/test_renderplan_input.py
+index b8a866d..1c3e72f 100644
+--- a/tests/test_renderplan_input.py
++++ b/tests/test_renderplan_input.py
+@@ -514,6 +514,105 @@ def test_measurement_outcomes_and_typed_too_long_exception_are_centralized() ->
+     assert bare_outcome.disposition is PreflightDisposition.TOO_LONG
+     assert bare_outcome.measurement is not None
+     assert bare_outcome.measurement.unit == "unknown"
++    invalid_too_long = classify_measurement(
++        SpeechRequestTooLongError(
++            "malformed overflow",
++            amount=21,
++            maximum=0,
++            unit="model_tokens",
++            source="fake.prepare",
++        )
++    )
++    assert invalid_too_long.disposition is PreflightDisposition.REJECT
++    assert invalid_too_long.error == "Engine returned an invalid capacity measurement"
++    assert invalid_too_long.measurement is not None
++    assert invalid_too_long.measurement.source == "fake.prepare.invalid_measurement"
+
+     invalid = InvalidSpeechRequestError("bad request")
+     assert classify_measurement(invalid).disposition is PreflightDisposition.REJECT
++
++
++def test_measured_amount_without_authoritative_fit_is_rejected_with_details() -> None:
++    measurement = RequestMeasure(
++        fits=None,
++        amount=80,
++        maximum=None,
++        unit="model_tokens",
++        source="inflectsynth.measure_prepared",
++    )
++
++    outcome = classify_measurement(measurement)
++
++    assert outcome.disposition is PreflightDisposition.REJECT
++    assert outcome.measurement == measurement
++    assert outcome.error == (
++        "Engine measured the exact request size but did not provide an "
++        "authoritative maximum/fit result"
++    )
++
++
++def test_invalid_adapter_measurement_has_stable_rejection() -> None:
++    outcome = classify_measurement(
++        RequestMeasure(
++            fits=None,
++            amount=80,
++            maximum=None,
++            unit="model_tokens",
++            source="inflectsynth.invalid_measurement",
++            details={"invalid_fields": ["maximum"]},
++        )
++    )
++
++    assert outcome.disposition is PreflightDisposition.REJECT
++    assert outcome.error == "Engine returned an invalid capacity measurement"
++
++
++def test_fit_without_exact_amount_is_not_accepted() -> None:
++    outcome = classify_measurement(
++        RequestMeasure(
++            fits=True,
++            amount=None,
++            maximum=100,
++            unit="model_tokens",
++            source="fake.measure",
++        )
++    )
++
++    assert outcome.disposition is PreflightDisposition.REJECT
++    assert outcome.error == "Engine did not provide an exact request measurement"
++
++
++def test_zero_maximum_is_invalid() -> None:
++    outcome = classify_measurement(
++        RequestMeasure(
++            fits=None,
++            amount=1,
++            maximum=0,
++            unit="model_tokens",
++            source="fake.measure",
++        )
++    )
++
++    assert outcome.disposition is PreflightDisposition.REJECT
++    assert outcome.error == "Engine returned an invalid capacity measurement"
++
++
++def test_discovery_runtime_capacity_mismatch_is_rejected_with_both_values() -> None:
++    outcome = classify_measurement(
++        RequestMeasure(
++            fits=None,
++            amount=12,
++            maximum=90,
++            unit="model_tokens",
++            source="inflectsynth.capacity_metadata_mismatch",
++            details={
++                "discovered_max_input_tokens": 100,
++                "runtime_maximum": 90,
++            },
++        )
++    )
++
++    assert outcome.disposition is PreflightDisposition.REJECT
++    assert outcome.measurement is not None
++    assert "discovered max_input_tokens=100" in (outcome.error or "")
++    assert "runtime maximum=90" in (outcome.error or "")
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index a465e31..95fcd68 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -384,6 +384,14 @@ def test_render_executes_exact_requests_in_order_and_writes_numbered_manifest(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     adapter = _install(monkeypatch)
++    adapter.measurements[" first "] = RequestMeasure(
++        fits=True,
++        amount=len(" first "),
++        maximum=100,
++        unit="model_tokens",
++        source="fake.frontend_measure",
++        details={"capacity_policy_revision": "budget.v1"},
++    )
+     plan = _plan(" first ", "second ")
+     report = _report(adapter, plan, tmp_path)
+     adapter.measured_texts.clear()
+@@ -421,6 +429,7 @@ def test_render_executes_exact_requests_in_order_and_writes_numbered_manifest(
+         "measured": len(" first "),
+         "maximum": 100,
+         "source": "fake.frontend_measure",
++        "capacity_policy_revision": "budget.v1",
+     }
+     assert fingerprint["fingerprint_id"].startswith("sha256:")
+     assert [item.wav for item in result.manifest.speech] == ["000001.wav", "000002.wav"]
+@@ -563,6 +572,54 @@ def test_immediate_remeasurement_failure_stops_and_writes_valid_partial_manifest
+     assert result.execution_fingerprint[-1]["capacity"]["maximum"] == 100
+
+
++def test_immediate_unknown_fit_stops_before_artifact_and_keeps_prior_partial_output(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("fits first", "unknown capacity next")
++    report = _report(adapter, plan, tmp_path)
++    adapter.measured_texts.clear()
++    adapter.synthesized_texts.clear()
++    adapter.measurements["unknown capacity next"] = RequestMeasure(
++        fits=None,
++        amount=80,
++        maximum=None,
++        unit="model_tokens",
++        source="inflectsynth.measure_prepared",
++    )
++    recheck_path = tmp_path / "fresh-unknown-reject.toml"
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "partial-unknown",
++        cache_dir=tmp_path / "partial-unknown-cache",
++        recheck_report_path=recheck_path,
++    )
++
++    assert result.failed
++    assert result.error_code == "preflight.reject"
++    assert adapter.measured_texts == ["fits first", "unknown capacity next"]
++    assert adapter.synthesized_texts == ["fits first"]
++    assert result.manifest.complete is False
++    assert [artifact.segment_id for artifact in result.manifest.speech] == [
++        plan.speech[0].segment_id
++    ]
++    assert result.fresh_preflight is not None
++    assert result.fresh_preflight.status == "reject"
++    assert result.fresh_preflight.replan == ()
++    check = result.fresh_preflight.checks[0]
++    assert check.status == "error"
++    assert check.metric == "model_tokens"
++    assert check.measured == 80
++    assert check.maximum is None
++    assert check.source == "inflectsynth.measure_prepared"
++    assert "authoritative maximum/fit result" in check.detail
++    assert load_preflight(recheck_path).status == "reject"
++    assert (tmp_path / "partial-unknown" / "000001.wav").is_file()
++    assert not (tmp_path / "partial-unknown" / "000002.wav").exists()
++
++
+ def test_session_open_failure_writes_fresh_reject_for_exact_occurrence(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_renderprofile.py b/tests/test_renderprofile.py
+index d30adcc..1ed2c7d 100644
+--- a/tests/test_renderprofile.py
++++ b/tests/test_renderprofile.py
+@@ -81,6 +81,7 @@ class _ProfileAdapter:
+         return {
+             "max_tokens": self.maximum,
+             "source_revision": self.source_revision,
++            "capacity_policy_revision": "budget.v1",
+         }
+
+     def renderprofile_fragment(
+@@ -126,6 +127,7 @@ def test_profile_create_uses_adapter_facts_and_shared_codec(
+     assert role.binding["target_id"] == "target-v1"
+     assert role.binding["voice"] == "voice-a"
+     assert role.binding["renderer_metadata"]["source_revision"] == "model-r1"
++    assert role.binding["renderer_metadata"]["capacity_policy_revision"] == "budget.v1"
+     assert role.requirements == RoleRequirements(
+         token_fields=("span", "pos"),
+         frontend="profile-test.frontend",
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 8d9e803..1ce2fc8 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -140,6 +140,7 @@ class BookRenderResult:
+     @property
+     def reused(self) -> int:
+         return sum(outcome.reused for outcome in self.outcomes)
++
+     @property
+     def requested(self) -> int:
+         return len(self.outcomes)
+diff --git a/voicerender/engines/base.py b/voicerender/engines/base.py
+index b494383..aa7e705 100644
+--- a/voicerender/engines/base.py
++++ b/voicerender/engines/base.py
+@@ -150,6 +150,7 @@ class EngineCapabilities:
+     supports_timestamps: bool = False
+
+     supports_voice_level_calibration: bool = False
++    # True means a side-effect-free measurement API exists; result actionability is in RequestMeasure.
+     supports_request_measurement: bool = False
+     # Compatibility aliases retained for the original VoiceRender renderer.
+     supports_builtin_voices: bool = True
+@@ -403,9 +404,7 @@ def validate_rendered_speech(
+
+     peak = float(np.max(np.abs(audio)))
+     if peak > float(np.float32(1.00001)):
+-        raise invalid(
+-            f"audio exceeds PCM full-scale range [-1, 1] (peak={peak:.6f})"
+-        )
++        raise invalid(f"audio exceeds PCM full-scale range [-1, 1] (peak={peak:.6f})")
+
+     try:
+         result.word_timings = validate_word_timings(
+diff --git a/voicerender/engines/inflectsynth.py b/voicerender/engines/inflectsynth.py
+index 02ce610..38e22f8 100644
+--- a/voicerender/engines/inflectsynth.py
++++ b/voicerender/engines/inflectsynth.py
+@@ -74,9 +74,9 @@ class InflectSelectionError(ValueError):
+
+ def _module() -> Any:
+     """Import the optional engine only when an Inflect operation is requested."""
+-    import inflectsynth
++    import importlib
+
+-    return inflectsynth
++    return importlib.import_module(PACKAGE_NAME)
+
+
+ def _effective_language(value: str | None) -> str:
+@@ -137,6 +137,13 @@ def _target_from_model(model: Any) -> SynthesisTarget:
+     max_input_tokens = metadata.get("max_input_tokens")
+     if _valid_positive_int(max_input_tokens):
+         metadata["max_input_tokens"] = max_input_tokens
++    policy_revision = metadata.get("capacity_policy_revision")
++    if not isinstance(policy_revision, str) or not policy_revision.strip():
++        policy_revision = metadata.get("capacity_revision")
++    if isinstance(policy_revision, str) and policy_revision.strip():
++        metadata["capacity_policy_revision"] = policy_revision.strip()
++    else:
++        metadata.pop("capacity_policy_revision", None)
+     sample_rate = getattr(model, "sample_rate", None)
+     return SynthesisTarget(
+         engine=ENGINE_ID,
+@@ -202,22 +209,77 @@ def _capacity_contract(module: Any) -> Mapping[str, Any] | None:
+     return contract if isinstance(contract, Mapping) else None
+
+
+-def _supports_actionable_capacity(module: Any | None = None) -> bool:
++def _contract_field(contract: Any, name: str, default: Any = None) -> Any:
++    if isinstance(contract, Mapping):
++        return contract.get(name, default)
++    return getattr(contract, name, default)
++
++
++def _request_measurement_contract(module: Any) -> Any:
++    factory = getattr(module, "request_api_contract", None)
++    if not callable(factory):
++        return None
++    try:
++        return factory()
++    except Exception:  # noqa: BLE001 - Contract inspection must fail closed.
++        return None
++
++
++def _supports_request_measurement(module: Any | None = None) -> bool:
+     module = module or _module()
+-    version = getattr(module, "CAPACITY_API_VERSION", None)
+-    contract = _capacity_contract(module)
++    contract = _request_measurement_contract(module)
++    voice_type = getattr(module, "InflectVoice", None)
+     return (
+-        isinstance(version, int)
+-        and not isinstance(version, bool)
+-        and version == SUPPORTED_CAPACITY_API_VERSION
+-        and contract is not None
+-        and contract.get("supports_known_maximum") is True
+-        and callable(
+-            getattr(getattr(module, "InflectVoice", None), "measure_prepared", None)
+-        )
++        _contract_field(contract, "supports_request_measurement") is True
++        and _contract_field(contract, "measurement_entrypoint")
++        == "InflectVoice.measure_prepared"
++        and _contract_field(contract, "measurement_metric") == "model_tokens"
++        and callable(getattr(voice_type, "measure_prepared", None))
++    )
++
++
++def _measurement_value(measured: Any, name: str, default: Any = None) -> Any:
++    if isinstance(measured, Mapping):
++        return measured.get(name, default)
++    return getattr(measured, name, default)
++
++
++def _first_nonnegative_int(*values: Any) -> int | None:
++    return next(
++        (
++            value
++            for value in values
++            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
++        ),
++        None,
++    )
++
++
++def _first_positive_int(*values: Any) -> int | None:
++    return next(
++        (
++            value
++            for value in values
++            if isinstance(value, int) and not isinstance(value, bool) and value > 0
++        ),
++        None,
+     )
+
+
++def _has_invalid_integer(values: tuple[Any, ...], *, positive: bool) -> bool:
++    for value in values:
++        if value is None:
++            continue
++        valid = (
++            isinstance(value, int)
++            and not isinstance(value, bool)
++            and (value > 0 if positive else value >= 0)
++        )
++        if not valid:
++            return True
++    return False
++
++
+ def _error_context(
+     selection: EngineSelection,
+     request: SpeechRequest | None,
+@@ -320,7 +382,6 @@ class InflectSynthEngineSession:
+         self._config = config
+
+     def measure(self, request: SpeechRequest) -> RequestMeasure:
+-        module = _module()
+         measure_method = getattr(self._voice, "measure_prepared", None)
+         if not callable(measure_method):
+             return RequestMeasure(
+@@ -336,17 +397,51 @@ class InflectSynthEngineSession:
+             raise
+         except Exception as exc:
+             raise _translate_error(exc, self._selection, request) from exc
+-        amount = getattr(measured, "amount", None)
+-        maximum = getattr(measured, "maximum", None)
+-        fits = getattr(measured, "fits", None)
+-        if (
+-            not _supports_actionable_capacity(module)
+-            or not isinstance(amount, int)
+-            or isinstance(amount, bool)
+-            or amount < 0
+-            or not _valid_positive_int(maximum)
+-            or not isinstance(fits, bool)
+-        ):
++
++        amount_values = (
++            _measurement_value(measured, "amount"),
++            _measurement_value(measured, "token_count"),
++        )
++        maximum_values = (
++            _measurement_value(measured, "maximum"),
++            _measurement_value(measured, "max_tokens"),
++        )
++        amount = _first_nonnegative_int(*amount_values)
++        maximum = _first_positive_int(*maximum_values)
++        raw_fits = _measurement_value(measured, "fits")
++        fits = raw_fits if isinstance(raw_fits, bool) else None
++
++        invalid_fields: list[str] = []
++        if amount is None and _has_invalid_integer(amount_values, positive=False):
++            invalid_fields.append("amount")
++        if maximum is None and _has_invalid_integer(maximum_values, positive=True):
++            invalid_fields.append("maximum")
++        if raw_fits is not None and not isinstance(raw_fits, bool):
++            invalid_fields.append("fits")
++
++        if invalid_fields:
++            return RequestMeasure(
++                fits=None,
++                amount=amount,
++                maximum=maximum,
++                unit="model_tokens" if amount is not None else "unknown",
++                source="inflectsynth.invalid_measurement",
++                details={"invalid_fields": invalid_fields},
++            )
++        discovered_maximum = self._selection.metadata.get("max_input_tokens")
++        if _valid_positive_int(discovered_maximum) and maximum != discovered_maximum:
++            return RequestMeasure(
++                fits=None,
++                amount=amount,
++                maximum=maximum,
++                unit="model_tokens" if amount is not None else "unknown",
++                source="inflectsynth.capacity_metadata_mismatch",
++                details={
++                    "discovered_max_input_tokens": discovered_maximum,
++                    "runtime_maximum": maximum,
++                },
++            )
++        if amount is None:
+             return RequestMeasure(
+                 fits=None,
+                 amount=None,
+@@ -354,15 +449,29 @@ class InflectSynthEngineSession:
+                 unit="unknown",
+                 source="inflectsynth.no_capacity_measurement",
+             )
++
++        details = {
++            "model_id": _measurement_value(
++                measured, "model_id", self._selection.target_id
++            )
++        }
++        policy_revision = _measurement_value(measured, "capacity_policy_revision")
++        if not isinstance(policy_revision, str) or not policy_revision.strip():
++            policy_revision = None
++            for key in ("capacity_policy_revision", "capacity_revision"):
++                candidate = self._selection.metadata.get(key)
++                if isinstance(candidate, str) and candidate.strip():
++                    policy_revision = candidate
++                    break
++        if isinstance(policy_revision, str) and policy_revision.strip():
++            details["capacity_policy_revision"] = policy_revision.strip()
+         return RequestMeasure(
+             fits=fits,
+             amount=amount,
+             maximum=maximum,
+             unit="model_tokens",
+             source="inflectsynth.measure_prepared",
+-            details={
+-                "model_id": getattr(measured, "model_id", self._selection.target_id)
+-            },
++            details=details,
+         )
+
+     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
+@@ -482,8 +591,6 @@ class InflectSynthEngineAdapter:
+                 "request_api_contract",
+                 "RequestMeasure",
+                 "SynthesisInputTooLongError",
+-                "CAPACITY_API_VERSION",
+-                "capacity_api_contract",
+             ),
+             required_methods={
+                 "InflectVoice": (
+@@ -500,53 +607,60 @@ class InflectSynthEngineAdapter:
+         )
+         if not probe.compatible:
+             return probe
++
+         module = _module()
+-        capacity_version = getattr(module, "CAPACITY_API_VERSION", None)
+-        contract_fn = getattr(module, "capacity_api_contract", None)
+-        try:
+-            contract = contract_fn() if callable(contract_fn) else None
+-        except Exception as exc:  # noqa: BLE001 - External API contracts may raise arbitrary errors.
+-            return replace(
+-                probe,
+-                compatible=False,
+-                status="api_probe_failed",
+-                failed_stage="capacity_contract",
+-                failed_symbol="capacity_api_contract",
+-                error_type=type(exc).__name__,
+-                error_message=str(exc),
+-            )
++        contract = _request_measurement_contract(module)
++        declared = {
++            "supports_request_measurement": _contract_field(
++                contract, "supports_request_measurement"
++            ),
++            "measurement_entrypoint": _contract_field(
++                contract, "measurement_entrypoint"
++            ),
++            "measurement_metric": _contract_field(contract, "measurement_metric"),
++        }
+         if (
+-            isinstance(capacity_version, bool)
+-            or not isinstance(capacity_version, int)
+-            or capacity_version != SUPPORTED_CAPACITY_API_VERSION
+-            or not isinstance(contract, Mapping)
++            declared["supports_request_measurement"] is not True
++            or declared["measurement_entrypoint"] != "InflectVoice.measure_prepared"
++            or declared["measurement_metric"] != "model_tokens"
+         ):
+             return replace(
+                 probe,
+                 compatible=False,
+-                status="api_version_incompatible",
+-                failed_stage="capacity_contract",
+-                failed_symbol="CAPACITY_API_VERSION",
+-                details={
+-                    "capacity_api_version": capacity_version,
+-                    "expected_capacity_api_version": SUPPORTED_CAPACITY_API_VERSION,
+-                },
++                status="api_incompatible",
++                failed_stage="request_measurement_contract",
++                failed_symbol="request_api_contract",
++                warnings=probe.warnings
++                + (
++                    "InflectSynth does not declare the model-token request measurement API.",
++                ),
++                details={**dict(probe.details), **declared},
+             )
+-        return replace(
+-            probe,
+-            details={
+-                **dict(probe.details),
+-                "capacity_api_version": capacity_version,
+-                "capacity_contract": dict(contract),
+-            },
++
++        capacity_version = getattr(module, "CAPACITY_API_VERSION", None)
++        capacity_contract = _capacity_contract(module)
++        capacity_compatible = (
++            isinstance(capacity_version, int)
++            and not isinstance(capacity_version, bool)
++            and capacity_version == SUPPORTED_CAPACITY_API_VERSION
++            and capacity_contract is not None
+         )
++        details = {
++            **dict(probe.details),
++            **declared,
++            "capacity_api_compatible": capacity_compatible,
++            "capacity_api_version": capacity_version,
++        }
++        if capacity_contract is not None:
++            details["capacity_contract"] = dict(capacity_contract)
++        return replace(probe, details=details)
+
+     def compatible_api(self) -> bool:
+         return self.probe_api().compatible
+
+     def capabilities(self) -> EngineCapabilities:
+         try:
+-            supports_measurement = _supports_actionable_capacity()
++            supports_measurement = _supports_request_measurement()
+         except (ImportError, ModuleNotFoundError):
+             supports_measurement = False
+         return EngineCapabilities(
+@@ -806,6 +920,7 @@ class InflectSynthEngineAdapter:
+         capacity_contract = _capacity_contract(module) or {}
+         capacity_policy_revision = (
+             selection.metadata.get("capacity_policy_revision")
++            or selection.metadata.get("capacity_revision")
+             or capacity_contract.get("policy_revision")
+             or capacity_contract.get("revision")
+         )
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index 5b09e18..bf17310 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -179,6 +179,20 @@ def _translate_kitten_error(
+     return error_type(str(error), **context, code=code)
+
+
++def _measurement_field(measured: Any, name: str, default: Any = None) -> Any:
++    if isinstance(measured, Mapping):
++        return measured.get(name, default)
++    return getattr(measured, name, default)
++
++
++def _valid_measurement_integer(value: Any, *, positive: bool) -> bool:
++    return (
++        isinstance(value, int)
++        and not isinstance(value, bool)
++        and (value > 0 if positive else value >= 0)
++    )
++
++
+ class KittenSynthEngineSession:
+     """Adapt prepared VoiceRender requests to one open ``KittenVoice``."""
+
+@@ -187,21 +201,78 @@ class KittenSynthEngineSession:
+         self._selection = selection
+
+     def measure(self, request: SpeechRequest) -> RequestMeasure:
++        measure_method = getattr(self._voice, "measure_prepared", None)
++        if not callable(measure_method):
++            return RequestMeasure(
++                fits=None,
++                amount=None,
++                maximum=None,
++                unit="unknown",
++                source="kittensynth.no_capacity_measurement",
++            )
+         try:
+-            measured = self._voice.measure_prepared(request.text)
++            measured = measure_method(request.text)
+         except EngineSynthesisError:
+             raise
+         except Exception as exc:
+             raise _translate_kitten_error(exc, self._selection, request) from exc
+
+-        details: dict[str, Any] = {"model_id": measured.model_id}
+-        native_metadata = getattr(measured, "metadata", None)
++        amount_value = _measurement_field(measured, "token_count")
++        maximum_value = _measurement_field(measured, "max_tokens")
++        raw_fits = _measurement_field(measured, "fits")
++        amount = (
++            amount_value
++            if _valid_measurement_integer(amount_value, positive=False)
++            else None
++        )
++        maximum = (
++            maximum_value
++            if _valid_measurement_integer(maximum_value, positive=True)
++            else None
++        )
++        fits = raw_fits if isinstance(raw_fits, bool) else None
++
++        invalid_fields: list[str] = []
++        if amount_value is not None and amount is None:
++            invalid_fields.append("amount")
++        if maximum_value is not None and maximum is None:
++            invalid_fields.append("maximum")
++        if raw_fits is not None and not isinstance(raw_fits, bool):
++            invalid_fields.append("fits")
++        unit = "model_tokens" if amount is not None else "unknown"
++        if invalid_fields:
++            return RequestMeasure(
++                fits=None,
++                amount=amount,
++                maximum=maximum,
++                unit=unit,
++                source="kittensynth.invalid_measurement",
++                details={"invalid_fields": invalid_fields},
++            )
++        if amount is None:
++            return RequestMeasure(
++                fits=None,
++                amount=None,
++                maximum=None,
++                unit="unknown",
++                source="kittensynth.no_capacity_measurement",
++            )
++
++        details: dict[str, Any] = {
++            "model_id": _measurement_field(
++                measured, "model_id", self._selection.target_id
++            )
++        }
++        native_metadata = _measurement_field(measured, "metadata")
+         if isinstance(native_metadata, Mapping):
+             details["native_metadata"] = dict(native_metadata)
++            policy_revision = native_metadata.get("capacity_policy_revision")
++            if isinstance(policy_revision, str) and policy_revision:
++                details["capacity_policy_revision"] = policy_revision
+         return RequestMeasure(
+-            fits=measured.fits,
+-            amount=measured.token_count,
+-            maximum=measured.max_tokens,
++            fits=fits,
++            amount=amount,
++            maximum=maximum,
+             unit="model_tokens",
+             source="kittensynth.measure_prepared",
+             details=details,
+diff --git a/voicerender/engines/profiles.py b/voicerender/engines/profiles.py
+index 2fcd53b..356e6a2 100644
+--- a/voicerender/engines/profiles.py
++++ b/voicerender/engines/profiles.py
+@@ -61,6 +61,11 @@ def make_renderprofile_fragment(
+         "frontend": frontend or str(metadata.get("frontend") or adapter.id),
+         "pronunciation": pronunciation or "renderer",
+     }
++    policy_revision = metadata.get("capacity_policy_revision") or metadata.get(
++        "capacity_revision"
++    )
++    if isinstance(policy_revision, str) and policy_revision.strip():
++        renderer_metadata["capacity_policy_revision"] = policy_revision.strip()
+     binding: dict[str, Any] = {
+         "renderer": adapter.id,
+         "target_id": selection.target_id,
+diff --git a/voicerender/renderplan_input.py b/voicerender/renderplan_input.py
+index 4952632..2bc7059 100644
+--- a/voicerender/renderplan_input.py
++++ b/voicerender/renderplan_input.py
+@@ -251,14 +251,34 @@ def classify_measurement(
+         valid = (
+             (value.fits is None or isinstance(value.fits, bool))
+             and value.unit in {"model_tokens", "phoneme_ids", "unknown"}
++            and (value.amount is None or value.unit != "unknown")
+             and (isinstance(value.source, str) and bool(value.source.strip()))
+             and (value.amount is None or _nonnegative_int(value.amount) is not None)
+-            and (value.maximum is None or _nonnegative_int(value.maximum) is not None)
++            and (value.maximum is None or _positive_int(value.maximum) is not None)
+             and isinstance(value.details, Mapping)
+         )
+         if not valid:
+             return MeasurementOutcome(
+                 PreflightDisposition.REJECT,
++                measurement=value,
++                error="Engine returned an invalid capacity measurement",
++            )
++        if value.source == "inflectsynth.capacity_metadata_mismatch":
++            discovered = value.details.get("discovered_max_input_tokens")
++            runtime = value.details.get("runtime_maximum")
++            return MeasurementOutcome(
++                PreflightDisposition.REJECT,
++                measurement=value,
++                error=(
++                    "InflectSynth capacity metadata mismatch: "
++                    f"discovered max_input_tokens={discovered}, "
++                    f"runtime maximum={runtime}"
++                ),
++            )
++        if value.source.endswith(".invalid_measurement"):
++            return MeasurementOutcome(
++                PreflightDisposition.REJECT,
++                measurement=value,
+                 error="Engine returned an invalid capacity measurement",
+             )
+         if (
+@@ -271,18 +291,30 @@ def classify_measurement(
+         ):
+             return MeasurementOutcome(
+                 PreflightDisposition.REJECT,
++                measurement=value,
+                 error="Engine capacity measurement contradicts its fit result",
+             )
++        if not _is_exact_amount(value):
++            return MeasurementOutcome(
++                PreflightDisposition.REJECT,
++                measurement=value,
++                error="Engine did not provide an exact request measurement",
++            )
+         if value.fits is True:
+             return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
+         if value.fits is False:
+             return MeasurementOutcome(PreflightDisposition.TOO_LONG, measurement=value)
+-        if value.maximum is None and _is_exact_amount(value):
+-            return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
++        if value.maximum is None:
++            error = (
++                "Engine measured the exact request size but did not provide an "
++                "authoritative maximum/fit result"
++            )
++        else:
++            error = "Engine measured the exact request size but did not provide an authoritative fit result"
+         return MeasurementOutcome(
+             PreflightDisposition.REJECT,
+             measurement=value,
+-            error="Engine did not provide an exact request measurement",
++            error=error,
+         )
+     if isinstance(value, SpeechRequestTooLongError):
+         raw_unit = getattr(value, "unit", None)
+@@ -299,14 +331,32 @@ def classify_measurement(
+             if isinstance(raw_source, str) and raw_source.strip()
+             else "engine.request_too_long"
+         )
++        raw_amount = getattr(value, "amount", None)
++        raw_maximum = getattr(value, "maximum", None)
++        amount = _nonnegative_int(raw_amount)
++        maximum = _positive_int(raw_maximum)
++        invalid_fields = []
++        if raw_amount is not None and amount is None:
++            invalid_fields.append("amount")
++        if raw_maximum is not None and maximum is None:
++            invalid_fields.append("maximum")
++        normalized_details = dict(details) if isinstance(details, Mapping) else {}
++        if invalid_fields:
++            normalized_details["invalid_fields"] = invalid_fields
+         measurement = RequestMeasure(
+-            fits=False,
+-            amount=_nonnegative_int(getattr(value, "amount", None)),
+-            maximum=_nonnegative_int(getattr(value, "maximum", None)),
++            fits=None if invalid_fields else False,
++            amount=amount,
++            maximum=maximum,
+             unit=unit,  # type: ignore[arg-type]
+-            source=source,
+-            details=dict(details) if isinstance(details, Mapping) else {},
++            source=(f"{source}.invalid_measurement" if invalid_fields else source),
++            details=normalized_details,
+         )
++        if invalid_fields:
++            return MeasurementOutcome(
++                PreflightDisposition.REJECT,
++                measurement=measurement,
++                error="Engine returned an invalid capacity measurement",
++            )
+         return MeasurementOutcome(
+             PreflightDisposition.TOO_LONG, measurement=measurement
+         )
+@@ -579,6 +629,12 @@ def _nonnegative_int(value: Any) -> int | None:
+     return value
+
+
++def _positive_int(value: Any) -> int | None:
++    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
++        return None
++    return value
++
++
+ __all__ = [
+     "EMPHASIS_COMPOSITION_CAPABILITY",
+     "EmphasisPolicy",
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index b25e472..eaeb53e 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -626,12 +626,16 @@ def _measurement_fingerprint(outcome: MeasurementOutcome) -> dict[str, Any] | No
+     measurement = outcome.measurement
+     if measurement is None:
+         return None
+-    return {
++    fingerprint = {
+         "metric": measurement.unit,
+         "measured": measurement.amount,
+         "maximum": measurement.maximum,
+         "source": measurement.source,
+     }
++    policy_revision = measurement.details.get("capacity_policy_revision")
++    if isinstance(policy_revision, str) and policy_revision.strip():
++        fingerprint["capacity_policy_revision"] = policy_revision.strip()
++    return fingerprint
+
+
+ def _finalize_execution_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
+diff --git a/voicerender/storage.py b/voicerender/storage.py
+index c600e6c..cb8bca8 100644
+--- a/voicerender/storage.py
++++ b/voicerender/storage.py
+@@ -68,9 +68,7 @@ def atomic_wav(path: Path, audio: Any, sample_rate: int) -> dict[str, Any]:
+         raise ArtifactError("Engine must return nonempty, finite, mono audio")
+     peak = float(np.max(np.abs(signal)))
+     if peak > float(np.float32(1.00001)):
+-        raise ArtifactError(
+-            f"Engine returned audio outside [-1, 1] (peak={peak:.6f})"
+-        )
++        raise ArtifactError(f"Engine returned audio outside [-1, 1] (peak={peak:.6f})")
+     path.parent.mkdir(parents=True, exist_ok=True)
+     fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".wav", dir=path.parent)
+     os.close(fd)

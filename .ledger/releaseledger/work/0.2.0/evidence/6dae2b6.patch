@@ -1,0 +1,2477 @@
+ README.md                        |  51 +-
+ docs/index.md                    |  34 +-
+ tests/test_cli.py                |  17 +
+ tests/test_render_book.py        | 502 ++++++++++++++++++++
+ tests/test_renderplan_render.py  | 314 +++++++++++-
+ voicerender/book.py              | 999 +++++++++++++++++++++++++++++++++++++++
+ voicerender/cli.py               |  90 ++++
+ voicerender/errors.py            |   6 +
+ voicerender/renderplan_render.py | 197 +++++++-
+ 9 files changed, 2179 insertions(+), 31 deletions(-)
+
+diff --git a/README.md b/README.md
+index 5742fdd..59cf8a9 100644
+--- a/README.md
++++ b/README.md
+@@ -59,8 +59,7 @@ For a book, [UtterPlan](https://pypi.org/project/utterplan/) can project already
+ chapter plans into one RenderPlan variant per RenderProfile. It does not call
+ VoiceRender or preflight during projection. The collection index
+ `renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned
+-workspace metadata, not RenderPlan artifacts; VoiceRender consumes the individual
+-`.renderplan.toml` files through its unchanged single-plan workflow.
++workspace metadata, not RenderPlan artifacts. VoiceRender can consume the ordered index through `render-book`; the direct single-plan workflow remains available.
+
+ ```bash
+ utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
+@@ -79,6 +78,54 @@ Repeat the ordinary preflight/render flow for each selected plan. Different prof
+ identities produce distinct UtterPlan variant directories, while each individual
+ RenderPlan retains the same shared contract and exact request semantics.
+
++### Render the variant with VoiceRender
++
++Render the chapters from the ordered set directly. The variant value is the exact directory name created by UtterPlan, including its profile fingerprint:
++
++```bash
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5-17 \
++  --cache-dir .voicerender-cache \
++  --json
++```
++
++Omit `--chapters` to select every chapter. For speech QC, select exactly one source chapter and a one-based range of RenderPlan speech numbers; whole-chapter preflight still runs, but only the selected speech is synthesized:
++
++```bash
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5 --speech 50-60
++
++# A later window adds verified WAVs to the same chapter manifest.
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5 --speech 61-70
++
++# Omit --speech to finish the chapter, reusing valid artifacts from both windows.
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" --chapters 5
++```
++
++A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, `--force`, and `--json` support alternate roots, deliberate reset, and automation.
++
++By default, output is kept separate from the RenderPlan inputs:
++
++```text
++Novel.ssmdbook/
++├── renderplan/<variant>/                 # input plans and renderplan-set.toml
++└── voicerender/<variant>/
++    ├── voicerender-report.toml            # atomic book-level outcomes
++    ├── .voicerender-cache/
++    └── chapter-0005/
++        ├── preflight.toml                 # whole-chapter preflight
++        ├── render-manifest.toml            # cumulative verified artifacts
++        ├── 000001.wav
++        └── ...
++```
++
++The chapter directories use the set's chapter IDs, while `--chapters` selects by source chapter number. The exact variant name is retained under both roots. Existing manual `preflight`/`render` commands above remain available for individual plans.
++
+ ## Python API
+
+ ```python
+diff --git a/docs/index.md b/docs/index.md
+index 4d237ed..a4f8030 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -23,13 +23,41 @@ The RenderPlan renderer preserves request order and identity: one speech item be
+
+ The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
+
+-
+ For book-level projection, UtterPlan owns the `renderplan-set.toml` collection index
+-and per-invocation report; they are workspace metadata, not inputs to VoiceRender.
+-VoiceRender continues to preflight and render each individual `.renderplan.toml` file.
++and its per-invocation report as workspace metadata. VoiceRender's `render-book`
++command consumes the ordered set and renders its individual `.renderplan.toml` files;
++the direct single-plan preflight/render commands remain available.
+ See [UtterPlan](https://pypi.org/project/utterplan/) and the shared
+ [RenderPlan](https://pypi.org/project/renderplan/) package.
+
++## Book-level rendering
++
++After UtterPlan has written `renderplan-set.toml`, render the exact variant named in the set directory. By default, VoiceRender writes under `<book>/voicerender/<variant>/`, leaving the input plans under `<book>/renderplan/<variant>/`:
++
++```bash
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5-17 --json
++```
++
++Omit `--chapters` to select all indexed chapters. For a speech QC window, select one source chapter and one-based speech numbers. Whole-chapter preflight is still performed; successful selected WAVs remain in the chapter manifest and can be accumulated by later invocations:
++
++```bash
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5 --speech 50-60
++
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5 --speech 61-70
++
++# Resume the chapter to full completion using its verified partial artifacts.
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" --chapters 5
++```
++
++A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter; each chapter directory contains its `preflight.toml`, cumulative `render-manifest.toml`, and numbered WAVs. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
++
+ ## Engine integration
+
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index bf8a65d..dfd5289 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -21,15 +21,27 @@ def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() ->
+         capture_output=True,
+         text=True,
+     ).stdout.casefold()
++    book_help = subprocess.run(
++        [sys.executable, "-m", "voicerender", "render-book", "--help"],
++        cwd=root,
++        check=True,
++        capture_output=True,
++        text=True,
++    ).stdout.casefold()
+
+     assert "preflight" in root_help
+     assert "renderplan" in root_help
++    assert "render-book" in root_help
+     assert "utterplan" not in root_help
+     assert "--preflight" in render_help
+     assert "--out-dir" in render_help
+     assert "--voice" not in render_help
+     assert "--take" not in render_help
+     assert "--profile" not in render_help
++    assert "--variant" in book_help
++    assert "--chapters" in book_help
++    assert "--speech" in book_help
++    assert "utterplan" not in book_help
+
+
+ def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
+@@ -46,8 +58,13 @@ class RejectLegacyPlanner(importlib.abc.MetaPathFinder):
+
+ sys.meta_path.insert(0, RejectLegacyPlanner())
+ import voicerender
++import voicerender.book
++import voicerender.cli
+ assert callable(voicerender.preflight_render_plan)
+ assert callable(voicerender.render_renderplan)
++args = voicerender.cli.build_parser().parse_args(['render-book', 'book', '--variant', 'variant'])
++assert args.command == 'render-book'
++assert not any(name.split('.', 1)[0].casefold() == 'utterplan' for name in sys.modules)
+ assert not any(name.startswith('voicerender.inputs.utterplan') for name in sys.modules)
+ """
+     subprocess.run(
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+new file mode 100644
+index 0000000..8cae9da
+--- /dev/null
++++ b/tests/test_render_book.py
+@@ -0,0 +1,502 @@
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++from pathlib import Path
++from typing import Any
++
++import pytest
++import tomllib
++from renderplan import (
++    PreflightCheck,
++    PreflightReport,
++    Producer,
++    RenderManifest,
++    RenderPlan,
++    RenderPlanSet,
++    RenderPlanSetChapter,
++    RenderProfile,
++    RoleProfile,
++    SourceSpan,
++    SpeechArtifact,
++    SpeechItem,
++    load_manifest,
++    save_manifest,
++    save_plan,
++    save_preflight,
++    save_profile,
++    save_renderplan_set,
++)
++
++import voicerender.book as book_module
++from voicerender.errors import ArtifactError
++from voicerender.renderplan_render import RENDER_MANIFEST_FILENAME, RenderPlanResult
++from voicerender.storage import atomic_wav
++
++
++def _profile() -> RenderProfile:
++    return RenderProfile(
++        roles={
++            "narrator": RoleProfile(language="en-US", binding={"renderer": "fixture"})
++        },
++        default_role="narrator",
++    ).with_identity()
++
++
++def _plan(profile: RenderProfile, chapter_number: int, count: int) -> RenderPlan:
++    profile_id = profile.profile_id or profile.computed_id()
++    speech = tuple(
++        SpeechItem(
++            number=number,
++            text=f"chapter {chapter_number} speech {number}",
++            language="en-US",
++            role="narrator",
++            binding={"renderer": "fixture"},
++            source=(
++                SourceSpan(
++                    locator=f"chapter-{chapter_number}.txt",
++                    start=number,
++                    end=number + 1,
++                ),
++            ),
++        )
++        for number in range(1, count + 1)
++    )
++    return RenderPlan(
++        source_plan_id=f"sha256:{chapter_number:064d}",
++        render_profile_id=profile_id,
++        flow=speech,
++    ).with_identity()
++
++
++def _book(
++    tmp_path: Path, chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1))
++) -> tuple[Path, str]:
++    workspace = tmp_path / "sample.ssmdbook"
++    variant_name = "narration--"
++    profile = _profile()
++    profile_id = profile.profile_id or profile.computed_id()
++    fingerprint = profile_id.removeprefix("sha256:")[:12]
++    variant_name += fingerprint
++    variant_dir = workspace / "renderplan" / variant_name
++    variant_dir.mkdir(parents=True)
++    save_profile(profile, variant_dir / "renderprofile.toml")
++
++    entries: list[RenderPlanSetChapter] = []
++    for source_number, speech_count in chapters:
++        chapter_id = f"chapter-{source_number:04d}"
++        plan = _plan(profile, source_number, speech_count)
++        plan_name = f"{chapter_id}.renderplan.toml"
++        save_plan(plan, variant_dir / plan_name)
++        entries.append(
++            RenderPlanSetChapter(
++                id=chapter_id,
++                source_number=source_number,
++                source=f"../../chapters/{chapter_id}.md",
++                utterplan=f"../../utterplan/{chapter_id}.toml",
++                source_plan_id=plan.source_plan_id,
++                renderplan=plan_name,
++                render_plan_id=plan.plan_id or plan.computed_id(),
++            )
++        )
++    renderplan_set = RenderPlanSet(
++        variant="narration",
++        profile_fingerprint=fingerprint,
++        producer_version="0.1.0",
++        manifest="../../book.json",
++        utterplan_dir="../../utterplan",
++        profile_id=profile_id,
++        snapshot="renderprofile.toml",
++        source_profile="../../narration.renderprofile.toml",
++        chapters=tuple(entries),
++    )
++    save_renderplan_set(variant_dir / "renderplan-set.toml", renderplan_set)
++    return workspace, variant_name
++
++
++def _preflight(plan: RenderPlan, path: Path) -> PreflightReport:
++    report = PreflightReport(
++        render_plan_id=plan.plan_id or plan.computed_id(),
++        source_plan_id=plan.source_plan_id,
++        render_profile_id=plan.render_profile_id,
++        status="ok",
++        checks=tuple(
++            PreflightCheck(
++                segment_number=item.number,
++                segment_id=item.segment_id or item.computed_id(),
++                status="ok",
++                metric="fixture",
++                measured=1,
++                maximum=10,
++                source="test.fixture",
++            )
++            for item in plan.speech
++            if item.preflight_required
++        ),
++        producer=Producer(name="voicerender", version="test"),
++    ).with_identity()
++    report.validate_against(plan)
++    save_preflight(report, path)
++    return report
++
++
++def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
++    preflight_calls: list[str] = []
++    render_calls: list[tuple[str, frozenset[int] | None]] = []
++
++    def preflight(plan: RenderPlan, path: str | Path) -> PreflightReport:
++        preflight_calls.append(plan.plan_id or plan.computed_id())
++        return _preflight(plan, Path(path))
++
++    def render(
++        plan: RenderPlan,
++        *,
++        preflight: PreflightReport,
++        output_dir: str | Path,
++        cache_dir: str | Path | None = None,
++        force: bool = False,
++        speech_numbers: set[int] | frozenset[int] | None = None,
++    ) -> RenderPlanResult:
++        del cache_dir
++        selected = (
++            tuple(plan.speech)
++            if speech_numbers is None
++            else tuple(item for item in plan.speech if item.number in speech_numbers)
++        )
++        render_calls.append(
++            (
++                plan.plan_id or plan.computed_id(),
++                None if speech_numbers is None else frozenset(speech_numbers),
++            )
++        )
++        output = Path(output_dir)
++        output.mkdir(parents=True, exist_ok=True)
++        manifest_path = output / RENDER_MANIFEST_FILENAME
++        artifacts: dict[tuple[int, str], SpeechArtifact] = {}
++        if manifest_path.is_file() and not force:
++            prior = load_manifest(manifest_path)
++            if prior.render_plan_id != (plan.plan_id or plan.computed_id()):
++                raise ArtifactError("stale plan", code="output.stale_plan")
++            prior.validate_against(plan)
++            artifacts = {
++                (item.segment_number, item.segment_id): item for item in prior.speech
++            }
++        rendered = reused = 0
++        for item in selected:
++            key = (item.number, item.segment_id or item.computed_id())
++            if key in artifacts and not force:
++                reused += 1
++                continue
++            wav_path = output / item.wav
++            info = atomic_wav(wav_path, [0.0, 0.1, -0.1], 24000)
++            artifacts[key] = SpeechArtifact(
++                segment_number=item.number,
++                segment_id=key[1],
++                wav=item.wav,
++                sha256=f"sha256:{info['sha256']}",
++                frames=int(info["frames"]),
++                sample_rate=int(info["sample_rate"]),
++                channels=int(info["channels"]),
++            )
++            rendered += 1
++        ordered = tuple(
++            artifacts[(item.number, item.segment_id or item.computed_id())]
++            for item in plan.speech
++            if (item.number, item.segment_id or item.computed_id()) in artifacts
++        )
++        manifest = RenderManifest(
++            render_plan_id=plan.plan_id or plan.computed_id(),
++            speech=ordered,
++            complete=len(ordered) == len(plan.speech),
++            producer=Producer(name="voicerender", version="test"),
++        ).with_identity()
++        manifest.validate_against(plan)
++        save_manifest(manifest, manifest_path)
++        selected_keys = {
++            (item.number, item.segment_id or item.computed_id()) for item in selected
++        }
++        return RenderPlanResult(
++            manifest=manifest,
++            manifest_path=manifest_path,
++            planned_count=len(plan.speech),
++            selected_count=len(selected),
++            available_count=len(ordered),
++            rendered_count=rendered,
++            reused_count=reused,
++            selection_complete=selected_keys.issubset(set(artifacts)),
++        )
++
++    monkeypatch.setattr(book_module, "preflight_render_plan", preflight)
++    monkeypatch.setattr(book_module, "render_renderplan", render)
++    return {"preflight": preflight_calls, "render": render_calls}
++
++
++def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++
++    first = book_module.render_book(workspace, variant=variant)
++    assert first.exit_code == 0
++    assert [item.id for item in first.outcomes] == [
++        "chapter-0007",
++        "chapter-0005",
++        "chapter-0008",
++    ]
++    assert [item.status for item in first.outcomes] == [
++        "complete",
++        "complete",
++        "complete",
++    ]
++    assert first.full_chapters == 3
++    assert len(calls["preflight"]) == 3
++    assert len(calls["render"]) == 3
++    for outcome in first.outcomes:
++        assert outcome.manifest is not None and outcome.manifest.is_file()
++        assert (outcome.output_dir / "000001.wav").is_file()
++    report = tomllib.loads(first.report_path.read_text(encoding="utf-8"))
++    assert report["format"] == "voicerender-book-report"
++    assert report["variant"] == variant
++    assert report["requested"] == report["succeeded"] == 3
++    assert report["full_chapters"] == 3
++
++    second = book_module.render_book(workspace, variant=variant)
++    assert second.exit_code == 0
++    assert [item.status for item in second.outcomes] == ["reused"] * 3
++    assert len(calls["preflight"]) == 3
++    assert len(calls["render"]) == 3
++
++
++def test_book_chapter_and_speech_selectors_use_source_and_speech_numbers(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++
++    selected = book_module.render_book(
++        workspace,
++        variant=variant,
++        chapters="5",
++        speech="2-3",
++    )
++    assert [item.id for item in selected.outcomes] == ["chapter-0005"]
++    assert selected.outcomes[0].status == "partial"
++    assert selected.outcomes[0].planned_speech == 3
++    assert selected.outcomes[0].selected_speech == 2
++    assert selected.outcomes[0].available_speech == 2
++    assert selected.partial_chapters == 1
++    assert selected.exit_code == 0
++    assert [
++        item.wav for item in load_manifest(selected.outcomes[0].manifest).speech
++    ] == [
++        "000002.wav",
++        "000003.wav",
++    ]
++    assert calls["render"] == [(selected.outcomes[0].render_plan_id, frozenset({2, 3}))]
++
++
++def test_partial_windows_accumulate_and_later_full_selection_finishes_chapter(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path, chapters=((5, 3),))
++
++    first = book_module.render_book(
++        workspace, variant=variant, chapters="5", speech="1"
++    )
++    assert first.exit_code == 0
++    assert first.outcomes[0].status == "partial"
++    second = book_module.render_book(
++        workspace, variant=variant, chapters="5", speech="3"
++    )
++    assert second.exit_code == 0
++    assert second.outcomes[0].status == "partial"
++    assert [
++        item.segment_number
++        for item in load_manifest(second.outcomes[0].manifest).speech
++    ] == [1, 3]
++    assert len(calls["preflight"]) == 1
++
++    final = book_module.render_book(workspace, variant=variant, chapters="5")
++    assert final.exit_code == 0
++    assert final.outcomes[0].status == "complete"
++    assert final.outcomes[0].manifest_complete
++    assert final.outcomes[0].available_speech == 3
++    assert len(calls["preflight"]) == 1
++
++
++def test_invalid_selection_and_identity_fail_before_preflight_or_render(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++
++    with pytest.raises(book_module.BookRenderError) as unknown:
++        book_module.render_book(workspace, variant=variant, chapters="99")
++    assert unknown.value.code == "selection.invalid"
++    with pytest.raises(
++        book_module.BookRenderError, match="exactly one selected chapter"
++    ):
++        book_module.render_book(
++            workspace, variant=variant, chapters="5,7", speech="1-2"
++        )
++    assert calls["preflight"] == []
++    assert calls["render"] == []
++
++    set_path = workspace / "renderplan" / variant / "renderplan-set.toml"
++    renderplan_set = book_module.load_renderplan_set(set_path)
++    bad_chapter = replace(
++        renderplan_set.chapters[0], render_plan_id="sha256:" + "f" * 64
++    )
++    save_renderplan_set(
++        set_path,
++        replace(renderplan_set, chapters=(bad_chapter, *renderplan_set.chapters[1:])),
++    )
++    with pytest.raises(book_module.BookRenderError) as mismatch:
++        book_module.render_book(workspace, variant=variant)
++    assert mismatch.value.code == "plan.identity_mismatch"
++    assert calls["render"] == []
++
++
++def test_malformed_set_variant_path_and_symlink_escape_fail_closed(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path, chapters=((5, 1),))
++    variant_dir = workspace / "renderplan" / variant
++    set_path = variant_dir / "renderplan-set.toml"
++
++    with pytest.raises(book_module.BookRenderError) as wrong_name:
++        book_module.render_book(workspace, variant="narration")
++    assert wrong_name.value.code == "variant.not_found"
++
++    set_path.write_text("format = [", encoding="utf-8")
++    with pytest.raises(book_module.BookRenderError) as malformed:
++        book_module.render_book(workspace, variant=variant)
++    assert malformed.value.code == "index.invalid"
++
++    workspace2, variant2 = _book(tmp_path / "second", chapters=((5, 1),))
++    variant_dir2 = workspace2 / "renderplan" / variant2
++    set_path2 = variant_dir2 / "renderplan-set.toml"
++    renderplan_set2 = book_module.load_renderplan_set(set_path2)
++    entry = renderplan_set2.chapters[0]
++    outside = tmp_path / "outside.renderplan.toml"
++    outside.write_text(
++        (variant_dir2 / entry.renderplan).read_text(encoding="utf-8"), encoding="utf-8"
++    )
++    (variant_dir2 / entry.renderplan).unlink()
++    (variant_dir2 / entry.renderplan).symlink_to(outside)
++    with pytest.raises(book_module.BookRenderError) as escape:
++        book_module.render_book(workspace2, variant=variant2)
++    assert escape.value.code == "plan.missing"
++
++
++def test_fail_fast_skips_remaining_chapters_but_default_continues(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++    original = book_module.render_renderplan
++    failed_once = False
++
++    def fail_first(*args: Any, **kwargs: Any) -> RenderPlanResult:
++        nonlocal failed_once
++        if not failed_once:
++            failed_once = True
++            raise ArtifactError("intentional failure", code="artifact.invalid")
++        return original(*args, **kwargs)
++
++    monkeypatch.setattr(book_module, "render_renderplan", fail_first)
++    fast = book_module.render_book(workspace, variant=variant, fail_fast=True)
++    assert [item.status for item in fast.outcomes] == ["failed", "skipped", "skipped"]
++    assert fast.failed == 1 and fast.skipped == 2
++    assert fast.outcomes[0].error_code == "artifact.invalid"
++    assert tomllib.loads(fast.report_path.read_text(encoding="utf-8"))["skipped"] == 2
++
++    # The default mode continues with each later selected chapter.
++    failed_once = False
++    continued = book_module.render_book(workspace, variant=variant, force=True)
++    assert [item.status for item in continued.outcomes] == [
++        "failed",
++        "complete",
++        "complete",
++    ]
++    assert continued.failed == 1 and continued.succeeded == 2
++    assert calls["preflight"]
++
++
++def test_render_book_cli_json_qc_then_human_completion_and_json_error(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path, chapters=((5, 3),))
++    output_root = tmp_path / "custom-render"
++    cache_dir = tmp_path / "custom-cache"
++    from voicerender.cli import main
++
++    partial_code = main(
++        [
++            "render-book",
++            str(workspace),
++            "--variant",
++            variant,
++            "--chapters",
++            "5",
++            "--speech",
++            "1-2",
++            "--renderplan-root",
++            str(workspace / "renderplan"),
++            "--output-root",
++            str(output_root),
++            "--cache-dir",
++            str(cache_dir),
++            "--json",
++        ]
++    )
++    partial_payload = json.loads(capsys.readouterr().out)
++    assert partial_code == 0
++    assert partial_payload["partial_chapters"] == 1
++    assert partial_payload["items"][0]["status"] == "partial"
++    assert partial_payload["items"][0]["manifest_complete"] is False
++    assert (output_root / variant / "chapter-0005" / "000001.wav").is_file()
++    assert cache_dir.is_dir()
++
++    full_code = main(
++        [
++            "render-book",
++            str(workspace),
++            "--variant",
++            variant,
++            "--renderplan-root",
++            str(workspace / "renderplan"),
++            "--output-root",
++            str(output_root),
++            "--cache-dir",
++            str(cache_dir),
++        ]
++    )
++    human_output = capsys.readouterr().out
++    assert full_code == 0
++    assert "chapter state: complete" in human_output
++    assert "VoiceRender summary" in human_output
++    assert "variant:     " + variant in human_output
++    assert len(calls["preflight"]) == 1
++    assert len(calls["render"]) == 2
++
++    error_code = main(
++        [
++            "render-book",
++            str(workspace),
++            "--variant",
++            variant,
++            "--chapters",
++            "99",
++            "--json",
++        ]
++    )
++    error_payload = json.loads(capsys.readouterr().out)
++    assert error_code == 2
++    assert error_payload["code"] == "selection.invalid"
++    assert error_payload["exit_code"] == 2
++    assert len(calls["preflight"]) == 1
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index f30b568..9446fa1 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -12,11 +12,17 @@ from renderplan import (
+     CapacityConstraint,
+     PreflightReport,
+     RenderPlan,
++    RenderPlanSet,
++    RenderPlanSetChapter,
++    RenderProfile,
++    RoleProfile,
+     SourceSpan,
+     SpeechItem,
+     load_manifest,
+     load_preflight,
+     save_plan,
++    save_profile,
++    save_renderplan_set,
+ )
+
+ from voicerender.engines.api_probe import EngineApiProbe
+@@ -32,7 +38,7 @@ from voicerender.engines.base import (
+ )
+ from voicerender.engines.registry import _ADAPTERS
+ from voicerender.engines.selection import EngineRequest
+-from voicerender.errors import PlanError
++from voicerender.errors import ArtifactError, PlanError
+ from voicerender.preflight import preflight_render_plan
+ from voicerender.renderplan_render import render_renderplan
+ from voicerender.storage import wav_info
+@@ -518,3 +524,309 @@ def test_cli_creates_and_validates_shared_renderprofile(
+     assert code == 1
+     assert "must not overwrite" in refresh_error
+     assert profile_path.read_bytes() == original
++
++
++def test_partial_speech_windows_keep_original_numbers_and_merge_manifest_artifacts(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan(*(f"speech {number}" for number in range(1, 61)))
++    report = _report(adapter, plan, tmp_path)
++    adapter.synthesized_texts.clear()
++    output = tmp_path / "chapter"
++    cache = tmp_path / "cache"
++
++    first = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        speech_numbers=range(1, 21),
++    )
++    assert not first.failed
++    assert first.selection_complete
++    assert first.selected_count == 20
++    assert first.available_count == 20
++    assert not first.manifest.complete
++    assert (output / "000001.wav").is_file()
++    assert (output / "000020.wav").is_file()
++    assert not (output / "000021.wav").exists()
++
++    second = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        speech_numbers=range(50, 61),
++    )
++    assert not second.failed
++    assert second.selection_complete
++    assert second.rendered_count == 11
++    assert not second.manifest.complete
++    assert [artifact.segment_number for artifact in second.manifest.speech] == [
++        *range(1, 21),
++        *range(50, 61),
++    ]
++    assert [f"{number:06d}.wav" for number in range(50, 61)] == [
++        artifact.wav
++        for artifact in second.manifest.speech
++        if artifact.segment_number >= 50
++    ]
++    assert adapter.synthesized_texts == [
++        f"speech {number}" for number in range(1, 21)
++    ] + [f"speech {number}" for number in range(50, 61)]
++
++
++def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan(*(f"speech {number}" for number in range(1, 6)))
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "chapter"
++    cache = tmp_path / "cache"
++
++    partial = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        speech_numbers=range(1, 3),
++    )
++    assert not partial.failed
++    assert not partial.manifest.complete
++    initial_synthesized = list(adapter.synthesized_texts)
++
++    full = render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
++    assert not full.failed
++    assert full.selection_complete
++    assert full.manifest.complete
++    assert full.planned_count == full.available_count == 5
++    assert full.reused_count == 2
++    assert full.rendered_count == 3
++    assert len(adapter.synthesized_texts) == len(initial_synthesized) + 3
++
++    open_count = adapter.open_count
++    reused = render_renderplan(
++        plan, preflight=report, output_dir=output, cache_dir=cache
++    )
++    assert not reused.failed
++    assert reused.manifest.complete
++    assert reused.rendered_count == 0
++    assert reused.reused_count == 5
++    assert adapter.open_count == open_count
++
++
++def test_corrupt_manifest_output_wav_is_dropped_and_regenerated_from_cache(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("first", "second")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "chapter"
++    cache = tmp_path / "cache"
++    first = render_renderplan(
++        plan, preflight=report, output_dir=output, cache_dir=cache
++    )
++    assert first.manifest.complete
++    synthesized = list(adapter.synthesized_texts)
++    (output / "000001.wav").write_bytes(b"corrupt output")
++
++    resumed = render_renderplan(
++        plan, preflight=report, output_dir=output, cache_dir=cache
++    )
++    assert not resumed.failed
++    assert resumed.manifest.complete
++    assert resumed.rendered_count == 0
++    assert resumed.reused_count == 2
++    assert adapter.synthesized_texts == synthesized
++    loaded = load_manifest(resumed.manifest_path)
++    loaded.validate_against(plan)
++    assert wav_info(output / "000001.wav")["frames"] > 0
++
++
++def test_stale_plan_requires_force_and_force_resets_only_owned_artifacts(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    old_plan = _plan("old plan")
++    old_report = _report(adapter, old_plan, tmp_path)
++    output = tmp_path / "chapter"
++    cache = tmp_path / "cache"
++    old = render_renderplan(
++        old_plan, preflight=old_report, output_dir=output, cache_dir=cache
++    )
++    (output / "preflight.toml").write_text("old preflight", encoding="utf-8")
++    (output / "keep.txt").write_text("user data", encoding="utf-8")
++    (output / "voice-note.wav").write_text("user data", encoding="utf-8")
++
++    new_plan = _plan("new plan")
++    new_report = _report(adapter, new_plan, tmp_path)
++    with pytest.raises(ArtifactError) as stale:
++        render_renderplan(
++            new_plan, preflight=new_report, output_dir=output, cache_dir=cache
++        )
++    assert stale.value.code == "output.stale_plan"
++    assert load_manifest(old.manifest_path).render_plan_id == old_plan.plan_id
++
++    forced = render_renderplan(
++        new_plan,
++        preflight=new_report,
++        output_dir=output,
++        cache_dir=cache,
++        force=True,
++    )
++    assert not forced.failed
++    assert forced.manifest.render_plan_id == new_plan.plan_id
++    assert (output / "keep.txt").read_text(encoding="utf-8") == "user data"
++    assert (output / "voice-note.wav").read_text(encoding="utf-8") == "user data"
++    assert not (output / "preflight.toml").exists()
++
++
++def test_force_rerenders_only_selected_speech_and_keeps_unselected_output(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("first", "second")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "chapter"
++    cache = tmp_path / "cache"
++    render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
++    second_bytes = (output / "000002.wav").read_bytes()
++    before = list(adapter.synthesized_texts)
++
++    forced = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        force=True,
++        speech_numbers={1},
++    )
++    assert not forced.failed
++    assert forced.manifest.complete
++    assert forced.selected_count == 1
++    assert forced.rendered_count == 1
++    assert forced.reused_count == 0
++    assert len(adapter.synthesized_texts) == len(before) + 1
++    assert (output / "000002.wav").read_bytes() == second_bytes
++
++
++@pytest.mark.parametrize("selection", [(), (0,), (-1,), (3,), (True,)])
++def test_invalid_speech_selection_fails_before_output_or_synthesis(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    selection: tuple[int, ...],
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("first", "second")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "invalid-selection"
++
++    with pytest.raises(PlanError, match="speech_numbers"):
++        render_renderplan(
++            plan,
++            preflight=report,
++            output_dir=output,
++            speech_numbers=selection,
++        )
++    assert adapter.synthesized_texts == []
++    assert not output.exists()
++
++
++def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    adapter = _install(monkeypatch)
++    profile = RenderProfile(
++        roles={"narrator": RoleProfile(language="en-US", binding=dict(_BINDING))},
++        default_role="narrator",
++    ).with_identity()
++    profile_id = profile.profile_id or profile.computed_id()
++    plan = replace(
++        _plan("speech one", "speech two", "speech three"),
++        render_profile_id=profile_id,
++        plan_id=None,
++    ).with_identity()
++
++    workspace = tmp_path / "integration-book"
++    fingerprint = profile_id.removeprefix("sha256:")[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = workspace / "renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    save_profile(profile, variant_dir / "renderprofile.toml")
++    plan_name = "chapter-0001.renderplan.toml"
++    save_plan(plan, variant_dir / plan_name)
++    chapter = RenderPlanSetChapter(
++        id="chapter-0001",
++        source_number=1,
++        source="../../chapter-0001.md",
++        utterplan="../../utterplan/chapter-0001.toml",
++        source_plan_id=plan.source_plan_id,
++        renderplan=plan_name,
++        render_plan_id=plan.plan_id or plan.computed_id(),
++    )
++    renderplan_set = RenderPlanSet(
++        variant="narration",
++        profile_fingerprint=fingerprint,
++        producer_version="test",
++        manifest="../../book.json",
++        utterplan_dir="../../utterplan",
++        profile_id=profile_id,
++        snapshot="renderprofile.toml",
++        source_profile="../../narration.renderprofile.toml",
++        chapters=(chapter,),
++    )
++    save_renderplan_set(variant_dir / "renderplan-set.toml", renderplan_set)
++
++    from voicerender.cli import main
++
++    output_root = tmp_path / "integration-output"
++    cache_dir = tmp_path / "integration-cache"
++
++    def invoke(*selection: str) -> dict[str, Any]:
++        args = [
++            "render-book",
++            str(workspace),
++            "--variant",
++            variant,
++            "--output-root",
++            str(output_root),
++            "--cache-dir",
++            str(cache_dir),
++            *selection,
++            "--json",
++        ]
++        assert main(args) == 0
++        return json.loads(capsys.readouterr().out)
++
++    first = invoke("--chapters", "1", "--speech", "1")
++    assert first["items"][0]["status"] == "partial"
++    assert first["items"][0]["manifest_complete"] is False
++    assert (output_root / variant / "chapter-0001" / "000001.wav").is_file()
++    assert adapter.synthesized_texts == ["speech one"]
++
++    second = invoke("--chapters", "1", "--speech", "3")
++    assert second["items"][0]["status"] == "partial"
++    assert second["items"][0]["available_speech"] == 2
++    assert adapter.synthesized_texts == ["speech one", "speech three"]
++
++    completed = invoke("--chapters", "1")
++    assert completed["items"][0]["status"] == "complete"
++    assert completed["items"][0]["manifest_complete"] is True
++    assert completed["items"][0]["rendered"] == 1
++    assert completed["items"][0]["reused"] == 2
++    assert adapter.synthesized_texts == ["speech one", "speech three", "speech two"]
++    manifest_path = output_root / variant / "chapter-0001" / "render-manifest.toml"
++    manifest = load_manifest(manifest_path)
++    assert manifest.complete
++    assert [item.wav for item in manifest.speech] == [
++        "000001.wav",
++        "000002.wav",
++        "000003.wav",
++    ]
++    open_count = adapter.open_count
++
++    reused = invoke("--chapters", "1")
++    assert reused["items"][0]["status"] == "reused"
++    assert adapter.open_count == open_count
+diff --git a/voicerender/book.py b/voicerender/book.py
+new file mode 100644
+index 0000000..69571f4
+--- /dev/null
++++ b/voicerender/book.py
+@@ -0,0 +1,999 @@
++"""Safe book-level orchestration for ordered RenderPlan variants."""
++
++from __future__ import annotations
++
++import json
++import os
++import re
++import stat
++import tempfile
++from collections.abc import Mapping, Sequence
++from dataclasses import dataclass
++from pathlib import Path, PurePosixPath, PureWindowsPath
++from typing import Any, Literal
++
++from renderplan import (
++    PreflightReport,
++    RenderManifest,
++    RenderPlan,
++    RenderPlanSetChapter,
++    RenderPlanSetError,
++    load_manifest,
++    load_plan,
++    load_preflight,
++    load_renderplan_set,
++    validate_renderplan_set,
++    validate_renderplan_set_profile,
++)
++
++from .errors import ArtifactError, PlanError, VoiceRenderError
++from .preflight import preflight_render_plan
++from .renderplan_render import (
++    RENDER_MANIFEST_FILENAME,
++    render_renderplan,
++)
++from .storage import verified_wav
++
++BOOK_REPORT_FILENAME = "voicerender-report.toml"
++BookChapterStatus = Literal["complete", "partial", "failed", "skipped", "reused"]
++
++
++class BookRenderError(VoiceRenderError, ValueError):
++    """A book workspace, variant, index, profile, or selector is invalid."""
++
++    def __init__(self, message: str, *, code: str = "workspace.invalid") -> None:
++        super().__init__(message)
++        self.code = code
++
++
++@dataclass(frozen=True, slots=True)
++class _LoadedChapter:
++    entry: RenderPlanSetChapter
++    plan_path: Path
++    plan: RenderPlan
++    output_dir: Path
++    speech_numbers: frozenset[int] | None
++
++
++@dataclass(frozen=True, slots=True)
++class BookRenderRequest:
++    """A fully resolved and identity-checked RenderPlan book request."""
++
++    workspace: Path
++    variant_name: str
++    renderplan_variant_dir: Path
++    output_variant_dir: Path
++    chapters: tuple[RenderPlanSetChapter, ...]
++    speech_numbers: frozenset[int] | None
++    cache_dir: Path
++    force: bool
++    fail_fast: bool
++    chapter_selector: str
++    speech_selector: str
++    render_profile_id: str
++    _loaded_chapters: tuple[_LoadedChapter, ...]
++
++
++@dataclass(frozen=True, slots=True)
++class ChapterRenderOutcome:
++    index: int
++    id: str
++    source_number: int
++    renderplan: Path
++    render_plan_id: str
++    output_dir: Path
++    manifest: Path | None
++    status: BookChapterStatus
++    planned_speech: int
++    selected_speech: int
++    available_speech: int
++    rendered: int
++    reused: int
++    manifest_complete: bool = False
++    error_code: str | None = None
++    error_message: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class BookRenderResult:
++    request: BookRenderRequest
++    report_path: Path
++    outcomes: tuple[ChapterRenderOutcome, ...]
++
++    @property
++    def requested(self) -> int:
++        return len(self.outcomes)
++
++    @property
++    def succeeded(self) -> int:
++        return sum(
++            outcome.status in {"complete", "partial", "reused"}
++            for outcome in self.outcomes
++        )
++
++    @property
++    def failed(self) -> int:
++        return sum(outcome.status == "failed" for outcome in self.outcomes)
++
++    @property
++    def skipped(self) -> int:
++        return sum(outcome.status == "skipped" for outcome in self.outcomes)
++
++    @property
++    def full_chapters(self) -> int:
++        return sum(
++            outcome.manifest_complete and outcome.status != "failed"
++            for outcome in self.outcomes
++        )
++
++    @property
++    def partial_chapters(self) -> int:
++        return sum(outcome.status == "partial" for outcome in self.outcomes)
++
++    @property
++    def exit_code(self) -> int:
++        return 1 if self.failed else 0
++
++    def to_dict(self) -> dict[str, Any]:
++        request = self.request
++        return {
++            "workspace": str(request.workspace),
++            "variant": request.variant_name,
++            "render_profile_id": request.render_profile_id,
++            "renderplan_root": str(request.renderplan_variant_dir.parent),
++            "renderplans": str(request.renderplan_variant_dir),
++            "output": str(request.output_variant_dir),
++            "cache": str(request.cache_dir),
++            "report": str(self.report_path),
++            "selection": {
++                "chapters": request.chapter_selector,
++                "speech": request.speech_selector,
++            },
++            "requested": self.requested,
++            "succeeded": self.succeeded,
++            "failed": self.failed,
++            "skipped": self.skipped,
++            "full_chapters": self.full_chapters,
++            "partial_chapters": self.partial_chapters,
++            "exit_code": self.exit_code,
++            "items": [
++                _outcome_to_dict(outcome, request.output_variant_dir)
++                for outcome in self.outcomes
++            ],
++        }
++
++
++def render_book(
++    workspace: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    fail_fast: bool = False,
++) -> BookRenderResult:
++    """Render selected chapters in a RenderPlan variant using shared preflight and render APIs."""
++    request = _resolve_request(
++        workspace,
++        variant=variant,
++        chapter_selector=chapters,
++        speech_selector=speech,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++        cache_dir=cache_dir,
++        force=force,
++        fail_fast=fail_fast,
++    )
++    request.output_variant_dir.mkdir(parents=True, exist_ok=True)
++    request.cache_dir.mkdir(parents=True, exist_ok=True)
++    report_path = request.output_variant_dir / BOOK_REPORT_FILENAME
++    if report_path.is_symlink():
++        raise BookRenderError(
++            f"book report path must not be a symlink: {report_path}",
++            code="workspace.invalid",
++        )
++
++    outcomes: list[ChapterRenderOutcome] = []
++    stopped = False
++    for index, chapter in enumerate(request._loaded_chapters, start=1):
++        if stopped:
++            outcome = _skipped_outcome(chapter, index)
++        else:
++            outcome = _render_chapter(request, chapter, index)
++        outcomes.append(outcome)
++        if request.fail_fast and outcome.status == "failed":
++            stopped = True
++
++    result = BookRenderResult(request, report_path, tuple(outcomes))
++    _write_book_report(result)
++    return result
++
++
++def _resolve_request(
++    workspace: str | Path,
++    *,
++    variant: str,
++    chapter_selector: str,
++    speech_selector: str,
++    renderplan_root: str | Path | None,
++    output_root: str | Path | None,
++    cache_dir: str | Path | None,
++    force: bool,
++    fail_fast: bool,
++) -> BookRenderRequest:
++    workspace_path = _resolve_workspace(workspace)
++    if (
++        not isinstance(variant, str)
++        or not variant
++        or variant in {".", ".."}
++        or Path(variant).name != variant
++        or PureWindowsPath(variant).name != variant
++        or "/" in variant
++        or "\\" in variant
++        or "\x00" in variant
++    ):
++        raise BookRenderError(
++            "--variant must be an exact directory basename",
++            code="variant.identity_mismatch",
++        )
++
++    renderplan_base = _resolve_root(
++        renderplan_root or workspace_path / "renderplan", "RenderPlan"
++    )
++    variant_candidate = renderplan_base / variant
++    if not variant_candidate.exists():
++        raise BookRenderError(
++            f"RenderPlan variant directory does not exist: {variant_candidate}",
++            code="variant.not_found",
++        )
++    try:
++        variant_dir = variant_candidate.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise BookRenderError(
++            f"cannot resolve RenderPlan variant directory {variant_candidate}: {exc}",
++            code="variant.not_found",
++        ) from exc
++    if not variant_dir.is_dir() or not _is_within(variant_dir, renderplan_base):
++        raise BookRenderError(
++            f"RenderPlan variant is not a directory inside its root: {variant_candidate}",
++            code="variant.not_found",
++        )
++
++    set_path = variant_dir / "renderplan-set.toml"
++    if set_path.is_symlink() or not _regular_file(set_path):
++        raise BookRenderError(
++            f"renderplan-set.toml must be a regular file: {set_path}",
++            code="index.invalid",
++        )
++    try:
++        renderplan_set = load_renderplan_set(set_path)
++        validate_renderplan_set(renderplan_set)
++    except (RenderPlanSetError, OSError, ValueError, TypeError) as exc:
++        raise BookRenderError(
++            f"invalid renderplan-set.toml: {exc}",
++            code="index.invalid",
++        ) from exc
++
++    expected_variant_name = (
++        f"{renderplan_set.variant}--{renderplan_set.profile_fingerprint}"
++    )
++    if variant != expected_variant_name:
++        raise BookRenderError(
++            f"variant directory {variant!r} does not match set identity {expected_variant_name!r}",
++            code="variant.identity_mismatch",
++        )
++
++    profile_path = variant_dir / renderplan_set.snapshot
++    _require_contained_file(
++        profile_path,
++        variant_dir,
++        "RenderProfile snapshot",
++        missing_code="profile.snapshot_missing",
++        reject_symlink=False,
++    )
++    try:
++        profile = validate_renderplan_set_profile(
++            renderplan_set,
++            profile_path,
++            expected_profile_id=renderplan_set.profile_id,
++        )
++    except RenderPlanSetError as exc:
++        raise BookRenderError(str(exc), code=exc.code) from exc
++    profile_id = profile.profile_id or profile.computed_id()
++
++    available_chapters = {chapter.source_number for chapter in renderplan_set.chapters}
++    selected_chapter_numbers = _resolve_selection(
++        chapter_selector, available_chapters, "chapter"
++    )
++    selected_entries = tuple(
++        chapter
++        for chapter in renderplan_set.chapters
++        if chapter.source_number in selected_chapter_numbers
++    )
++    if speech_selector.strip().casefold() != "all" and len(selected_entries) != 1:
++        raise BookRenderError(
++            "--speech selection requires exactly one selected chapter",
++            code="selection.invalid",
++        )
++    speech_ranges = (
++        None
++        if speech_selector.strip().casefold() == "all"
++        else _parse_number_ranges(speech_selector, "speech")
++    )
++
++    output_base = _resolve_root(
++        output_root or workspace_path / "voicerender", "VoiceRender"
++    )
++    output_variant_dir = (output_base / variant).resolve(strict=False)
++    if _is_within(output_base, variant_dir) or _is_within(
++        output_variant_dir, variant_dir
++    ):
++        raise BookRenderError(
++            "VoiceRender output root must not resolve inside the RenderPlan variant",
++            code="workspace.invalid",
++        )
++    if output_variant_dir.exists() and not output_variant_dir.is_dir():
++        raise BookRenderError(
++            f"VoiceRender output variant is not a directory: {output_variant_dir}",
++            code="workspace.invalid",
++        )
++    _assert_safe_output_metadata(
++        output_variant_dir / BOOK_REPORT_FILENAME, output_variant_dir
++    )
++
++    loaded_chapters: list[_LoadedChapter] = []
++    chapter_outputs: set[Path] = set()
++    for entry in selected_entries:
++        _validate_chapter_id(entry.id)
++        plan_candidate = variant_dir.joinpath(*PurePosixPath(entry.renderplan).parts)
++        plan_path = _require_contained_file(
++            plan_candidate,
++            variant_dir,
++            f"RenderPlan for {entry.id}",
++            missing_code="plan.missing",
++            reject_symlink=False,
++        )
++        try:
++            plan = load_plan(plan_path)
++        except (OSError, ValueError, TypeError) as exc:
++            raise BookRenderError(
++                f"cannot load RenderPlan for {entry.id}: {exc}", code="plan.missing"
++            ) from exc
++        plan_id = plan.plan_id or plan.computed_id()
++        if (
++            plan_id != entry.render_plan_id
++            or plan.source_plan_id != entry.source_plan_id
++            or plan.render_profile_id != renderplan_set.profile_id
++        ):
++            raise BookRenderError(
++                f"RenderPlan identity does not match renderplan-set entry {entry.id}",
++                code="plan.identity_mismatch",
++            )
++        chapter_output = output_variant_dir / entry.id
++        chapter_output_resolved = chapter_output.resolve(strict=False)
++        if not _is_within(chapter_output_resolved, output_variant_dir):
++            raise BookRenderError(
++                f"chapter output path escapes the VoiceRender variant: {chapter_output}",
++                code="workspace.invalid",
++            )
++        if chapter_output.exists() and not chapter_output.is_dir():
++            raise BookRenderError(
++                f"chapter output path is not a directory: {chapter_output}",
++                code="workspace.invalid",
++            )
++        if chapter_output_resolved in chapter_outputs:
++            raise BookRenderError(
++                f"selected chapters share an output directory: {chapter_output}",
++                code="workspace.invalid",
++            )
++        _assert_safe_output_metadata(
++            chapter_output_resolved / RENDER_MANIFEST_FILENAME,
++            chapter_output_resolved,
++        )
++        _assert_safe_output_metadata(
++            chapter_output_resolved / "preflight.toml", chapter_output_resolved
++        )
++        chapter_outputs.add(chapter_output_resolved)
++        speech_numbers = (
++            None
++            if speech_ranges is None
++            else _resolve_ranges(
++                speech_ranges, {item.number for item in plan.speech}, "speech"
++            )
++        )
++        loaded_chapters.append(
++            _LoadedChapter(
++                entry=entry,
++                plan_path=plan_path,
++                plan=plan,
++                output_dir=chapter_output_resolved,
++                speech_numbers=speech_numbers,
++            )
++        )
++
++    resolved_cache = (
++        Path(cache_dir).expanduser().resolve(strict=False)
++        if cache_dir is not None
++        else output_variant_dir / ".voicerender-cache"
++    )
++    if resolved_cache.exists() and not resolved_cache.is_dir():
++        raise BookRenderError(
++            f"cache path is not a directory: {resolved_cache}", code="workspace.invalid"
++        )
++    for chapter_output in chapter_outputs:
++        if (
++            resolved_cache == chapter_output
++            or _is_within(resolved_cache, chapter_output)
++            or _is_within(chapter_output, resolved_cache)
++        ):
++            raise BookRenderError(
++                "cache directory must remain outside every chapter output directory",
++                code="workspace.invalid",
++            )
++
++    return BookRenderRequest(
++        workspace=workspace_path,
++        variant_name=variant,
++        renderplan_variant_dir=variant_dir,
++        output_variant_dir=output_variant_dir,
++        chapters=selected_entries,
++        speech_numbers=(
++            loaded_chapters[0].speech_numbers
++            if loaded_chapters and speech_ranges is not None
++            else None
++        ),
++        cache_dir=resolved_cache,
++        force=force,
++        fail_fast=fail_fast,
++        chapter_selector=chapter_selector,
++        speech_selector=speech_selector,
++        render_profile_id=profile_id,
++        _loaded_chapters=tuple(loaded_chapters),
++    )
++
++
++def _render_chapter(
++    request: BookRenderRequest, chapter: _LoadedChapter, index: int
++) -> ChapterRenderOutcome:
++    entry = chapter.entry
++    planned = len(chapter.plan.speech)
++    selected = (
++        planned if chapter.speech_numbers is None else len(chapter.speech_numbers)
++    )
++    manifest_path = chapter.output_dir / RENDER_MANIFEST_FILENAME
++
++    if not request.force:
++        existing = _verified_manifest_for_selection(chapter)
++        if existing is not None:
++            return ChapterRenderOutcome(
++                index=index,
++                id=entry.id,
++                source_number=entry.source_number,
++                renderplan=chapter.plan_path,
++                render_plan_id=entry.render_plan_id,
++                output_dir=chapter.output_dir,
++                manifest=manifest_path,
++                status="reused",
++                planned_speech=planned,
++                selected_speech=selected,
++                available_speech=len(existing.speech),
++                rendered=0,
++                reused=selected,
++                manifest_complete=existing.complete,
++            )
++
++    try:
++        preflight_path = chapter.output_dir / "preflight.toml"
++        _assert_safe_output_metadata(preflight_path, chapter.output_dir)
++        preflight = _get_preflight(chapter.plan, preflight_path)
++    except BookRenderError as exc:
++        return _failure_outcome(chapter, index, planned, selected, exc.code, str(exc))
++    except Exception as exc:  # noqa: BLE001 - Chapter-specific preflight errors are reported and batch continues.
++        return _failure_outcome(
++            chapter,
++            index,
++            planned,
++            selected,
++            "preflight.reject",
++            str(exc) or "RenderPlan preflight failed",
++        )
++
++    if preflight.status != "ok":
++        code = (
++            "preflight.replan" if preflight.status == "replan" else "preflight.reject"
++        )
++        return _failure_outcome(
++            chapter,
++            index,
++            planned,
++            selected,
++            code,
++            f"RenderPlan preflight status is {preflight.status!r}",
++        )
++
++    try:
++        _assert_safe_output_metadata(manifest_path, chapter.output_dir)
++        result = render_renderplan(
++            chapter.plan,
++            preflight=preflight,
++            output_dir=chapter.output_dir,
++            cache_dir=request.cache_dir,
++            force=request.force,
++            speech_numbers=chapter.speech_numbers,
++        )
++    except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
++        error_code = getattr(exc, "code", None)
++        return _failure_outcome(
++            chapter,
++            index,
++            planned,
++            selected,
++            error_code if isinstance(error_code, str) else "render.failed",
++            str(exc),
++            manifest=manifest_path if manifest_path.exists() else None,
++        )
++
++    status: BookChapterStatus = "complete" if result.manifest.complete else "partial"
++    if result.failed:
++        status = "failed"
++    return ChapterRenderOutcome(
++        index=index,
++        id=entry.id,
++        source_number=entry.source_number,
++        renderplan=chapter.plan_path,
++        render_plan_id=entry.render_plan_id,
++        output_dir=chapter.output_dir,
++        manifest=result.manifest_path,
++        status=status,
++        planned_speech=result.planned_count,
++        selected_speech=result.selected_count,
++        available_speech=result.available_count,
++        rendered=result.rendered_count,
++        reused=result.reused_count,
++        manifest_complete=result.manifest.complete,
++        error_code=(
++            (
++                "preflight.replan"
++                if result.fresh_preflight is not None
++                and result.fresh_preflight.status == "replan"
++                else "preflight.reject"
++                if result.fresh_preflight is not None
++                else "render.failed"
++            )
++            if result.failed
++            else None
++        ),
++        error_message=result.error,
++    )
++
++
++def _get_preflight(plan: RenderPlan, path: Path) -> PreflightReport:
++    if path.exists() or path.is_symlink():
++        if path.is_symlink():
++            resolved = path.resolve(strict=True)
++            if not _is_within(resolved, path.parent.resolve(strict=True)):
++                raise BookRenderError(
++                    f"preflight metadata symlink escapes chapter output: {path}",
++                    code="workspace.invalid",
++                )
++        if path.is_file():
++            try:
++                existing = load_preflight(path)
++                if _preflight_is_reusable(existing, plan):
++                    return existing
++            except (OSError, ValueError, TypeError):
++                pass
++    return preflight_render_plan(plan, path)
++
++
++def _preflight_is_reusable(report: PreflightReport, plan: RenderPlan) -> bool:
++    if report.status != "ok":
++        return False
++    try:
++        report.validate_against(plan)
++    except ValueError:
++        return False
++    checks = {
++        (check.segment_number, check.segment_id): check for check in report.checks
++    }
++    required = [item for item in plan.speech if item.preflight_required]
++    if len(checks) != len(required):
++        return False
++    return all(
++        (item.number, item.segment_id or item.computed_id()) in checks
++        and checks[(item.number, item.segment_id or item.computed_id())].status == "ok"
++        for item in required
++    )
++
++
++def _verified_manifest_for_selection(chapter: _LoadedChapter) -> RenderManifest | None:
++    path = chapter.output_dir / RENDER_MANIFEST_FILENAME
++    if path.is_symlink() or not path.is_file():
++        return None
++    try:
++        manifest = load_manifest(path)
++        manifest.validate_against(chapter.plan)
++        expected = {
++            (item.number, item.segment_id or item.computed_id()): item
++            for item in chapter.plan.speech
++        }
++        verified: set[tuple[int, str]] = set()
++        for artifact in manifest.speech:
++            key = (artifact.segment_number, artifact.segment_id)
++            if (
++                key in verified
++                or key not in expected
++                or artifact.wav != expected[key].wav
++            ):
++                return None
++            if not verified_wav(
++                chapter.output_dir / artifact.wav,
++                {
++                    "sha256": artifact.sha256.removeprefix("sha256:"),
++                    "frames": artifact.frames,
++                    "sample_rate": artifact.sample_rate,
++                    "channels": artifact.channels,
++                },
++            ):
++                return None
++            verified.add(key)
++        selected = (
++            set(expected)
++            if chapter.speech_numbers is None
++            else {
++                (number, key[1])
++                for number in chapter.speech_numbers
++                for key in expected
++                if key[0] == number
++            }
++        )
++        if not selected.issubset(verified):
++            return None
++        if chapter.speech_numbers is None and not manifest.complete:
++            return None
++        if manifest.complete and verified != set(expected):
++            return None
++        return manifest
++    except (OSError, ValueError, TypeError):
++        return None
++
++
++def _resolve_workspace(workspace: str | Path) -> Path:
++    path = Path(workspace).expanduser()
++    try:
++        resolved = path.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise BookRenderError(f"cannot resolve book workspace {path}: {exc}") from exc
++    if not resolved.is_dir():
++        raise BookRenderError(f"book workspace is not a directory: {resolved}")
++    if resolved.name == "chapters":
++        resolved = resolved.parent
++    return resolved
++
++
++def _resolve_root(path: str | Path, label: str) -> Path:
++    root = Path(path).expanduser().resolve(strict=False)
++    if root.exists() and not root.is_dir():
++        raise BookRenderError(f"{label} root is not a directory: {root}")
++    return root
++
++
++def _require_contained_file(
++    path: Path,
++    root: Path,
++    label: str,
++    *,
++    missing_code: str,
++    reject_symlink: bool,
++) -> Path:
++    if reject_symlink and path.is_symlink():
++        raise BookRenderError(
++            f"{label} must not be a symlink: {path}", code=missing_code
++        )
++    try:
++        resolved = path.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise BookRenderError(
++            f"{label} is missing or unreadable: {path}", code=missing_code
++        ) from exc
++    try:
++        root_resolved = root.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise BookRenderError(f"cannot resolve containment root {root}: {exc}") from exc
++    if not _is_within(resolved, root_resolved):
++        raise BookRenderError(
++            f"{label} resolves outside its variant directory: {path}", code=missing_code
++        )
++    if not resolved.is_file():
++        raise BookRenderError(
++            f"{label} is not a regular file: {path}", code=missing_code
++        )
++    return resolved
++
++
++def _regular_file(path: Path) -> bool:
++    try:
++        return stat.S_ISREG(path.lstat().st_mode)
++    except OSError:
++        return False
++
++
++def _assert_safe_output_metadata(path: Path, output_dir: Path) -> None:
++    if path.is_symlink():
++        try:
++            target = path.resolve(strict=True)
++        except (OSError, RuntimeError) as exc:
++            raise BookRenderError(
++                f"output metadata symlink cannot be resolved: {path}",
++                code="workspace.invalid",
++            ) from exc
++        if not _is_within(target, output_dir.resolve(strict=False)):
++            raise BookRenderError(
++                f"output metadata symlink escapes chapter directory: {path}",
++                code="workspace.invalid",
++            )
++    if path.exists() and path.is_dir():
++        raise BookRenderError(
++            f"output metadata path is a directory: {path}", code="workspace.invalid"
++        )
++
++
++def _validate_chapter_id(chapter_id: str) -> None:
++    if (
++        not isinstance(chapter_id, str)
++        or not chapter_id
++        or chapter_id in {".", ".."}
++        or Path(chapter_id).name != chapter_id
++        or PureWindowsPath(chapter_id).name != chapter_id
++        or "/" in chapter_id
++        or "\\" in chapter_id
++        or "\x00" in chapter_id
++    ):
++        raise BookRenderError(
++            f"chapter id is not a safe directory basename: {chapter_id!r}",
++            code="index.invalid",
++        )
++
++
++def _parse_number_ranges(selector: str, label: str) -> tuple[tuple[int, int], ...]:
++    if not isinstance(selector, str) or not selector.strip():
++        raise BookRenderError(
++            f"{label} selector must not be empty", code="selection.invalid"
++        )
++    ranges: list[tuple[int, int]] = []
++    for part in selector.split(","):
++        token = part.strip()
++        if not re.fullmatch(r"[0-9]+(?:-[0-9]+)?", token):
++            raise BookRenderError(
++                f"invalid {label} selector token {token!r}", code="selection.invalid"
++            )
++        values = token.split("-", maxsplit=1)
++        start = int(values[0])
++        end = int(values[1]) if len(values) == 2 else start
++        if start <= 0 or end <= 0 or end < start:
++            raise BookRenderError(
++                f"{label} selector ranges must be positive and ascending",
++                code="selection.invalid",
++            )
++        ranges.append((start, end))
++    ranges.sort()
++    merged: list[tuple[int, int]] = []
++    for start, end in ranges:
++        if merged and start <= merged[-1][1] + 1:
++            previous_start, previous_end = merged[-1]
++            merged[-1] = (previous_start, max(previous_end, end))
++        else:
++            merged.append((start, end))
++    return tuple(merged)
++
++
++def _resolve_selection(
++    selector: str, available: set[int], label: str
++) -> frozenset[int]:
++    if not isinstance(selector, str) or not selector.strip():
++        raise BookRenderError(
++            f"{label} selector must not be empty", code="selection.invalid"
++        )
++    if selector.strip().casefold() == "all":
++        return frozenset(available)
++    ranges = _parse_number_ranges(selector, label)
++    return _resolve_ranges(ranges, available, label)
++
++
++def _resolve_ranges(
++    ranges: Sequence[tuple[int, int]], available: set[int], label: str
++) -> frozenset[int]:
++    selected = {
++        number
++        for number in available
++        if any(start <= number <= end for start, end in ranges)
++    }
++    requested_count = sum(end - start + 1 for start, end in ranges)
++    if len(selected) != requested_count:
++        for start, end in ranges:
++            candidate = start
++            while candidate <= end and candidate in available:
++                candidate += 1
++            if candidate <= end:
++                raise BookRenderError(
++                    f"unknown {label} number {candidate}", code="selection.invalid"
++                )
++    return frozenset(selected)
++
++
++def _is_within(path: Path, root: Path) -> bool:
++    try:
++        return path.is_relative_to(root)
++    except ValueError:
++        return False
++
++
++def _failure_outcome(
++    chapter: _LoadedChapter,
++    index: int,
++    planned: int,
++    selected: int,
++    error_code: str,
++    error_message: str,
++    *,
++    manifest: Path | None = None,
++) -> ChapterRenderOutcome:
++    return ChapterRenderOutcome(
++        index=index,
++        id=chapter.entry.id,
++        source_number=chapter.entry.source_number,
++        renderplan=chapter.plan_path,
++        render_plan_id=chapter.entry.render_plan_id,
++        output_dir=chapter.output_dir,
++        manifest=manifest,
++        status="failed",
++        planned_speech=planned,
++        selected_speech=selected,
++        available_speech=0,
++        rendered=0,
++        reused=0,
++        error_code=error_code,
++        error_message=error_message,
++    )
++
++
++def _skipped_outcome(chapter: _LoadedChapter, index: int) -> ChapterRenderOutcome:
++    selected = (
++        len(chapter.plan.speech)
++        if chapter.speech_numbers is None
++        else len(chapter.speech_numbers)
++    )
++    return ChapterRenderOutcome(
++        index=index,
++        id=chapter.entry.id,
++        source_number=chapter.entry.source_number,
++        renderplan=chapter.plan_path,
++        render_plan_id=chapter.entry.render_plan_id,
++        output_dir=chapter.output_dir,
++        manifest=None,
++        status="skipped",
++        planned_speech=len(chapter.plan.speech),
++        selected_speech=selected,
++        available_speech=0,
++        rendered=0,
++        reused=0,
++        error_code="batch.fail_fast",
++        error_message="Skipped after an earlier chapter failed because --fail-fast is enabled.",
++    )
++
++
++def _outcome_to_dict(
++    outcome: ChapterRenderOutcome, output_variant_dir: Path
++) -> dict[str, Any]:
++    item: dict[str, Any] = {
++        "index": outcome.index,
++        "id": outcome.id,
++        "source_number": outcome.source_number,
++        "renderplan": _relative_posix(outcome.renderplan, output_variant_dir),
++        "render_plan_id": outcome.render_plan_id,
++        "output_dir": _relative_posix(outcome.output_dir, output_variant_dir),
++        "status": outcome.status,
++        "planned_speech": outcome.planned_speech,
++        "selected_speech": outcome.selected_speech,
++        "available_speech": outcome.available_speech,
++        "rendered": outcome.rendered,
++        "reused": outcome.reused,
++        "manifest_complete": outcome.manifest_complete,
++    }
++    if outcome.manifest is not None:
++        item["manifest"] = _relative_posix(outcome.manifest, output_variant_dir)
++    if outcome.error_code is not None:
++        item["error_code"] = outcome.error_code
++    if outcome.error_message is not None:
++        item["error_message"] = outcome.error_message
++    return item
++
++
++def _relative_posix(path: Path, base: Path) -> str:
++    return Path(os.path.relpath(path, start=base)).as_posix()
++
++
++def _write_book_report(result: BookRenderResult) -> None:
++    request = result.request
++    payload: dict[str, Any] = {
++        "format": "voicerender-book-report",
++        "version": 1,
++        "variant": request.variant_name,
++        "render_profile_id": request.render_profile_id,
++        "requested": result.requested,
++        "succeeded": result.succeeded,
++        "failed": result.failed,
++        "skipped": result.skipped,
++        "full_chapters": result.full_chapters,
++        "partial_chapters": result.partial_chapters,
++        "selection": {
++            "chapters": request.chapter_selector,
++            "speech": request.speech_selector,
++        },
++        "item": [
++            _outcome_to_dict(outcome, request.output_variant_dir)
++            for outcome in result.outcomes
++        ],
++    }
++    lines: list[str] = []
++    for key, value in payload.items():
++        if key in {"selection", "item"}:
++            continue
++        lines.append(f"{key} = {_toml_value(value)}")
++    selection = payload["selection"]
++    assert isinstance(selection, Mapping)
++    lines.extend(["", "[selection]"])
++    for key, value in selection.items():
++        lines.append(f"{key} = {_toml_value(value)}")
++    items = payload["item"]
++    assert isinstance(items, list)
++    for item in items:
++        assert isinstance(item, Mapping)
++        lines.extend(["", "[[item]]"])
++        for key, value in item.items():
++            lines.append(f"{key} = {_toml_value(value)}")
++    destination = result.report_path
++    temporary: Path | None = None
++    try:
++        destination.parent.mkdir(parents=True, exist_ok=True)
++        descriptor, temporary_name = tempfile.mkstemp(
++            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
++        )
++        temporary = Path(temporary_name)
++        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
++            stream.write("\n".join(lines) + "\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, destination)
++    except OSError as exc:
++        raise BookRenderError(
++            f"cannot write VoiceRender book report {destination}: {exc}",
++            code="workspace.invalid",
++        ) from exc
++    finally:
++        if temporary is not None:
++            temporary.unlink(missing_ok=True)
++
++
++def _toml_value(value: Any) -> str:
++    if isinstance(value, bool):
++        return "true" if value else "false"
++    if isinstance(value, int):
++        return str(value)
++    if isinstance(value, str):
++        return json.dumps(value, ensure_ascii=False)
++    raise TypeError(f"unsupported TOML report value: {type(value).__name__}")
++
++
++__all__ = [
++    "BOOK_REPORT_FILENAME",
++    "BookChapterStatus",
++    "BookRenderError",
++    "BookRenderRequest",
++    "BookRenderResult",
++    "ChapterRenderOutcome",
++    "render_book",
++]
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index d4487b4..11d5f53 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -11,6 +11,7 @@ from typing import Any
+ from renderplan import load_manifest, load_plan
+
+ from . import __version__
++from .book import BookRenderError, BookRenderResult, render_book
+ from .engines.registry import (
+     discover_targets,
+     engine_status,
+@@ -110,6 +111,24 @@ def build_parser() -> argparse.ArgumentParser:
+     render.add_argument("--force", action="store_true")
+     render.add_argument("--json", action="store_true")
+
++    book_render = commands.add_parser(
++        "render-book", help="Render selected chapters from a RenderPlan variant"
++    )
++    book_render.add_argument(
++        "book", type=Path, help="book workspace or its chapters/ directory"
++    )
++    book_render.add_argument(
++        "--variant", required=True, help="exact RenderPlan variant directory name"
++    )
++    book_render.add_argument("--chapters", default="all", metavar="SELECTOR")
++    book_render.add_argument("--speech", default="all", metavar="SELECTOR")
++    book_render.add_argument("--renderplan-root", type=Path)
++    book_render.add_argument("--output-root", type=Path)
++    book_render.add_argument("--cache-dir", type=Path)
++    book_render.add_argument("--force", action="store_true")
++    book_render.add_argument("--fail-fast", action="store_true")
++    book_render.add_argument("--json", action="store_true")
++
+     inspect = commands.add_parser(
+         "inspect-manifest", help="Verify a render manifest and its WAVs"
+     )
+@@ -188,6 +207,46 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
+     }
+
+
++def _print_book_result(result: BookRenderResult) -> None:
++    request = result.request
++    print("VoiceRender book render")
++    print(f"  workspace:   {request.workspace}")
++    print(f"  variant:     {request.variant_name}")
++    print(f"  renderplans: {request.renderplan_variant_dir}")
++    print(f"  output:      {request.output_variant_dir}")
++    print(f"  chapters:    {request.chapter_selector}")
++    print(f"  selected:    {result.requested}")
++    for outcome in result.outcomes:
++        print(f"[{outcome.index}/{result.requested}] {outcome.id}")
++        if outcome.status == "failed":
++            print("       FAILED")
++            print(
++                f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
++            )
++        elif outcome.status == "skipped":
++            print("       skipped after an earlier chapter failure")
++        else:
++            if request.speech_selector.strip().casefold() != "all":
++                print(
++                    f"       speech: {outcome.selected_speech} of "
++                    f"{outcome.planned_speech} selected"
++                )
++            print(f"       rendered: {outcome.rendered} new, {outcome.reused} reused")
++            state = "complete" if outcome.manifest_complete else "partial"
++            print(
++                f"       chapter state: {state} "
++                f"({outcome.available_speech}/{outcome.planned_speech} available)"
++            )
++            if outcome.manifest is not None:
++                print(f"       manifest: {outcome.manifest}")
++    print("VoiceRender summary")
++    print(f"  requested: {result.requested}")
++    print(f"  complete:  {result.full_chapters}")
++    print(f"  partial:   {result.partial_chapters}")
++    print(f"  failed:    {result.failed}")
++    print(f"  skipped:   {result.skipped}")
++
++
+ def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
+     manifest = load_manifest(path)
+     artifact_rows: list[dict[str, Any]] = []
+@@ -373,6 +432,37 @@ def main(argv: list[str] | None = None) -> int:
+                 return 2 if fresh is not None and fresh.status == "replan" else 1
+             return 0
+
++        if args.command == "render-book":
++            try:
++                book_result = render_book(
++                    args.book,
++                    variant=args.variant,
++                    chapters=args.chapters,
++                    speech=args.speech,
++                    renderplan_root=args.renderplan_root,
++                    output_root=args.output_root,
++                    cache_dir=args.cache_dir,
++                    force=args.force,
++                    fail_fast=args.fail_fast,
++                )
++            except (BookRenderError, OSError, ValueError, TypeError) as exc:
++                error_code = getattr(exc, "code", "workspace.invalid")
++                payload = {
++                    "error": str(exc),
++                    "code": error_code,
++                    "exit_code": 2,
++                }
++                if args.json:
++                    print(json.dumps(payload, ensure_ascii=False, indent=2))
++                else:
++                    print(f"error: {exc}", file=sys.stderr)
++                return 2
++            if args.json:
++                print(json.dumps(book_result.to_dict(), ensure_ascii=False, indent=2))
++            else:
++                _print_book_result(book_result)
++            return book_result.exit_code
++
+         if args.command == "inspect-manifest":
+             payload, valid = _inspect_manifest(args.manifest)
+             if args.json:
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+index a3161bf..7774b7e 100644
+--- a/voicerender/errors.py
++++ b/voicerender/errors.py
+@@ -159,3 +159,9 @@ class EngineBackendError(EngineSynthesisError):
+
+ class ArtifactError(VoiceRenderError, RuntimeError):
+     """Corrupt or invalid WAV or cache artifact."""
++
++    code = "artifact.invalid"
++
++    def __init__(self, message: str, *, code: str | None = None) -> None:
++        super().__init__(message)
++        self.code = code or type(self).code
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 63a8873..4d0c598 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -4,12 +4,13 @@ from __future__ import annotations
+
+ import json
+ import os
++import re
+ import shutil
+-from collections.abc import Iterator
++from collections.abc import Collection, Iterator
+ from contextlib import ExitStack, contextmanager
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
+-from typing import Any
++from typing import Any, cast
+
+ from renderplan import (
+     PreflightCheck,
+@@ -20,6 +21,7 @@ from renderplan import (
+     ReplanRequest,
+     SpeechArtifact,
+     SpeechItem,
++    load_manifest,
+     load_plan,
+     load_preflight,
+     save_manifest,
+@@ -47,14 +49,18 @@ _CACHE_SCHEMA = "voicerender.renderplan-cache.v1"
+ class RenderPlanResult:
+     manifest: RenderManifest
+     manifest_path: Path
++    planned_count: int
++    selected_count: int
++    available_count: int
+     rendered_count: int
+     reused_count: int
++    selection_complete: bool
+     error: str | None = None
+     fresh_preflight: PreflightReport | None = None
+
+     @property
+     def failed(self) -> bool:
+-        return self.error is not None or not self.manifest.complete
++        return self.error is not None or not self.selection_complete
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -86,11 +92,13 @@ def render_renderplan(
+     cache_dir: str | Path | None = None,
+     force: bool = False,
+     recheck_report_path: str | Path | None = None,
++    speech_numbers: Collection[int] | None = None,
+ ) -> RenderPlanResult:
+-    """Render one WAV per SpeechItem, returning a complete or valid partial manifest."""
++    """Render selected speech items, retaining verified artifacts from prior runs."""
+     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
+     if not isinstance(parsed_plan, RenderPlan):
+         raise PlanError("render input must be a RenderPlan")
++    selected_items = _select_speech_items(parsed_plan, speech_numbers)
+     report = (
+         load_preflight(preflight) if isinstance(preflight, (str, Path)) else preflight
+     )
+@@ -119,7 +127,6 @@ def render_renderplan(
+                 f"Speech occurrence {key} does not have a matching OK preflight check"
+             )
+
+-    prepared = tuple(_prepare_speech(item) for item in parsed_plan.speech)
+     out = Path(output_dir).expanduser().resolve()
+     cache = (
+         Path(cache_dir).expanduser().resolve()
+@@ -132,23 +139,41 @@ def render_renderplan(
+     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
+     producer = Producer(name="voicerender", version=_voicerender_version())
+
+-    artifacts: list[SpeechArtifact] = []
++    artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
+     rendered = reused = 0
+     failure: _RenderFailure | None = None
+     with _exclusive_render(out):
+         cache.mkdir(parents=True, exist_ok=True)
++        artifact_map = _load_existing_artifacts(
++            parsed_plan, out, manifest_path, report_id, force=force
++        )
++        selected_keys = {
++            (item.number, item.segment_id or item.computed_id())
++            for item in selected_items
++        }
++        if not force:
++            reused = sum(key in artifact_map for key in selected_keys)
++        pending_items = tuple(
++            item
++            for item in selected_items
++            if force
++            or (item.number, item.segment_id or item.computed_id()) not in artifact_map
++        )
++        prepared = tuple(_prepare_speech(item) for item in pending_items)
++        current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
+         _persist_manifest(
+             parsed_plan,
+             manifest_path,
+             report_id,
+-            artifacts,
+-            complete=False,
++            current_artifacts,
++            complete=len(current_artifacts) == len(parsed_plan.speech),
+             producer=producer,
+         )
+         with ExitStack() as opened:
+             sessions: dict[str, EngineSession | _OpenFailure] = {}
+             for current in prepared:
+                 item = current.item
++                key = (item.number, current.segment_id)
+                 target = out / item.wav
+                 try:
+                     cached = None if force else _read_cache(cache, current.cache_key)
+@@ -163,7 +188,7 @@ def render_renderplan(
+                                 session = opened.enter_context(
+                                     open_session(current.selection)
+                                 )
+-                            except Exception as exc:  # noqa: BLE001 - Renderer setup must become a partial-render result.
++                            except Exception as exc:  # noqa: BLE001 - Renderer setup becomes a partial-render result.
+                                 session = _OpenFailure(exc)
+                             sessions[current.session_key] = session
+                         if isinstance(session, _OpenFailure):
+@@ -238,48 +263,170 @@ def render_renderplan(
+                         raise ArtifactError(
+                             f"Materialized WAV failed integrity validation: {target}"
+                         )
+-                    artifacts.append(
+-                        SpeechArtifact(
+-                            segment_number=item.number,
+-                            segment_id=current.segment_id,
+-                            wav=item.wav,
+-                            sha256=f"sha256:{final_info['sha256']}",
+-                            frames=int(final_info["frames"]),
+-                            sample_rate=int(final_info["sample_rate"]),
+-                            channels=int(final_info["channels"]),
+-                        )
++                    artifact_map[key] = SpeechArtifact(
++                        segment_number=item.number,
++                        segment_id=current.segment_id,
++                        wav=item.wav,
++                        sha256=f"sha256:{final_info['sha256']}",
++                        frames=int(final_info["frames"]),
++                        sample_rate=int(final_info["sample_rate"]),
++                        channels=int(final_info["channels"]),
+                     )
++                    current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
+                     _persist_manifest(
+                         parsed_plan,
+                         manifest_path,
+                         report_id,
+-                        artifacts,
+-                        complete=False,
++                        current_artifacts,
++                        complete=len(current_artifacts) == len(parsed_plan.speech),
+                         producer=producer,
+                     )
+-                except Exception as exc:  # noqa: BLE001 - Artifact and backend failures persist a valid partial manifest.
++                except Exception as exc:  # noqa: BLE001 - Persist a valid cumulative partial manifest.
+                     failure = _RenderFailure(str(exc) or "Render failed")
+                     break
+
+-        complete = failure is None and len(artifacts) == len(parsed_plan.speech)
++        current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
+         manifest = _persist_manifest(
+             parsed_plan,
+             manifest_path,
+             report_id,
+-            artifacts,
+-            complete=complete,
++            current_artifacts,
++            complete=len(current_artifacts) == len(parsed_plan.speech),
+             producer=producer,
+         )
++
++    selected_complete = all(
++        (item.number, item.segment_id or item.computed_id()) in artifact_map
++        for item in selected_items
++    )
+     return RenderPlanResult(
+         manifest=manifest,
+         manifest_path=manifest_path,
++        planned_count=len(parsed_plan.speech),
++        selected_count=len(selected_items),
++        available_count=len(manifest.speech),
+         rendered_count=rendered,
+         reused_count=reused,
++        selection_complete=selected_complete,
+         error=failure.message if failure is not None else None,
+         fresh_preflight=failure.fresh_preflight if failure is not None else None,
+     )
+
+
++def _select_speech_items(
++    plan: RenderPlan, speech_numbers: Collection[int] | None
++) -> tuple[SpeechItem, ...]:
++    if speech_numbers is None:
++        return cast(tuple[SpeechItem, ...], plan.speech)
++    try:
++        requested = tuple(speech_numbers)
++    except TypeError as exc:
++        raise PlanError(
++            "speech_numbers must be a collection of positive integers"
++        ) from exc
++    if not requested:
++        raise PlanError("speech_numbers selection must not be empty")
++    if any(type(number) is not int or number <= 0 for number in requested):
++        raise PlanError("speech_numbers must contain only positive integers")
++    requested_set = set(requested)
++    planned_numbers = {item.number for item in plan.speech}
++    unknown = requested_set - planned_numbers
++    if unknown:
++        raise PlanError(
++            f"speech_numbers contains unknown plan occurrence(s): {sorted(unknown)}"
++        )
++    return tuple(item for item in plan.speech if item.number in requested_set)
++
++
++def _load_existing_artifacts(
++    plan: RenderPlan,
++    output_dir: Path,
++    manifest_path: Path,
++    plan_id: str,
++    *,
++    force: bool,
++) -> dict[tuple[int, str], SpeechArtifact]:
++    if not manifest_path.exists() and not manifest_path.is_symlink():
++        return {}
++    if manifest_path.is_symlink():
++        if not force:
++            raise ArtifactError(
++                "Existing render manifest must not be a symlink",
++                code="artifact.invalid",
++            )
++        _reset_owned_artifacts(output_dir)
++        return {}
++    try:
++        manifest = load_manifest(manifest_path)
++        if manifest.render_plan_id != plan_id:
++            if not force:
++                raise ArtifactError(
++                    "Stale render output belongs to a different RenderPlan; use --force to reset it",
++                    code="output.stale_plan",
++                )
++            _reset_owned_artifacts(output_dir)
++            return {}
++        manifest.validate_against(plan)
++        expected = {
++            (item.number, item.segment_id or item.computed_id()): item
++            for item in plan.speech
++        }
++        verified: dict[tuple[int, str], SpeechArtifact] = {}
++        for artifact in manifest.speech:
++            key = (artifact.segment_number, artifact.segment_id)
++            if key in verified or key not in expected:
++                raise ArtifactError(
++                    "Existing render manifest has duplicate or unknown speech entries"
++                )
++            item = expected[key]
++            if artifact.wav != item.wav:
++                raise ArtifactError(
++                    "Existing render manifest WAV name does not match the plan"
++                )
++            metadata = {
++                "sha256": artifact.sha256.removeprefix("sha256:"),
++                "frames": artifact.frames,
++                "sample_rate": artifact.sample_rate,
++                "channels": artifact.channels,
++            }
++            if verified_wav(output_dir / artifact.wav, metadata):
++                verified[key] = artifact
++        return verified
++    except ArtifactError:
++        raise
++    except (OSError, ValueError, TypeError) as exc:
++        if not force:
++            raise ArtifactError(
++                f"Existing render manifest is invalid: {exc}", code="artifact.invalid"
++            ) from exc
++        _reset_owned_artifacts(output_dir)
++        return {}
++
++
++def _reset_owned_artifacts(output_dir: Path) -> None:
++    """Remove only VoiceRender's well-known chapter output files."""
++    for child in output_dir.iterdir():
++        owned = child.name in {RENDER_MANIFEST_FILENAME, "preflight.toml"} or bool(
++            re.fullmatch(r"\d{6,}\.wav", child.name)
++        )
++        if not owned:
++            continue
++        if child.is_symlink() or child.is_file():
++            child.unlink()
++        elif child.exists():
++            raise ArtifactError(f"Cannot reset owned artifact directory: {child}")
++
++
++def _ordered_artifacts(
++    plan: RenderPlan, artifacts: dict[tuple[int, str], SpeechArtifact]
++) -> list[SpeechArtifact]:
++    return [
++        artifacts[(item.number, item.segment_id or item.computed_id())]
++        for item in plan.speech
++        if (item.number, item.segment_id or item.computed_id()) in artifacts
++    ]
++
++
+ def _prepare_speech(item: SpeechItem) -> _PreparedSpeech:
+     try:
+         request = speech_request_from_renderplan(item)

@@ -6,10 +6,23 @@ The package lives in `voicerender/`; engine SDKs and model assets are installed 
 
 ## Install
 
+Core installation:
+
+```bash
+python -m pip install voicerender
+```
+
+Install only the engine SDK you need:
+
+```bash
+python -m pip install "voicerender[piper]"
+python -m pip install "voicerender[sopro]"
+```
+
+For development from a checkout:
+
 ```bash
 python -m pip install -e ".[dev]"
-# Install only the engine SDKs you need, e.g.:
-python -m pip install -e ".[piper]"
 ```
 
 Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `supertonic`, and `inflect`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
@@ -43,6 +56,8 @@ voicerender profile create \
   --offline --output narration.renderprofile.toml
 voicerender profile validate narration.renderprofile.toml
 ```
+
+Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires that engine's SDK; it does not perform model inference.
 
 The created `profile_id` must be used by the planner when it emits a RenderPlan. For a complete serialized example, the checked-in plan and profile below already share an identity:
 

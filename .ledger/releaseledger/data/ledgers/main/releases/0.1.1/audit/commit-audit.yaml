@@ -1,0 +1,36 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.1.1
+git_base_ref: v0.1.0
+git_base_sha: 46cea5077ac2b81c4c96b1c41ceb4e78c53d960c
+git_head_ref: v0.1.1
+git_head_sha: eaa3bc4964996281a156eda9aebe5a32d5f56201
+git_range: 46cea5077ac2b81c4c96b1c41ceb4e78c53d960c..eaa3bc4964996281a156eda9aebe5a32d5f56201
+commit_count: 1
+rows:
+  - sha: eaa3bc4964996281a156eda9aebe5a32d5f56201
+    source_ref: git:eaa3bc4964996281a156eda9aebe5a32d5f56201
+    short_sha: eaa3bc4
+    changed_paths:
+      - .github/workflows/python-publish.yml
+    stats:
+      files_changed: 1
+      insertions: 12
+      deletions: 29
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+    observed_behavior:
+      The publish workflow now validates VoiceRender artifact metadata
+      and package content; no user-facing API or runtime behavior changes.
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: ci"
+    target_entry_id: entry-0001
+    notes:
+      Intentional internal-only release-history reconciliation; omit from public
+      changelog.

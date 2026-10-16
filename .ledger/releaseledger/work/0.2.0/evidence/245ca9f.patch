@@ -1,0 +1,637 @@
+ pyproject.toml                    |   2 +-
+ tests/test_backends.py            | 100 +++++++++++++++++-
+ tests/test_engine_registry.py     |  30 +++++-
+ tests/test_preflight.py           | 209 +++++++++++++++++++++++++++++++++++++-
+ voicerender/engines/pipersynth.py | 100 ++++++++++++++----
+ voicerender/renderplan_input.py   |   8 +-
+ 6 files changed, 422 insertions(+), 27 deletions(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index b78227e..22d419f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -22,7 +22,7 @@ dependencies = [
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.1,<0.2"]
+ kokoro = ["pykokoro>=0.10.2,<0.11"]
+-piper = ["pipersynth>=0.2.1,<0.3"]
++piper = ["pipersynth>=0.2.3,<0.3"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+ supertonic = ["supertonicsynth[cpu]>=0.1.2,<0.2"]
+ dev = [
+diff --git a/tests/test_backends.py b/tests/test_backends.py
+index 7f62fdb..c84779c 100644
+--- a/tests/test_backends.py
++++ b/tests/test_backends.py
+@@ -7,9 +7,16 @@ from types import SimpleNamespace
+
+ import numpy as np
+
+-from voicerender.engines.base import SynthesisRequest
++from voicerender.engines.base import (
++    EngineSelection,
++    PronunciationSpan,
++    SpeechRequest,
++    SpeechToken,
++    SynthesisRequest,
++)
+ from voicerender.engines.piper import PiperAdapter
+ from voicerender.engines.piper import discover_voices as piper_voices
++from voicerender.engines.pipersynth import PiperSynthEngineSession
+ from voicerender.engines.pocket import PocketAdapter
+ from voicerender.engines.pocket import discover_voices as pocket_voices
+ from voicerender.models import VoiceBinding
+@@ -124,3 +131,94 @@ def test_pocket_reference_audio_public_api(monkeypatch, tmp_path):
+     assert ("synthesize", "cloned", "prepared") in events
+     assert events[-1] == ("close",)
+     assert pocket_voices()[0]["voices"] == ["alba", "alex"]
++
++
++def test_pipersynth_measure_and_synthesize_share_native_request(monkeypatch):
++    events = []
++
++    class FakeVoice:
++        config = SimpleNamespace(
++            espeak_voice="en-US", phoneme_type=SimpleNamespace(value="espeak")
++        )
++
++        def measure(self, native):
++            events.append(("measure", native))
++            return SimpleNamespace(
++                fits=None,
++                phoneme_count=42,
++                max_phonemes=None,
++                model_id="voice-model",
++                metadata={"frontend": "piper-g2p"},
++            )
++
++        def synthesize(self, native, *, config):
++            events.append(("synthesize", native, config))
++            return SimpleNamespace(
++                id=native.id,
++                audio=np.ones(80, dtype=np.float32) / 4,
++                sample_rate=16000,
++                warnings=(),
++                metadata={},
++            )
++
++    fake = SimpleNamespace(
++        SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs),
++        LinguisticToken=lambda **kwargs: SimpleNamespace(**kwargs),
++        PronunciationOverride=lambda **kwargs: SimpleNamespace(**kwargs),
++    )
++    monkeypatch.setitem(sys.modules, "pipersynth", fake)
++
++    request = SpeechRequest(
++        id="request-7",
++        text="hello world",
++        language="en",
++        speaker=3,
++        tokens=(SpeechToken(0, 5, "hello", pos="NOUN", lemma="hello"),),
++        pronunciation_overrides=(
++            PronunciationSpan(
++                0, 5, phonemes="həˈloʊ", language="en-US", alphabet="ipa"
++            ),
++        ),
++    )
++    voice = FakeVoice()
++    session = PiperSynthEngineSession(
++        voice,
++        config=SimpleNamespace(length_scale=1.0),
++        selection=EngineSelection(
++            engine="piper", target_id="voice-model", language="en-US"
++        ),
++    )
++
++    measured = session.measure(request)
++    session.synthesize(request)
++
++    measured_native = events[0][1]
++    synthesized_native = events[1][1]
++    assert vars(measured_native) == vars(synthesized_native)
++    assert measured_native.id == request.id
++    assert measured_native.text == request.text
++    assert measured_native.language == "en-US"
++    assert measured_native.speaker == 3
++    assert measured_native.tokens == (
++        SimpleNamespace(
++            start=0,
++            end=5,
++            text="hello",
++            pos="NOUN",
++            tag=None,
++            lemma="hello",
++            language=None,
++            morph=None,
++        ),
++    )
++    assert measured_native.pronunciation_overrides == (
++        SimpleNamespace(start=0, end=5, phonemes="həˈloʊ", language="en-US"),
++    )
++    assert measured.amount == 42
++    assert measured.maximum is None
++    assert measured.unit == "phoneme_ids"
++    assert measured.source == "pipersynth.measure"
++    assert measured.details == {
++        "model_id": "voice-model",
++        "native_metadata": {"frontend": "piper-g2p"},
++    }
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index 5aefae1..53ddb36 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -75,7 +75,7 @@ def _fake_package(package: str) -> ModuleType:
+     module.__file__ = f"/fake/{package}/__init__.py"
+
+     owner_methods = {
+-        "PiperVoice": ("from_pretrained", "synthesize", "close"),
++        "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
+         "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
+         "KokoroSynthesizer": ("prepare", "synthesize", "close"),
+         "PocketRuntime": (
+@@ -210,6 +210,34 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+     assert fake._probe_discovery_calls == []
+
+
++def test_piper_probe_rejects_measurement_disabled_contract(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    fake = _fake_package("pipersynth")
++    fake.request_api_contract = lambda: {
++        "version": 1,
++        "supports_request_measurement": False,
++    }
++    monkeypatch.setitem(sys.modules, "pipersynth", fake)
++
++    probe = get_adapter("piper").probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "api_incompatible"
++    assert probe.details["supports_request_measurement"] is False
++
++
++def test_piper_probe_requires_measure_method(monkeypatch: pytest.MonkeyPatch) -> None:
++    fake = _fake_package("pipersynth")
++    delattr(fake.PiperVoice, "measure")
++    monkeypatch.setitem(sys.modules, "pipersynth", fake)
++
++    probe = get_adapter("piper").probe_api()
++
++    assert not probe.compatible
++    assert "PiperVoice.measure" in probe.missing_methods
++
++
+ @pytest.mark.parametrize("engine", sorted(ENGINE_IDS))
+ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
+     monkeypatch: pytest.MonkeyPatch, engine: str
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index b5c17bd..2d452f8 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -1,9 +1,12 @@
+ from __future__ import annotations
+
+ import json
++import sys
+ from collections.abc import Iterator
+ from contextlib import contextmanager
++from dataclasses import replace
+ from pathlib import Path
++from types import ModuleType, SimpleNamespace
+ from typing import Any
+
+ import pytest
+@@ -11,6 +14,7 @@ from renderplan import (
+     CapacityConstraint,
+     RenderPlan,
+     SourceSpan,
++    SpeechControl,
+     SpeechItem,
+     load_preflight,
+     save_plan,
+@@ -28,6 +32,7 @@ from voicerender.engines.base import (
+     RequestMeasure,
+     SpeechRequest,
+ )
++from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+ from voicerender.engines.registry import _ADAPTERS
+ from voicerender.engines.selection import EngineRequest
+ from voicerender.errors import EngineUnavailableError, SpeechRequestTooLongError
+@@ -178,6 +183,84 @@ def _install(monkeypatch: pytest.MonkeyPatch) -> _Adapter:
+     return adapter
+
+
++def _install_fake_pipersynth(
++    monkeypatch: pytest.MonkeyPatch,
++    *,
++    amount: int,
++    maximum: int | None,
++    fits: bool | None,
++) -> list[tuple[str, Any]]:
++    events: list[tuple[str, Any]] = []
++    metadata = SimpleNamespace(
++        id="piper-test-model",
++        name="Piper test model",
++        language_code="en-US",
++        language_family="en",
++        quality="medium",
++        sample_rate=22050,
++        speaker_id_map={},
++    )
++
++    class FakeVoice:
++        config = SimpleNamespace(
++            espeak_voice="en-us", phoneme_type=SimpleNamespace(value="espeak")
++        )
++
++        @classmethod
++        def from_pretrained(cls, target_id: str, **kwargs: Any) -> FakeVoice:
++            return cls()
++
++        def measure(self, native: Any) -> Any:
++            events.append(("measure", native))
++            return SimpleNamespace(
++                fits=fits,
++                phoneme_count=amount,
++                max_phonemes=maximum,
++                model_id="piper-test-model",
++                metadata={"frontend": "fake-piper-g2p"},
++            )
++
++        def synthesize(self, *args: Any, **kwargs: Any) -> Any:
++            events.append(("synthesize", None))
++            raise AssertionError("preflight must not call PiperVoice.synthesize")
++
++        def close(self) -> None:
++            events.append(("close", None))
++
++    class FakeVoiceAssetManager:
++        def __init__(self, *, offline: bool = False) -> None:
++            pass
++
++        def list_voices(self, language: str | None = None, refresh: bool = False):
++            return ()
++
++        def get_voice_metadata(self, target_id: str, refresh: bool = False):
++            return metadata
++
++    module = ModuleType("pipersynth")
++    module.__version__ = "0.2.3"
++    module.__file__ = "/fake/pipersynth/__init__.py"
++    module.REQUEST_API_VERSION = 1
++    module.request_api_contract = lambda: {
++        "version": 1,
++        "supports_request_measurement": True,
++    }
++    module.PiperVoice = FakeVoice
++    module.VoiceAssetManager = FakeVoiceAssetManager
++    module.SynthesisRequest = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.SynthesisResult = object
++    module.SynthesisConfig = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.VoiceLevelConfig = lambda mode: SimpleNamespace(mode=mode)
++    module.SynthesisInputTooLongError = type(
++        "SynthesisInputTooLongError", (Exception,), {}
++    )
++    monkeypatch.setitem(sys.modules, "pipersynth", module)
++    monkeypatch.setitem(_ADAPTERS, "piper", PiperSynthEngineAdapter())
++    return events
++
++
+ def _plan(
+     *texts: tuple[str, bool, str],
+     binding: dict[str, Any] | None = None,
+@@ -212,6 +295,63 @@ def _plan(
+     ).with_identity()
+
+
++@pytest.mark.parametrize(
++    ("amount", "maximum", "fits", "expected_status"),
++    ((180, None, None, "ok"), (300, 256, False, "replan")),
++)
++def test_piper_preflight_uses_frontend_measurement_without_synthesis(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    amount: int,
++    maximum: int | None,
++    fits: bool | None,
++    expected_status: str,
++) -> None:
++    events = _install_fake_pipersynth(
++        monkeypatch, amount=amount, maximum=maximum, fits=fits
++    )
++    binding = {"renderer": "piper", "target_id": "piper-test-model"}
++    plan = _plan(("Piper preflight", True, "sentence"), binding=binding)
++
++    report = preflight_render_plan(plan, tmp_path / f"piper-{expected_status}.toml")
++
++    check = report.checks[0]
++    assert report.status == expected_status
++    assert check.metric == "phoneme_ids"
++    assert check.measured == amount
++    assert check.maximum == maximum
++    assert check.source == "pipersynth.measure"
++    assert [event[0] for event in events] == ["measure", "close"]
++    assert events[0][1].id == check.segment_id
++    assert events[0][1].text == "Piper preflight"
++    if expected_status == "replan":
++        assert report.replan[0].metric == "phoneme_ids"
++        assert report.replan[0].measured == amount
++        assert report.replan[0].maximum == maximum
++
++
++def test_piper_preflight_keeps_emphasis_rejected(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    events = _install_fake_pipersynth(monkeypatch, amount=20, maximum=None, fits=None)
++    binding = {"renderer": "piper", "target_id": "piper-test-model"}
++    plan = _plan(("emphasis", True, "sentence"), binding=binding)
++    item = replace(
++        plan.speech[0],
++        segment_id=None,
++        controls=(SpeechControl(start=0, end=4, name="emphasis", params={}),),
++    )
++    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
++
++    report = preflight_render_plan(plan, tmp_path / "piper-emphasis.toml")
++
++    assert report.status == "reject"
++    assert report.checks[0].status == "error"
++    assert report.checks[0].source == "synthesis.unsupported_feature"
++    assert "does not declare support for 'emphasis'" in report.checks[0].detail
++    assert events == []
++
++
+ def test_preflight_persists_all_fit_report_reuses_session_and_never_synthesizes(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+@@ -271,7 +411,7 @@ def test_too_long_preflight_preserves_source_and_planning_level(
+     assert adapter.synthesized_texts == []
+
+
+-def test_measurement_without_exact_fit_is_reject_not_replan(
++def test_fully_unknown_measurement_rejects(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     adapter = _install(monkeypatch)
+@@ -284,12 +424,77 @@ def test_measurement_without_exact_fit_is_reject_not_replan(
+         source="fake.no_measurement",
+     )
+
+-    report = preflight_render_plan(plan, tmp_path / "reject.toml")
++    report_path = tmp_path / "reject.toml"
++    report = preflight_render_plan(plan, report_path)
+
+     assert report.status == "reject"
+     assert preflight_exit_code(report) == 1
+     assert report.checks[0].status == "error"
+     assert report.checks[0].source == "fake.no_measurement"
++    assert (
++        report.checks[0].detail == "Engine did not provide an exact request measurement"
++    )
++    assert report.replan == ()
++    assert adapter.synthesized_texts == []
++
++
++def test_exact_measurement_without_hard_maximum_is_accepted(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan(("measured without maximum", True, "sentence"))
++    adapter.measurements["measured without maximum"] = RequestMeasure(
++        fits=None,
++        amount=42,
++        maximum=None,
++        unit="phoneme_ids",
++        source="fake.measure",
++    )
++    output = tmp_path / "exact-without-maximum.toml"
++
++    report = preflight_render_plan(plan, output)
++
++    assert report.status == "ok"
++    assert report.checks[0].status == "ok"
++    assert report.checks[0].measured == 42
++    assert report.checks[0].maximum is None
++    assert report.checks[0].source == "fake.measure"
++    persisted = load_preflight(output)
++    assert persisted.checks[0].status == "ok"
++    assert persisted.checks[0].measured == 42
++    assert persisted.checks[0].maximum is None
++    assert adapter.synthesized_texts == []
++
++
++@pytest.mark.parametrize(
++    ("fits", "amount", "maximum"),
++    ((True, 101, 100), (False, 100, 100)),
++)
++def test_contradictory_known_measurements_reject(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    fits: bool,
++    amount: int,
++    maximum: int,
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan(("contradictory measurement", True, "sentence"))
++    adapter.measurements["contradictory measurement"] = RequestMeasure(
++        fits=fits,
++        amount=amount,
++        maximum=maximum,
++        unit="phoneme_ids",
++        source="fake.measure",
++    )
++
++    report = preflight_render_plan(plan, tmp_path / "contradictory.toml")
++
++    assert report.status == "reject"
++    assert report.checks[0].status == "error"
++    assert (
++        report.checks[0].detail
++        == "Engine capacity measurement contradicts its fit result"
++    )
+     assert report.replan == ()
+     assert adapter.synthesized_texts == []
+
+diff --git a/voicerender/engines/pipersynth.py b/voicerender/engines/pipersynth.py
+index 30dc151..aea0f56 100644
+--- a/voicerender/engines/pipersynth.py
++++ b/voicerender/engines/pipersynth.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ import math
+ from collections.abc import Mapping
+ from contextlib import AbstractContextManager, contextmanager
+-from dataclasses import asdict, is_dataclass
++from dataclasses import asdict, is_dataclass, replace
+ from typing import Any, cast
+
+ from ..errors import (
+@@ -267,32 +267,48 @@ class PiperSynthEngineSession:
+             engine="piper", target_id="unknown", language="und"
+         )
+
++    def _native_request(self, request: SpeechRequest, module: Any) -> Any:
++        return module.SynthesisRequest(
++            id=request.id,
++            text=request.text,
++            language=_piper_request_language(request.language, self._voice),
++            speaker=request.speaker,
++            tokens=tuple(_piper_token(token, module) for token in request.tokens),
++            pronunciation_overrides=tuple(
++                _piper_pronunciation(span, module)
++                for span in request.pronunciation_overrides
++            ),
++        )
++
+     def measure(self, request: SpeechRequest) -> RequestMeasure:
++        import pipersynth
++
++        try:
++            native = self._native_request(request, pipersynth)
++            measured = self._voice.measure(native)
++        except EngineSynthesisError:
++            raise
++        except Exception as exc:
++            raise _translate_piper_error(exc, self._selection, request) from exc
++
++        details = {"model_id": measured.model_id}
++        native_metadata = getattr(measured, "metadata", None)
++        if isinstance(native_metadata, Mapping):
++            details["native_metadata"] = dict(native_metadata)
+         return RequestMeasure(
+-            fits=None,
+-            amount=None,
+-            maximum=None,
++            fits=measured.fits,
++            amount=measured.phoneme_count,
++            maximum=measured.max_phonemes,
+             unit="phoneme_ids",
+-            source="pipersynth.strict_error_fallback",
++            source="pipersynth.measure",
++            details=details,
+         )
+
+     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
+         import pipersynth
+
+         try:
+-            native = pipersynth.SynthesisRequest(
+-                id=request.id,
+-                text=request.text,
+-                language=_piper_request_language(request.language, self._voice),
+-                speaker=request.speaker,
+-                tokens=tuple(
+-                    _piper_token(token, pipersynth) for token in request.tokens
+-                ),
+-                pronunciation_overrides=tuple(
+-                    _piper_pronunciation(span, pipersynth)
+-                    for span in request.pronunciation_overrides
+-                ),
+-            )
++            native = self._native_request(request, pipersynth)
+             result = self._voice.synthesize(native, config=self._config)
+         except EngineSynthesisError:
+             raise
+@@ -338,7 +354,7 @@ class PiperSynthEngineAdapter:
+         return distribution_version(self.package_name)
+
+     def probe_api(self) -> EngineApiProbe:
+-        return probe_public_api(
++        probe = probe_public_api(
+             engine=self.id,
+             package=self.package_name,
+             required_symbols=(
+@@ -353,11 +369,53 @@ class PiperSynthEngineAdapter:
+                 "SynthesisInputTooLongError",
+             ),
+             required_methods={
+-                "PiperVoice": ("from_pretrained", "synthesize", "close"),
++                "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
+                 "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
+             },
+             expected_api_version=SUPPORTED_REQUEST_API_VERSION,
+         )
++        if not probe.compatible:
++            return probe
++
++        try:
++            import pipersynth
++
++            contract_factory = getattr(pipersynth, "request_api_contract", None)
++            if not callable(contract_factory):
++                return probe
++            contract = contract_factory()
++            missing = object()
++            if isinstance(contract, Mapping):
++                supports_measurement = contract.get(
++                    "supports_request_measurement", missing
++                )
++            else:
++                supports_measurement = getattr(
++                    contract, "supports_request_measurement", missing
++                )
++        except Exception as exc:  # noqa: BLE001 - API contract probes must fail closed.
++            return replace(
++                probe,
++                compatible=False,
++                status="api_probe_failed",
++                failed_stage="request_measurement_contract",
++                failed_symbol="request_api_contract",
++                error_type=type(exc).__name__,
++                error_message=str(exc),
++            )
++
++        if supports_measurement is not missing and supports_measurement is not True:
++            return replace(
++                probe,
++                compatible=False,
++                status="api_incompatible",
++                warnings=probe.warnings
++                + (
++                    "PiperSynth request API contract does not support request measurement.",
++                ),
++                details={"supports_request_measurement": supports_measurement},
++            )
++        return probe
+
+     def compatible_api(self) -> bool:
+         return self.probe_api().compatible
+@@ -374,7 +432,7 @@ class PiperSynthEngineAdapter:
+             supports_pronunciation_overrides=True,
+             pronunciation_alphabets=frozenset({"ipa"}),
+             supports_voice_level_calibration=True,
+-            supports_request_measurement=False,
++            supports_request_measurement=True,
+             supports_qualities=True,
+             supports_live=True,
+             supports_timestamps=False,
+diff --git a/voicerender/renderplan_input.py b/voicerender/renderplan_input.py
+index 48254ef..c526400 100644
+--- a/voicerender/renderplan_input.py
++++ b/voicerender/renderplan_input.py
+@@ -190,6 +190,10 @@ def speech_request_from_renderplan(item: SpeechItem) -> SpeechRequest:
+     )
+
+
++def _is_exact_amount(value: RequestMeasure) -> bool:
++    return _nonnegative_int(value.amount) is not None
++
++
+ def classify_measurement(
+     value: RequestMeasure | Exception,
+ ) -> MeasurementOutcome:
+@@ -224,10 +228,12 @@ def classify_measurement(
+             return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
+         if value.fits is False:
+             return MeasurementOutcome(PreflightDisposition.TOO_LONG, measurement=value)
++        if value.maximum is None and _is_exact_amount(value):
++            return MeasurementOutcome(PreflightDisposition.OK, measurement=value)
+         return MeasurementOutcome(
+             PreflightDisposition.REJECT,
+             measurement=value,
+-            error="Engine did not provide an exact capacity measurement",
++            error="Engine did not provide an exact request measurement",
+         )
+     if isinstance(value, SpeechRequestTooLongError):
+         raw_unit = getattr(value, "unit", None)

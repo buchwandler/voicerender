@@ -1,0 +1,12 @@
+rows:
+  - sha: eaa3bc4964996281a156eda9aebe5a32d5f56201
+    inspected: true
+    inspected_paths:
+      - .github/workflows/python-publish.yml
+    observed_behavior: "The publish workflow now validates VoiceRender artifact metadata and package content; no user-facing API or runtime behavior changes."
+    public_impact: internal
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Intentional internal-only release-history reconciliation; omit from public changelog."
+    stale: false

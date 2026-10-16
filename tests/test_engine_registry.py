@@ -223,10 +223,10 @@ def test_soprosynth_alias_normalizes_without_loading_sdk() -> None:
 def test_all_engine_probes_use_public_api_without_loading_models(
     monkeypatch: pytest.MonkeyPatch, engine: str, package: str
 ) -> None:
-    import builtins
     import importlib
 
     fake = _fake_package(package)
+    monkeypatch.setitem(sys.modules, package, fake)
     if engine == "inflect":
         fake.request_api_contract = lambda: {
             "version": 1,
@@ -264,16 +264,6 @@ def test_all_engine_probes_use_public_api_without_loading_models(
 
     monkeypatch.setattr(importlib, "import_module", fake_import)
 
-    if engine == "sopro":
-        original_builtin_import = builtins.__import__
-
-        def fake_builtin_import(name, *args, **kwargs):
-            if name == package:
-                calls.append(name)
-                return fake
-            return original_builtin_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", fake_builtin_import)
     adapter = get_adapter(engine)
     probe = adapter.probe_api()
     assert probe.compatible, probe

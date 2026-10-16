@@ -1,0 +1,139 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.0
+git_base_ref: eaa3bc4964996281a156eda9aebe5a32d5f56201
+git_base_sha: eaa3bc4964996281a156eda9aebe5a32d5f56201
+git_head_ref: 84f29db92ca8d51903b912f9c8e2f82798bc06bc
+git_head_sha: 84f29db92ca8d51903b912f9c8e2f82798bc06bc
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added shared RenderPlan and RenderProfile execution with persisted preflight validation
+    status: accepted
+    source_refs:
+      - git:42a90e36260c8ce5d057f7a42b586dcc84171a94
+      - git:50f298e9e55cde4d67f7d1e28baebea62a40b94d
+    paths:
+      - README.md
+      - docs/renderprofile.md
+      - voicerender/cli.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/renderprofile.py
+    sources:
+      - git:42a90e36260c8ce5d057f7a42b586dcc84171a94
+      - git:50f298e9e55cde4d67f7d1e28baebea62a40b94d
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added book-level rendering for ordered RenderPlan variants with safe reuse, partial outcomes, and persisted reports
+    status: accepted
+    source_refs:
+      - git:6dae2b6f400d418bd67dfc52275c786d7be6e225
+      - git:56ae327efd2f34580ba89a12f43529179abab934
+      - git:4eb3c28e781b9f5e346c5e0ddd359b8624087d16
+      - git:57f1e2437b901bf0c387dfba26bd2d8d86933a53
+    paths:
+      - voicerender/book.py
+      - voicerender/book_contract.py
+      - voicerender/book_layout.py
+      - voicerender/cli.py
+      - tests/test_render_book.py
+    sources:
+      - git:6dae2b6f400d418bd67dfc52275c786d7be6e225
+      - git:56ae327efd2f34580ba89a12f43529179abab934
+      - git:4eb3c28e781b9f5e346c5e0ddd359b8624087d16
+      - git:57f1e2437b901bf0c387dfba26bd2d8d86933a53
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added engine-owned request measurement for Piper, KittenSynth, and InflectSynth preflight and replanning
+    status: accepted
+    source_refs:
+      - git:245ca9f54e61452ce0f5d13bf9f7a7b319407d13
+      - git:a39066104e1f2949baa9142631dc67c1783c703c
+      - git:da15247a0ee92b349d90736eaf50f5e579c107cd
+      - git:84f29db92ca8d51903b912f9c8e2f82798bc06bc
+    paths:
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+    sources:
+      - git:245ca9f54e61452ce0f5d13bf9f7a7b319407d13
+      - git:a39066104e1f2949baa9142631dc67c1783c703c
+      - git:da15247a0ee92b349d90736eaf50f5e579c107cd
+      - git:84f29db92ca8d51903b912f9c8e2f82798bc06bc
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added deferred emphasis composition to RenderPlan rendering
+    status: accepted
+    source_refs:
+      - git:480cbea36823fdf593a4bdf5f3643e20387d6f81
+    paths:
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+    sources:
+      - git:480cbea36823fdf593a4bdf5f3643e20387d6f81
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added portable Voicefolio-managed PocketSynth voices with pinned provenance and verified audio
+    status: accepted
+    source_refs:
+      - git:19f5b06f358699298af2c858d94e41223e85177e
+    paths:
+      - voicerender/managed_voices.py
+      - voicerender/engines/pocketsynth.py
+      - examples/voices/pocket-reference.toml
+    sources:
+      - git:19f5b06f358699298af2c858d94e41223e85177e
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added SoproSynth rendering with reference voices and Kokoro reference enrollment
+    status: accepted
+    source_refs:
+      - git:c2be7b34d44c72daa88561fe8cfbe212d9bfd573
+    paths:
+      - voicerender/engines/soprosynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/voice_sources.py
+      - docs/renderprofile.md
+    sources:
+      - git:c2be7b34d44c72daa88561fe8cfbe212d9bfd573
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: quality
+    summary: Improved output safety with full-scale PCM validation and KittenSynth clamp diagnostics
+    status: accepted
+    source_refs:
+      - git:ede34eabf679ffca36a1a8bc4750a86b53a4d2d9
+    paths:
+      - voicerender/storage.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kittensynth.py
+    sources:
+      - git:ede34eabf679ffca36a1a8bc4750a86b53a4d2d9
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

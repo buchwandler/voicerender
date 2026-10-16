@@ -1,0 +1,693 @@
+ README.md                        |  14 ++-
+ tests/test_render_book.py        | 107 +++++++++++++++++++-
+ tests/test_renderplan_render.py  | 209 +++++++++++++++++++++++++++++++++++++++
+ voicerender/book.py              |  27 +++++
+ voicerender/cli.py               |  15 +++
+ voicerender/renderplan_render.py |  36 ++++---
+ 6 files changed, 395 insertions(+), 13 deletions(-)
+
+diff --git a/README.md b/README.md
+index f8e201d..1aa6021 100644
+--- a/README.md
++++ b/README.md
+@@ -148,7 +148,18 @@ voicerender render-book "Novel.ssmdbook" \
+   --variant "narration--<profile-id-prefix>" --chapters 5
+ ```
+
+-A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, `--force`, and `--json` support alternate roots, deliberate reset, and automation.
++A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, and `--json` support alternate roots and automation. `--reset-stale` lets a rerun accept output whose manifest belongs to a different RenderPlan: it removes only VoiceRender-owned chapter artifacts and keeps the external cache available for verified exact-request reuse. `--force` is stronger: it synthesizes every selected request and bypasses cache.
++
++
++When a chapter fails with `preflight.replan`, VoiceRender stops before synthesizing requests under that plan and exposes the persisted report path. The chapter outcome includes `preflight_report` and `replan_required`; runtime immediate rechecks point to `preflight-recheck.toml` (also available as the compatibility field `recheck_report`). The JSON output and `voicerender-report.toml` include these fields, and human output prints the report path. Use the report with your planning tool to activate a child RenderPlan, then rerun VoiceRender with `--reset-stale`:
++
++```bash
++voicerender render-book "Novel.ssmdbook" \
++  --variant "narration--<profile-id-prefix>" \
++  --chapters 5 --reset-stale
++```
++
++The reset does not delete `.voicerender-cache`; unchanged exact renderer requests can be restored from verified cache entries, while new child requests are synthesized normally. `render`/`render-book` and the `render_renderplan()`/`render_book()` APIs accept `reset_stale_output=True`. VoiceRender reports the replan handoff but does not invoke the planner or generate child plans.
+
+ By default, output is kept separate from the RenderPlan inputs:
+
+@@ -160,6 +171,7 @@ Novel.ssmdbook/
+     ├── .voicerender-cache/
+     └── chapter-0005/
+         ├── preflight.toml                 # whole-chapter preflight
++        ├── preflight-recheck.toml           # runtime immediate capacity recheck, if any
+         ├── render-manifest.toml            # cumulative verified artifacts
+         ├── render-diagnostics.json          # deferred controls, if any, remain pending composition
+         ├── 000001.wav
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index ac46832..a705762 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -201,11 +201,12 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+         output_dir: str | Path,
+         cache_dir: str | Path | None = None,
+         force: bool = False,
++        reset_stale_output: bool = False,
+         recheck_report_path: str | Path | None = None,
+         speech_numbers: set[int] | frozenset[int] | None = None,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+     ) -> RenderPlanResult:
+-        del cache_dir, recheck_report_path
++        del cache_dir, recheck_report_path, reset_stale_output
+         policy_calls.append(f"render:{emphasis_policy.value}")
+         selected = (
+             tuple(plan.speech)
+@@ -464,6 +465,95 @@ def test_partial_windows_accumulate_and_later_full_selection_finishes_chapter(
+     assert len(calls["preflight"]) == 1
+
+
++@pytest.mark.parametrize(
++    ("status", "check_status", "error_code", "replan_required"),
++    (
++        ("replan", "too_long", "preflight.replan", True),
++        ("reject", "error", "preflight.reject", False),
++    ),
++)
++def test_book_preserves_initial_preflight_report_handoff(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    capsys: pytest.CaptureFixture[str],
++    status: str,
++    check_status: str,
++    error_code: str,
++    replan_required: bool,
++) -> None:
++    calls = _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path, chapters=((5, 1),))
++
++    def initial_preflight(
++        plan: RenderPlan,
++        path: str | Path,
++        *,
++        emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++    ) -> PreflightReport:
++        del emphasis_policy
++        speech = plan.speech[0]
++        segment_id = speech.segment_id or speech.computed_id()
++        check = PreflightCheck(
++            segment_number=speech.number,
++            segment_id=segment_id,
++            status=check_status,
++            metric="model_tokens",
++            measured=101,
++            maximum=100,
++            source="test.initial_measurement",
++        )
++        requests = ()
++        if status == "replan":
++            requests = (
++                ReplanRequest(
++                    segment_number=speech.number,
++                    segment_id=segment_id,
++                    source=speech.source,
++                    current_level=speech.planning_level,
++                    action="split",
++                    reason="capacity",
++                    metric="model_tokens",
++                    measured=101,
++                    maximum=100,
++                ),
++            )
++        report = PreflightReport(
++            render_plan_id=plan.plan_id or plan.computed_id(),
++            source_plan_id=plan.source_plan_id,
++            render_profile_id=plan.render_profile_id,
++            status=status,
++            checks=(check,),
++            replan=requests,
++            producer=Producer(name="voicerender", version="test"),
++        ).with_identity()
++        save_preflight(report, path)
++        return report
++
++    monkeypatch.setattr(book_module, "preflight_render_plan", initial_preflight)
++    result = book_module.render_book(workspace, variant=variant)
++    outcome = result.outcomes[0]
++
++    assert outcome.status == "failed"
++    assert outcome.error_code == error_code
++    assert outcome.replan_required is replan_required
++    assert outcome.preflight_report == outcome.output_dir / "preflight.toml"
++    assert outcome.preflight_report.is_file()
++    assert calls["render"] == []
++
++    item = result.to_dict()["items"][0]
++    assert item["replan_required"] is replan_required
++    assert item["preflight_report"] == "chapter-0005/preflight.toml"
++    report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
++    assert report["item"][0]["replan_required"] is replan_required
++    assert report["item"][0]["preflight_report"] == "chapter-0005/preflight.toml"
++
++    from voicerender.cli import _print_book_result
++
++    _print_book_result(result)
++    label = "replan report" if replan_required else "preflight report"
++    assert f"{label}: {outcome.preflight_report}" in capsys.readouterr().out
++
++
+ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+@@ -478,6 +568,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+         output_dir: str | Path,
+         cache_dir: str | Path | None = None,
+         force: bool = False,
++        reset_stale_output: bool = False,
+         recheck_report_path: str | Path | None = None,
+         speech_numbers: set[int] | frozenset[int] | None = None,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+@@ -488,6 +579,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+             output_dir=output_dir,
+             cache_dir=cache_dir,
+             force=force,
++            reset_stale_output=reset_stale_output,
+             recheck_report_path=recheck_report_path,
+             speech_numbers=speech_numbers,
+             emphasis_policy=emphasis_policy,
+@@ -540,6 +632,9 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+     assert outcome.error_code == "preflight.replan"
+     assert outcome.recheck_report is not None
+     assert outcome.recheck_report.name == "preflight-recheck.toml"
++    assert outcome.preflight_report == outcome.recheck_report
++    assert outcome.preflight_report.name == "preflight-recheck.toml"
++    assert outcome.replan_required is True
+     fresh = book_module.load_preflight(outcome.recheck_report)
+     assert fresh.status == "replan"
+     assert fresh.render_plan_id == outcome.render_plan_id
+@@ -552,6 +647,16 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+     ]
+     report = tomllib.loads(rendered.report_path.read_text(encoding="utf-8"))
+     assert report["item"][0]["error_code"] == "preflight.replan"
++    assert report["item"][0]["replan_required"] is True
++    assert report["item"][0]["preflight_report"] == (
++        "chapter-0005/preflight-recheck.toml"
++    )
++    assert report["item"][0]["recheck_report"] == (
++        "chapter-0005/preflight-recheck.toml"
++    )
++    payload_item = rendered.to_dict()["items"][0]
++    assert payload_item["replan_required"] is True
++    assert payload_item["preflight_report"] == "chapter-0005/preflight-recheck.toml"
+     assert report["item"][0]["recheck_report"] == (
+         "chapter-0005/preflight-recheck.toml"
+     )
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 95fcd68..1ff55ff 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -987,6 +987,53 @@ def test_stale_plan_requires_force_and_force_resets_only_owned_artifacts(
+     assert not (output / "preflight.toml").exists()
+
+
++def test_reset_stale_plan_reuses_exact_cache_and_preserves_unowned_files(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    output = tmp_path / "chapter"
++    cache = tmp_path / "shared-cache"
++    parent_plan = _plan("parent text to split", "stable exact request")
++    parent_report = preflight_render_plan(parent_plan, output / "preflight.toml")
++    parent = render_renderplan(
++        parent_plan,
++        preflight=parent_report,
++        output_dir=output,
++        cache_dir=cache,
++    )
++    assert not parent.failed
++    cache_before = {path.name for path in cache.iterdir()}
++    (output / "keep.txt").write_text("user data", encoding="utf-8")
++
++    child_plan = _plan(
++        "split child request one",
++        "split child request two",
++        "stable exact request",
++    )
++    child_report = preflight_render_plan(child_plan, tmp_path / "child-preflight.toml")
++    child = render_renderplan(
++        child_plan,
++        preflight=child_report,
++        output_dir=output,
++        cache_dir=cache,
++        reset_stale_output=True,
++    )
++
++    assert not child.failed
++    assert child.manifest.render_plan_id == child_plan.plan_id
++    assert child.rendered_count == 2
++    assert child.reused_count == 1
++    assert adapter.synthesized_texts.count("stable exact request") == 1
++    assert "split child request one" in adapter.synthesized_texts
++    assert "split child request two" in adapter.synthesized_texts
++    assert load_manifest(child.manifest_path).render_plan_id == child_plan.plan_id
++    saved_preflight = load_preflight(output / "preflight.toml")
++    assert saved_preflight.render_plan_id == child_plan.plan_id
++    assert (output / "keep.txt").read_text(encoding="utf-8") == "user data"
++    assert cache_before.issubset({path.name for path in cache.iterdir()})
++    assert all((output / f"{number:06d}.wav").is_file() for number in range(1, 4))
++
++
+ def test_force_rerenders_only_selected_speech_and_keeps_unselected_output(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+@@ -1144,3 +1191,165 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
+     reused = invoke("--chapters", "1")
+     assert reused["items"][0]["status"] == "reused"
+     assert adapter.open_count == open_count
++
++
++
++def test_render_book_replans_then_activates_child_with_cache_reuse(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    capsys: pytest.CaptureFixture[str],
++) -> None:
++    adapter = _install(monkeypatch)
++    from voicerender.book import render_book
++    from voicerender.book_contract import load_renderplan_set
++    from voicerender.cli import main
++
++    profile = RenderProfile(
++        roles={"narrator": RoleProfile(language="en-US", binding=dict(_BINDING))},
++        default_role="narrator",
++    ).with_identity()
++    profile_id = profile.profile_id or profile.computed_id()
++    parent_plan = replace(
++        _plan("stable exact request", "parent text to split"),
++        render_profile_id=profile_id,
++        plan_id=None,
++    ).with_identity()
++
++    workspace = tmp_path / "replan-book"
++    fingerprint = profile_id.removeprefix("sha256:")[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = workspace / "renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    save_profile(profile, variant_dir / "renderprofile.toml")
++    plan_name = "chapter-0001.renderplan.toml"
++    plan_path = variant_dir / plan_name
++    save_plan(parent_plan, plan_path)
++    chapter = RenderPlanSetChapter(
++        id="chapter-0001",
++        source_number=1,
++        source="../../chapter-0001.md",
++        utterplan="../../utterplan/chapter-0001.toml",
++        source_plan_id=parent_plan.source_plan_id,
++        renderplan=plan_name,
++        render_plan_id=parent_plan.plan_id or parent_plan.computed_id(),
++    )
++    renderplan_set_path = variant_dir / "renderplan-set.toml"
++    save_renderplan_set(
++        renderplan_set_path,
++        RenderPlanSet(
++            variant="narration",
++            profile_fingerprint=fingerprint,
++            producer_version="test",
++            manifest="../../book.json",
++            utterplan_dir="../../utterplan",
++            profile_id=profile_id,
++            snapshot="renderprofile.toml",
++            source_profile="../../narration.renderprofile.toml",
++            chapters=(chapter,),
++        ),
++    )
++
++    output_root = tmp_path / "output"
++    cache_dir = tmp_path / "cache"
++    baseline = render_book(
++        workspace,
++        variant=variant,
++        speech="1",
++        output_root=output_root,
++        cache_dir=cache_dir,
++    )
++    assert baseline.outcomes[0].status == "partial"
++    assert adapter.synthesized_texts == ["stable exact request"]
++    cache_before = {path.name for path in cache_dir.iterdir()}
++    chapter_output = baseline.outcomes[0].output_dir
++    (chapter_output / "keep.txt").write_text("user data", encoding="utf-8")
++    (chapter_output / "preflight.toml").unlink()
++    adapter.measurements["parent text to split"] = RequestMeasure(
++        fits=False,
++        amount=101,
++        maximum=100,
++        unit="model_tokens",
++        source="fake.frontend_measure",
++    )
++
++    blocked = render_book(
++        workspace,
++        variant=variant,
++        output_root=output_root,
++        cache_dir=cache_dir,
++    )
++    assert blocked.outcomes[0].error_code == "preflight.replan"
++    assert blocked.outcomes[0].replan_required is True
++    assert blocked.outcomes[0].preflight_report == chapter_output / "preflight.toml"
++    assert load_preflight(chapter_output / "preflight.toml").status == "replan"
++    assert load_manifest(chapter_output / "render-manifest.toml").render_plan_id == parent_plan.plan_id
++    assert adapter.synthesized_texts == ["stable exact request"]
++
++    split_source = parent_plan.speech[1]
++    child_parts = tuple(
++        replace(
++            split_source,
++            number=number,
++            text=text,
++            source=(replace(split_source.source[0], end=len(text)),),
++            segment_id=None,
++        )
++        for number, text in (
++            (1, "split child part one"),
++            (2, "split child part two"),
++        )
++    )
++    stable_request = replace(parent_plan.speech[0], number=3)
++    child_plan = replace(
++        parent_plan,
++        flow=(*child_parts, stable_request),
++        plan_id=None,
++    ).with_identity()
++    save_plan(child_plan, plan_path)
++    active_set = load_renderplan_set(renderplan_set_path)
++    save_renderplan_set(
++        renderplan_set_path,
++        replace(
++            active_set,
++            chapters=(
++                replace(
++                    active_set.chapters[0],
++                    source_plan_id=child_plan.source_plan_id,
++                    render_plan_id=child_plan.plan_id or child_plan.computed_id(),
++                ),
++            ),
++        ),
++    )
++
++    exit_code = main(
++        [
++            "render-book",
++            str(workspace),
++            "--variant",
++            variant,
++            "--output-root",
++            str(output_root),
++            "--cache-dir",
++            str(cache_dir),
++            "--reset-stale",
++            "--json",
++        ]
++    )
++    payload = json.loads(capsys.readouterr().out)
++    item = payload["items"][0]
++    assert exit_code == 0
++    assert item["status"] == "complete"
++    assert item["rendered"] == 2
++    assert item["reused"] == 1
++    assert item["replan_required"] is False
++    assert load_manifest(chapter_output / "render-manifest.toml").render_plan_id == child_plan.plan_id
++    child_preflight = load_preflight(chapter_output / "preflight.toml")
++    assert child_preflight.render_plan_id == child_plan.plan_id
++    assert child_preflight.status == "ok"
++    assert (chapter_output / "keep.txt").read_text(encoding="utf-8") == "user data"
++    assert cache_before.issubset({path.name for path in cache_dir.iterdir()})
++    assert adapter.synthesized_texts == [
++        "stable exact request",
++        "split child part one",
++        "split child part two",
++    ]
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 1ce2fc8..1f89892 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -90,6 +90,7 @@ class BookRenderRequest:
+     speech_selector: str
+     render_profile_id: str
+     _loaded_chapters: tuple[_LoadedChapter, ...]
++    reset_stale_output: bool = False
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -114,6 +115,8 @@ class ChapterRenderOutcome:
+     execution_fingerprint: tuple[dict[str, Any], ...] = ()
+     pending_composition: bool = False
+
++    preflight_report: Path | None = None
++    replan_required: bool = False
+
+ @dataclass(frozen=True, slots=True)
+ class BookRenderResult:
+@@ -224,6 +227,7 @@ def render_book(
+     output_root: str | Path | None = None,
+     cache_dir: str | Path | None = None,
+     force: bool = False,
++    reset_stale_output: bool = False,
+     fail_fast: bool = False,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+ ) -> BookRenderResult:
+@@ -243,6 +247,7 @@ def render_book(
+         output_root=output_root,
+         cache_dir=cache_dir,
+         force=force,
++        reset_stale_output=reset_stale_output,
+         fail_fast=fail_fast,
+         emphasis_policy=resolved_emphasis_policy,
+     )
+@@ -281,6 +286,7 @@ def _resolve_request(
+     output_root: str | Path | None,
+     cache_dir: str | Path | None,
+     force: bool,
++    reset_stale_output: bool,
+     fail_fast: bool,
+     emphasis_policy: EmphasisPolicy,
+ ) -> BookRenderRequest:
+@@ -461,6 +467,7 @@ def _resolve_request(
+         speech_selector=speech_selector,
+         render_profile_id=profile_id,
+         _loaded_chapters=tuple(loaded_chapters),
++        reset_stale_output=reset_stale_output,
+     )
+
+
+@@ -532,6 +539,8 @@ def _render_chapter(
+             selected,
+             code,
+             f"RenderPlan preflight status is {preflight.status!r}",
++            preflight_report=preflight_path,
++            replan_required=preflight.status == "replan",
+         )
+
+     try:
+@@ -542,6 +551,7 @@ def _render_chapter(
+             output_dir=chapter.output_dir,
+             cache_dir=request.cache_dir,
+             force=request.force,
++            reset_stale_output=request.reset_stale_output,
+             recheck_report_path=recheck_report_path,
+             speech_numbers=chapter.speech_numbers,
+             emphasis_policy=request.emphasis_policy,
+@@ -583,6 +593,13 @@ def _render_chapter(
+         ),
+         execution_fingerprint=result.execution_fingerprint,
+         pending_composition=result.pending_composition,
++        preflight_report=(
++            recheck_report_path if result.fresh_preflight is not None else None
++        ),
++        replan_required=(
++            result.fresh_preflight is not None
++            and result.fresh_preflight.status == "replan"
++        ),
+     )
+
+
+@@ -817,6 +834,8 @@ def _failure_outcome(
+     error_message: str,
+     *,
+     manifest: Path | None = None,
++    preflight_report: Path | None = None,
++    replan_required: bool = False,
+ ) -> ChapterRenderOutcome:
+     return ChapterRenderOutcome(
+         index=index,
+@@ -834,9 +853,12 @@ def _failure_outcome(
+         reused=0,
+         error_code=error_code,
+         error_message=error_message,
++        preflight_report=preflight_report,
++        replan_required=replan_required,
+     )
+
+
++
+ def _skipped_outcome(chapter: _LoadedChapter, index: int) -> ChapterRenderOutcome:
+     selected = (
+         len(chapter.plan.speech)
+@@ -880,9 +902,14 @@ def _outcome_to_dict(
+         "reused": outcome.reused,
+         "manifest_complete": outcome.manifest_complete,
+         "pending_composition": outcome.pending_composition,
++        "replan_required": outcome.replan_required,
+     }
+     if outcome.manifest is not None:
+         item["manifest"] = _relative_posix(outcome.manifest, output_variant_dir)
++    if outcome.preflight_report is not None:
++        item["preflight_report"] = _relative_posix(
++            outcome.preflight_report, output_variant_dir
++        )
+     if outcome.recheck_report is not None:
+         item["recheck_report"] = _relative_posix(
+             outcome.recheck_report, output_variant_dir
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 8132be3..a64a787 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
+     render.add_argument("--cache-dir", type=Path)
+     render.add_argument("--recheck-report", type=Path)
+     render.add_argument("--force", action="store_true")
++    render.add_argument(
++        "--reset-stale",
++        action="store_true",
++        help="Reset output owned by a different RenderPlan while reusing cache entries",
++    )
+     render.add_argument("--json", action="store_true")
+     render.add_argument(
+         "--emphasis-policy",
+@@ -150,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
+     book_render.add_argument("--output-root", type=Path)
+     book_render.add_argument("--cache-dir", type=Path)
+     book_render.add_argument("--force", action="store_true")
++    book_render.add_argument(
++        "--reset-stale",
++        action="store_true",
++        help="Reset chapter output owned by a different RenderPlan while reusing cache entries",
++    )
+     book_render.add_argument(
+         "--emphasis-policy",
+         choices=("reject", "defer-to-compose"),
+@@ -271,6 +281,9 @@ def _print_book_result(result: BookRenderResult) -> None:
+             print(
+                 f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
+             )
++            if outcome.preflight_report is not None:
++                label = "replan report" if outcome.replan_required else "preflight report"
++                print(f"       {label}: {outcome.preflight_report}")
+         elif outcome.status == "skipped":
+             print("       skipped after an earlier chapter failure")
+         else:
+@@ -475,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
+                 cache_dir=args.cache_dir,
+                 recheck_report_path=args.recheck_report,
+                 force=args.force,
++                reset_stale_output=args.reset_stale,
+                 emphasis_policy=args.emphasis_policy,
+             )
+             payload = _render_payload(result)
+@@ -512,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
+                     output_root=args.output_root,
+                     cache_dir=args.cache_dir,
+                     force=args.force,
++                    reset_stale_output=args.reset_stale,
+                     fail_fast=args.fail_fast,
+                     emphasis_policy=args.emphasis_policy,
+                 )
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index eaeb53e..999fafa 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -100,6 +100,7 @@ def render_renderplan(
+     output_dir: str | Path,
+     cache_dir: str | Path | None = None,
+     force: bool = False,
++    reset_stale_output: bool = False,
+     recheck_report_path: str | Path | None = None,
+     speech_numbers: Collection[int] | None = None,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+@@ -206,16 +207,27 @@ def render_renderplan(
+     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
+     producer = Producer(name="voicerender", version=_voicerender_version())
+
++
+     artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
+     rendered = reused = 0
+     failure: _RenderFailure | None = None
+     execution_fingerprints: dict[tuple[int, str], dict[str, Any]] = {}
+     with _exclusive_render(out):
+         cache.mkdir(parents=True, exist_ok=True)
+-        atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
+-        artifact_map = _load_existing_artifacts(
+-            parsed_plan, out, manifest_path, report_id, force=force
++        had_preflight = (out / "preflight.toml").exists() or (
++            out / "preflight.toml"
++        ).is_symlink()
++        artifact_map, stale_output_reset = _load_existing_artifacts(
++            parsed_plan,
++            out,
++            manifest_path,
++            report_id,
++            force=force,
++            reset_stale_output=reset_stale_output,
+         )
++        if stale_output_reset and reset_stale_output and had_preflight:
++            save_preflight(report, out / "preflight.toml")
++        atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
+         selected_keys = {
+             (item.number, item.segment_id or item.computed_id())
+             for item in selected_items
+@@ -478,9 +490,10 @@ def _load_existing_artifacts(
+     plan_id: str,
+     *,
+     force: bool,
+-) -> dict[tuple[int, str], SpeechArtifact]:
++    reset_stale_output: bool,
++) -> tuple[dict[tuple[int, str], SpeechArtifact], bool]:
+     if not manifest_path.exists() and not manifest_path.is_symlink():
+-        return {}
++        return {}, False
+     if manifest_path.is_symlink():
+         if not force:
+             raise ArtifactError(
+@@ -488,17 +501,18 @@ def _load_existing_artifacts(
+                 code="artifact.invalid",
+             )
+         _reset_owned_artifacts(output_dir)
+-        return {}
++        return {}, True
+     try:
+         manifest = load_manifest(manifest_path)
+         if manifest.render_plan_id != plan_id:
+-            if not force:
++            if not (force or reset_stale_output):
+                 raise ArtifactError(
+-                    "Stale render output belongs to a different RenderPlan; use --force to reset it",
++                    "Stale render output belongs to a different RenderPlan; "
++                    "use --reset-stale or --force to reset it",
+                     code="output.stale_plan",
+                 )
+             _reset_owned_artifacts(output_dir)
+-            return {}
++            return {}, True
+         manifest.validate_against(plan)
+         expected = {
+             (item.number, item.segment_id or item.computed_id()): item
+@@ -524,7 +538,7 @@ def _load_existing_artifacts(
+             }
+             if verified_wav(output_dir / artifact.wav, metadata):
+                 verified[key] = artifact
+-        return verified
++        return verified, False
+     except ArtifactError:
+         raise
+     except (OSError, ValueError, TypeError) as exc:
+@@ -533,7 +547,7 @@ def _load_existing_artifacts(
+                 f"Existing render manifest is invalid: {exc}", code="artifact.invalid"
+             ) from exc
+         _reset_owned_artifacts(output_dir)
+-        return {}
++        return {}, True
+
+
+ def _reset_owned_artifacts(output_dir: Path) -> None:

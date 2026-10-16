@@ -236,7 +236,14 @@ def managed_reference_source(
     paths = _catalog_path_tuple(catalog_paths)
     try:
         catalog = voicefolio.load_catalog(extra_paths=paths)
-        return voicefolio.managed_reference(ref, catalog=catalog)
+        result = voicefolio.managed_reference(ref, catalog=catalog)
+        if not isinstance(result, Mapping):
+            raise _voice_error(
+                "managed_voice.invalid_source",
+                "Voicefolio returned a managed voice source that is not a table",
+                details={"resolver": "voicefolio", "ref": ref},
+            )
+        return dict(result)
     except (voicefolio.VoicefolioError, ValueError) as exc:
         raise _voice_error(
             "managed_voice.invalid_source",

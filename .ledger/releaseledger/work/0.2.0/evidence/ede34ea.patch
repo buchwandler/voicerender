@@ -1,0 +1,385 @@
+ tests/test_capacity.py             |   2 +-
+ tests/test_engine_contracts.py     |  46 +++++++++++++++
+ tests/test_kittensynth_engine.py   | 118 ++++++++++++++++++++++++++++++++-----
+ tests/test_storage.py              |  16 +++++
+ voicerender/engines/base.py        |   6 ++
+ voicerender/engines/kittensynth.py |  52 +++++++++++++++-
+ voicerender/storage.py             |   7 ++-
+ 7 files changed, 227 insertions(+), 20 deletions(-)
+
+diff --git a/tests/test_capacity.py b/tests/test_capacity.py
+index eec97b6..b2ad567 100644
+--- a/tests/test_capacity.py
++++ b/tests/test_capacity.py
+@@ -67,7 +67,7 @@ class _UnknownSession(_MeasuredSession):
+
+
+ def _rendered(request: SpeechRequest, sample_rate: int, value: int) -> RenderedSpeech:
+-    audio = np.full(len(request.text), value, dtype=np.float32)
++    audio = np.full(len(request.text), value / (value + 1), dtype=np.float32)
+     start = len(request.text) - len(request.text.lstrip())
+     end = len(request.text.rstrip())
+     timings = ()
+diff --git a/tests/test_engine_contracts.py b/tests/test_engine_contracts.py
+new file mode 100644
+index 0000000..7d6f68e
+--- /dev/null
++++ b/tests/test_engine_contracts.py
+@@ -0,0 +1,46 @@
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from voicerender.engines.base import (
++    RenderedSpeech,
++    SpeechRequest,
++    validate_rendered_speech,
++)
++from voicerender.errors import EngineBackendError
++
++
++def _validate(audio: np.ndarray) -> RenderedSpeech:
++    request = SpeechRequest(id="request-1", text="hello", language="en-US")
++    result = RenderedSpeech(id=request.id, audio=audio, sample_rate=24000)
++    return validate_rendered_speech(request, result, engine="fake")
++
++
++def test_rendered_speech_accepts_pcm_full_scale_peak() -> None:
++    rendered = _validate(np.array([-1.0, 0.0, 1.0], dtype=np.float32))
++
++    np.testing.assert_array_equal(rendered.audio, [-1.0, 0.0, 1.0])
++
++
++@pytest.mark.parametrize("peak", [1.0, 1.000005, 1.00001])
++def test_rendered_speech_preserves_existing_pcm_range_tolerance(peak: float) -> None:
++    rendered = _validate(np.array([0.0, peak], dtype=np.float32))
++
++    assert rendered.audio[-1] == pytest.approx(peak)
++
++
++def test_rendered_speech_rejects_audio_above_pcm_range_with_peak() -> None:
++    with pytest.raises(EngineBackendError, match=r"PCM full-scale range.*peak=1\.010000"):
++        _validate(np.array([0.0, 1.01], dtype=np.float32))
++
++
++@pytest.mark.parametrize("bad_sample", [np.nan, np.inf])
++def test_rendered_speech_rejects_non_finite_audio(bad_sample: float) -> None:
++    with pytest.raises(EngineBackendError, match="finite"):
++        _validate(np.array([0.0, bad_sample], dtype=np.float32))
++
++
++def test_rendered_speech_rejects_multichannel_audio() -> None:
++    with pytest.raises(EngineBackendError, match="mono"):
++        _validate(np.zeros((2, 3), dtype=np.float32))
+diff --git a/tests/test_kittensynth_engine.py b/tests/test_kittensynth_engine.py
+index be0b77b..a8638ba 100644
+--- a/tests/test_kittensynth_engine.py
++++ b/tests/test_kittensynth_engine.py
+@@ -4,16 +4,22 @@ import sys
+ from types import ModuleType, SimpleNamespace
+ from typing import Any
+
++import numpy as np
+ import pytest
+
+ from voicerender.engines.base import EngineSelection, RequestMeasure, SpeechRequest
+-from voicerender.engines.kittensynth import KittenSynthEngineSession
+-from voicerender.errors import EmptySpeechTextError
++from voicerender.engines.kittensynth import (
++    KITTEN_PCM_RANGE_POLICY,
++    KittenSynthEngineAdapter,
++    KittenSynthEngineSession,
++)
++from voicerender.errors import EmptySpeechTextError, EngineBackendError
+
+
+ class _FakeVoice:
+-    def __init__(self, measurement: Any) -> None:
++    def __init__(self, measurement: Any, synthesis_result: Any = None) -> None:
+         self.measurement = measurement
++        self.synthesis_result = synthesis_result
+         self.measure_calls: list[str] = []
+         self.synthesize_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+@@ -23,20 +29,22 @@ class _FakeVoice:
+             raise self.measurement
+         return self.measurement
+
+-    def synthesize_prepared(self, *args: Any, **kwargs: Any) -> None:
++    def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
+         self.synthesize_calls.append((args, kwargs))
+-
+-
+-def _session(voice: _FakeVoice) -> KittenSynthEngineSession:
+-    selection = EngineSelection(
+-        engine="kitten",
+-        target_id="nano-0.8-int8",
+-        language="en-US",
+-        voice="Jasper",
+-    )
++        return self.synthesis_result
++
++def _session(
++    voice: _FakeVoice, selection: EngineSelection | None = None
++) -> KittenSynthEngineSession:
++    if selection is None:
++        selection = EngineSelection(
++            engine="kitten",
++            target_id="nano-0.8-int8",
++            language="en-US",
++            voice="Jasper",
++        )
+     return KittenSynthEngineSession(voice, selection)
+
+-
+ def _request() -> SpeechRequest:
+     return SpeechRequest(id="request-1", text="prepared speech", language="en-US")
+
+@@ -108,3 +116,85 @@ def test_measure_translates_native_empty_text_error(
+     assert caught.value.native_error_type == "EmptyTextError"
+     assert voice.measure_calls == ["prepared speech"]
+     assert voice.synthesize_calls == []
++
++
++
++def _synthesis_result(audio: Any) -> SimpleNamespace:
++    return SimpleNamespace(
++        audio=audio,
++        sample_rate=24000,
++        metadata={},
++        voice="Jasper",
++        model_ref="nano-0.8-int8",
++        speed=1.0,
++    )
++
++
++def test_synthesize_preserves_in_range_audio_and_reports_policy() -> None:
++    audio = np.array([-0.5, 0.0, 0.75], dtype=np.float32)
++    voice = _FakeVoice(None, _synthesis_result(audio))
++
++    rendered = _session(voice).synthesize(_request())
++
++    assert rendered.audio.dtype == np.float32
++    np.testing.assert_array_equal(rendered.audio, audio)
++    assert rendered.warnings == ()
++    assert rendered.metadata["pcm_range"] == {
++        "policy": KITTEN_PCM_RANGE_POLICY,
++        "peak_before_clip": pytest.approx(0.75),
++        "clipped_samples": 0,
++    }
++    assert voice.synthesize_calls[0][0] == ("prepared speech",)
++
++
++def test_synthesize_clamps_over_range_audio_and_reports_diagnostics() -> None:
++    voice = _FakeVoice(
++        None,
++        _synthesis_result(np.array([-1.2, -0.5, 0.0, 1.1], dtype=np.float32)),
++    )
++
++    rendered = _session(voice).synthesize(_request())
++
++    np.testing.assert_array_equal(
++        rendered.audio, np.array([-1.0, -0.5, 0.0, 1.0], dtype=np.float32)
++    )
++    assert np.max(np.abs(rendered.audio)) <= 1.0
++    assert rendered.metadata["pcm_range"]["clipped_samples"] == 2
++    assert rendered.metadata["pcm_range"]["peak_before_clip"] == pytest.approx(1.2)
++    assert "2 sample(s)" in rendered.warnings[0]
++    assert "1.200000" in rendered.warnings[0]
++
++
++@pytest.mark.parametrize("bad_sample", [np.nan, np.inf])
++def test_synthesize_does_not_hide_non_finite_audio(bad_sample: float) -> None:
++    voice = _FakeVoice(None, _synthesis_result(np.array([0.0, bad_sample])))
++
++    with pytest.raises(EngineBackendError, match="finite"):
++        _session(voice).synthesize(_request())
++
++
++def test_synthesize_does_not_flatten_malformed_channels() -> None:
++    audio = np.array([[0.0, 1.1], [0.2, 0.3]], dtype=np.float32)
++    voice = _FakeVoice(None, _synthesis_result(audio))
++
++    with pytest.raises(EngineBackendError, match="mono"):
++        _session(voice).synthesize(_request())
++
++
++def test_canonical_identity_contains_versioned_pcm_range_policy(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    module.runtime_identity = lambda: {"runtime": "fake"}  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    selection = EngineSelection(
++        engine="kitten",
++        target_id="nano-0.8-int8",
++        language="en-US",
++        voice="Jasper",
++        metadata={"source_revision": "rev-1"},
++    )
++
++    identity = KittenSynthEngineAdapter().canonical_synthesis_identity(selection)
++
++    assert identity["pcm_range_policy"] == "kitten-native-wav-clamp.v1"
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+new file mode 100644
+index 0000000..71ffae1
+--- /dev/null
++++ b/tests/test_storage.py
+@@ -0,0 +1,16 @@
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from voicerender.errors import ArtifactError
++from voicerender.storage import atomic_wav
++
++
++def test_atomic_wav_remains_strict_for_out_of_range_audio(tmp_path) -> None:
++    path = tmp_path / "out-of-range.wav"
++
++    with pytest.raises(ArtifactError, match=r"peak=1\.010000"):
++        atomic_wav(path, np.array([0.0, 1.01], dtype=np.float32), 24000)
++
++    assert not path.exists()
+diff --git a/voicerender/engines/base.py b/voicerender/engines/base.py
+index 4b221b6..b494383 100644
+--- a/voicerender/engines/base.py
++++ b/voicerender/engines/base.py
+@@ -401,6 +401,12 @@ def validate_rendered_speech(
+     if not np.isfinite(audio).all():
+         raise invalid("audio must contain only finite samples")
+
++    peak = float(np.max(np.abs(audio)))
++    if peak > float(np.float32(1.00001)):
++        raise invalid(
++            f"audio exceeds PCM full-scale range [-1, 1] (peak={peak:.6f})"
++        )
++
+     try:
+         result.word_timings = validate_word_timings(
+             text=request.text,
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index 0632181..5b09e18 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -9,6 +9,8 @@ from contextlib import AbstractContextManager, contextmanager
+ from dataclasses import replace
+ from typing import Any
+
++import numpy as np
++
+ from ..errors import (
+     EmptySpeechTextError,
+     EngineBackendError,
+@@ -26,6 +28,7 @@ from .base import (
+     RequestMeasure,
+     SpeechRequest,
+     distribution_version,
++    validate_rendered_speech,
+ )
+ from .catalog import CatalogRequest, SynthesisTarget, TargetVoice
+ from .metadata import (
+@@ -50,6 +53,8 @@ KITTEN_OPTION_NAMES = frozenset(
+     }
+ )
+
++KITTEN_PCM_RANGE_POLICY = "kitten-native-wav-clamp.v1"
++
+
+ class KittenSelectionError(ValueError):
+     """A Kitten selection error with a stable plan diagnostic."""
+@@ -214,22 +219,62 @@ class KittenSynthEngineSession:
+             raise
+         except Exception as exc:
+             raise _translate_kitten_error(exc, self._selection, request) from exc
++        try:
++            raw_audio = np.asarray(result.audio, dtype=np.float32)
++        except (TypeError, ValueError, OverflowError):
++            # Let the shared validator report native values that cannot convert.
++            raw_audio = result.audio
++
++        clipped_samples = 0
++        peak_before_clip: float | None = None
++        audio = raw_audio
++        if (
++            isinstance(raw_audio, np.ndarray)
++            and raw_audio.ndim == 1
++            and raw_audio.size
++            and np.isfinite(raw_audio).all()
++        ):
++            peak_before_clip = float(np.max(np.abs(raw_audio)))
++            clipped_samples = int(np.count_nonzero(np.abs(raw_audio) > 1.0))
++            audio = np.clip(raw_audio, -1.0, 1.0).astype(np.float32, copy=False)
++
+         metadata = dict(result.metadata or {})
+         metadata.update(
+             {
+                 "voice": result.voice,
+                 "model_ref": result.model_ref,
+                 "effective_speed": result.speed,
++                "pcm_range": {
++                    "policy": KITTEN_PCM_RANGE_POLICY,
++                    "peak_before_clip": peak_before_clip,
++                    "clipped_samples": clipped_samples,
++                },
+             }
+         )
+-        return RenderedSpeech(
++        warnings = ()
++        if clipped_samples:
++            warnings = (
++                (
++                    "KittenSynth returned audio above full scale; "
++                    f"clamped {clipped_samples} sample(s) to [-1, 1] "
++                    f"(peak before clamp={peak_before_clip:.6f})."
++                ),
++            )
++        rendered = RenderedSpeech(
+             id=request.id,
+-            audio=result.audio,
++            audio=audio,
+             sample_rate=result.sample_rate,
+-            warnings=(),
++            warnings=warnings,
+             word_timings=(),
+             metadata=metadata,
+         )
++        return validate_rendered_speech(
++            request,
++            rendered,
++            engine="kitten",
++            engine_version=distribution_version("kittensynth"),
++            target_id=self._selection.target_id,
++        )
+
+
+ class KittenSynthEngineAdapter:
+@@ -551,6 +596,7 @@ class KittenSynthEngineAdapter:
+             "language": selection.language,
+             "options": pcm_options,
+             "model_revision": selection.metadata.get("source_revision"),
++            "pcm_range_policy": KITTEN_PCM_RANGE_POLICY,
+         }
+
+     def open(
+diff --git a/voicerender/storage.py b/voicerender/storage.py
+index 69141e7..c600e6c 100644
+--- a/voicerender/storage.py
++++ b/voicerender/storage.py
+@@ -66,8 +66,11 @@ def atomic_wav(path: Path, audio: Any, sample_rate: int) -> dict[str, Any]:
+     signal = np.asarray(audio, dtype=np.float32)
+     if signal.ndim != 1 or not signal.size or not np.all(np.isfinite(signal)):
+         raise ArtifactError("Engine must return nonempty, finite, mono audio")
+-    if np.max(np.abs(signal)) > 1.00001:
+-        raise ArtifactError("Engine returned audio outside [-1, 1]")
++    peak = float(np.max(np.abs(signal)))
++    if peak > float(np.float32(1.00001)):
++        raise ArtifactError(
++            f"Engine returned audio outside [-1, 1] (peak={peak:.6f})"
++        )
+     path.parent.mkdir(parents=True, exist_ok=True)
+     fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".wav", dir=path.parent)
+     os.close(fd)

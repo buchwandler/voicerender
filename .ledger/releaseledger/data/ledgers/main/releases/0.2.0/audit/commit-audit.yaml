@@ -1,0 +1,690 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.2.0
+git_base_ref: v0.1.1
+git_base_sha: eaa3bc4964996281a156eda9aebe5a32d5f56201
+git_head_ref: HEAD
+git_head_sha: 84f29db92ca8d51903b912f9c8e2f82798bc06bc
+git_range: eaa3bc4964996281a156eda9aebe5a32d5f56201..84f29db92ca8d51903b912f9c8e2f82798bc06bc
+commit_count: 15
+rows:
+  - sha: a431dfa7dc4478eeb2b3d61ef14d071087597b24
+    source_ref: git:a431dfa7dc4478eeb2b3d61ef14d071087597b24
+    short_sha: a431dfa
+    changed_paths:
+      - tests/test_render_v5.py
+      - tests/test_utterplan_v5.py
+      - voicerender/inputs/utterplan_v5.py
+    stats:
+      files_changed: 3
+      insertions: 193
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - tests/test_render_v5.py
+      - tests/test_utterplan_v5.py
+      - voicerender/inputs/utterplan_v5.py
+    observed_behavior:
+      The legacy UtterPlan v5 parser added replacement and token annotations,
+      but the dedicated parser path and tests were removed by the subsequent RenderPlan
+      migration.
+    public_impact: none
+    decision: rejected
+    stale: false
+    evidence_subject: "fix: utterplan"
+    notes:
+      Superseded by the subsequent migration to the shared RenderPlan path; the
+      final tree removes this legacy parser and its dedicated tests, so the intermediate
+      implementation is not a v0.2.0 public change.
+  - sha: 42a90e36260c8ce5d057f7a42b586dcc84171a94
+    source_ref: git:42a90e36260c8ce5d057f7a42b586dcc84171a94
+    short_sha: 42a90e3
+    changed_paths:
+      - .github/workflows/codecov.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - MANIFEST.in
+      - README.md
+      - docs/conf.py
+      - docs/index.md
+      - docs/utterplan-v5-integration.md
+      - examples/README.md
+      - examples/plans/chapter.renderplan.toml
+      - examples/plans/chapter.utterplan.toml
+      - examples/voices/narration.renderprofile.toml
+      - examples/voices/voice.toml
+      - pyproject.toml
+      - tests/fixtures/utterplan_v5_contract.toml
+      - tests/test_backends.py
+      - tests/test_capacity.py
+      - tests/test_cli.py
+      - tests/test_cli_v5.py
+      - tests/test_manifest.py
+      - tests/test_preflight.py
+      - tests/test_render_v5.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/capacity.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/pocket.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/supertonicsynth.py
+      - voicerender/handoff.py
+      - voicerender/inputs/__init__.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/preflight.py
+      - voicerender/render_v5.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/renderprofile.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    stats:
+      files_changed: 51
+      insertions: 3956
+      deletions: 6019
+    inspected: true
+    inspected_paths:
+      - .github/workflows/codecov.yml
+      - .github/workflows/python-publish.yml
+      - .github/workflows/tests.yml
+      - MANIFEST.in
+      - README.md
+      - docs/conf.py
+      - docs/index.md
+      - docs/utterplan-v5-integration.md
+      - examples/README.md
+      - examples/plans/chapter.renderplan.toml
+      - examples/plans/chapter.utterplan.toml
+      - examples/voices/narration.renderprofile.toml
+      - examples/voices/voice.toml
+      - pyproject.toml
+      - tests/fixtures/utterplan_v5_contract.toml
+      - tests/test_backends.py
+      - tests/test_capacity.py
+      - tests/test_cli.py
+      - tests/test_cli_v5.py
+      - tests/test_manifest.py
+      - tests/test_preflight.py
+      - tests/test_render_v5.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - tests/test_utterplan_v5.py
+      - voicerender/__init__.py
+      - voicerender/capacity.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/piper.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/pocket.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/supertonicsynth.py
+      - voicerender/handoff.py
+      - voicerender/inputs/__init__.py
+      - voicerender/inputs/utterplan_v5.py
+      - voicerender/manifest.py
+      - voicerender/models.py
+      - voicerender/preflight.py
+      - voicerender/render_v5.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/renderprofile.py
+      - voicerender/schemas/render-manifest-v2.schema.json
+    observed_behavior:
+      Replaced the v5-specific execution path with shared RenderPlan
+      and RenderProfile loading, binding validation, persisted no-synthesis preflight
+      checks, and manifest-backed execution.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: migrate to renderplan"
+    target_entry_key: renderplan-runtime
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 50f298e9e55cde4d67f7d1e28baebea62a40b94d
+    source_ref: git:50f298e9e55cde4d67f7d1e28baebea62a40b94d
+    short_sha: 50f298e
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+    stats:
+      files_changed: 3
+      insertions: 121
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+    observed_behavior:
+      Documented RenderProfile setup, voice configuration, and installed-engine
+      API validation requirements.
+    public_impact: docs
+    decision: grouped
+    stale: false
+    evidence_subject: "doc: add info about renderplan"
+    target_entry_key: renderplan-runtime
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 6dae2b6f400d418bd67dfc52275c786d7be6e225
+    source_ref: git:6dae2b6f400d418bd67dfc52275c786d7be6e225
+    short_sha: 6dae2b6
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 9
+      insertions: 2179
+      deletions: 31
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/renderplan_render.py
+    observed_behavior:
+      Added orchestration for ordered RenderPlan variants with chapter
+      selection, partial outcomes, reuse, and persisted book reports.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: book level render"
+    target_entry_key: book-rendering
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 56ae327efd2f34580ba89a12f43529179abab934
+    source_ref: git:56ae327efd2f34580ba89a12f43529179abab934
+    short_sha: 56ae327
+    changed_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/wheel_smoke.py
+      - voicerender/book.py
+      - voicerender/book_contract.py
+      - voicerender/book_layout.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 14
+      insertions: 850
+      deletions: 211
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/wheel_smoke.py
+      - voicerender/book.py
+      - voicerender/book_contract.py
+      - voicerender/book_layout.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/renderplan_render.py
+    observed_behavior:
+      Added strict book-set and profile identity checks, safe workspace
+      containment, recheck reporting, and reset behavior for stale chapter outputs.
+    public_impact: public
+    decision: grouped
+    stale: false
+    evidence_subject: "feat: book support and support new renderplan"
+    target_entry_key: book-rendering
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 245ca9f54e61452ce0f5d13bf9f7a7b319407d13
+    source_ref: git:245ca9f54e61452ce0f5d13bf9f7a7b319407d13
+    short_sha: 245ca9f
+    changed_paths:
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_engine_registry.py
+      - tests/test_preflight.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/renderplan_input.py
+    stats:
+      files_changed: 6
+      insertions: 422
+      deletions: 27
+    inspected: true
+    inspected_paths:
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_engine_registry.py
+      - tests/test_preflight.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/renderplan_input.py
+    observed_behavior:
+      Added public Piper request measurement for preflight fit and
+      replan decisions, with an explicit supported runtime contract.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: support for piper improved"
+    target_entry_key: engine-measurement
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: 480cbea36823fdf593a4bdf5f3643e20387d6f81
+    source_ref: git:480cbea36823fdf593a4bdf5f3643e20387d6f81
+    short_sha: 480cbea
+    changed_paths:
+      - README.md
+      - tests/test_cli.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 11
+      insertions: 961
+      deletions: 48
+    inspected: true
+    inspected_paths:
+      - README.md
+      - tests/test_cli.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+    observed_behavior:
+      Added deferred emphasis handling across profile planning, preflight,
+      and rendering so emphasis is composed during execution.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: handle emphasis"
+    target_entry_key: deferred-emphasis
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 19f5b06f358699298af2c858d94e41223e85177e
+    source_ref: git:19f5b06f358699298af2c858d94e41223e85177e
+    short_sha: 19f5b06
+    changed_paths:
+      - README.md
+      - examples/README.md
+      - examples/voices/pocket-reference.toml
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/managed_voices.py
+    stats:
+      files_changed: 10
+      insertions: 1113
+      deletions: 128
+    inspected: true
+    inspected_paths:
+      - README.md
+      - examples/README.md
+      - examples/voices/pocket-reference.toml
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/managed_voices.py
+    observed_behavior:
+      Added Voicefolio-backed portable managed voice references with
+      pinned metadata and verified local audio resolution.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: voicefolio support"
+    target_entry_key: managed-voices
+    target_entry_id: entry-0005
+    notes: ""
+  - sha: c2be7b34d44c72daa88561fe8cfbe212d9bfd573
+    source_ref: git:c2be7b34d44c72daa88561fe8cfbe212d9bfd573
+    short_sha: c2be7b3
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - examples/README.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_registry.py
+      - tests/test_kokoro_reference.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - tests/test_soprosynth_engine.py
+      - tests/test_voice_sources.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/registry.py
+      - voicerender/engines/soprosynth.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/renderprofile.py
+      - voicerender/voice_sources.py
+    stats:
+      files_changed: 30
+      insertions: 3534
+      deletions: 366
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - examples/README.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_registry.py
+      - tests/test_kokoro_reference.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - tests/test_soprosynth_engine.py
+      - tests/test_voice_sources.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/engines/registry.py
+      - voicerender/engines/soprosynth.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/renderprofile.py
+      - voicerender/voice_sources.py
+    observed_behavior:
+      Added a SoproSynth adapter with reference audio support, and
+      expanded Kokoro reference enrollment and shared voice-source handling.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add soprosynth"
+    target_entry_key: sopro-reference
+    target_entry_id: entry-0006
+    notes: ""
+  - sha: a39066104e1f2949baa9142631dc67c1783c703c
+    source_ref: git:a39066104e1f2949baa9142631dc67c1783c703c
+    short_sha: a390661
+    changed_paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - voicerender/engines/kittensynth.py
+    stats:
+      files_changed: 6
+      insertions: 443
+      deletions: 8
+    inspected: true
+    inspected_paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - voicerender/engines/kittensynth.py
+    observed_behavior:
+      Added KittenSynth request measurement against the engine's available
+      capacity contract for preflight decisions.
+    public_impact: public
+    decision: grouped
+    stale: false
+    evidence_subject: "feat: fix kitten integration"
+    target_entry_key: engine-measurement
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: 4eb3c28e781b9f5e346c5e0ddd359b8624087d16
+    source_ref: git:4eb3c28e781b9f5e346c5e0ddd359b8624087d16
+    short_sha: 4eb3c28
+    changed_paths:
+      - tests/test_render_book.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/cli.py
+    stats:
+      files_changed: 5
+      insertions: 223
+      deletions: 12
+    inspected: true
+    inspected_paths:
+      - tests/test_render_book.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/cli.py
+    observed_behavior:
+      Exposed the book rendering workflow and structured result/report
+      properties through the public Python API and installed-wheel smoke path.
+    public_impact: public
+    decision: grouped
+    stale: false
+    evidence_subject: "feat: add render book"
+    target_entry_key: book-rendering
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: ede34eabf679ffca36a1a8bc4750a86b53a4d2d9
+    source_ref: git:ede34eabf679ffca36a1a8bc4750a86b53a4d2d9
+    short_sha: ede34ea
+    changed_paths:
+      - tests/test_capacity.py
+      - tests/test_engine_contracts.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_storage.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/storage.py
+    stats:
+      files_changed: 7
+      insertions: 227
+      deletions: 20
+    inspected: true
+    inspected_paths:
+      - tests/test_capacity.py
+      - tests/test_engine_contracts.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_storage.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/storage.py
+    observed_behavior:
+      Validated rendered PCM against the int16 full-scale range and
+      added KittenSynth output clamp diagnostics.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: fix kitten output"
+    target_entry_key: pcm-output
+    target_entry_id: entry-0007
+    notes: ""
+  - sha: da15247a0ee92b349d90736eaf50f5e579c107cd
+    source_ref: git:da15247a0ee92b349d90736eaf50f5e579c107cd
+    short_sha: da15247
+    changed_paths:
+      - tests/test_engine_contracts.py
+      - tests/test_engine_registry.py
+      - tests/test_inflectsynth_engine.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - voicerender/book.py
+      - voicerender/engines/base.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+    stats:
+      files_changed: 17
+      insertions: 890
+      deletions: 112
+    inspected: true
+    inspected_paths:
+      - tests/test_engine_contracts.py
+      - tests/test_engine_registry.py
+      - tests/test_inflectsynth_engine.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderplan_render.py
+      - tests/test_renderprofile.py
+      - voicerender/book.py
+      - voicerender/engines/base.py
+      - voicerender/engines/inflectsynth.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/profiles.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+    observed_behavior:
+      Added InflectSynth request measurement through its prepared-voice
+      contract and capacity-policy revision tracking for rechecks.
+    public_impact: public
+    decision: grouped
+    stale: false
+    evidence_subject: "feat: fix support for inflect"
+    target_entry_key: engine-measurement
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: 57f1e2437b901bf0c387dfba26bd2d8d86933a53
+    source_ref: git:57f1e2437b901bf0c387dfba26bd2d8d86933a53
+    short_sha: 57f1e24
+    changed_paths:
+      - README.md
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 6
+      insertions: 395
+      deletions: 13
+    inspected: true
+    inspected_paths:
+      - README.md
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/renderplan_render.py
+    observed_behavior:
+      Propagated replan reports and reset stale chapter output before
+      retrying a book render.
+    public_impact: public
+    decision: grouped
+    stale: false
+    evidence_subject: "feat: reset stale output"
+    target_entry_key: book-rendering
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 84f29db92ca8d51903b912f9c8e2f82798bc06bc
+    source_ref: git:84f29db92ca8d51903b912f9c8e2f82798bc06bc
+    short_sha: 84f29db
+    changed_paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_engine_registry.py
+      - tests/test_preflight.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 9
+      insertions: 74
+      deletions: 12
+    inspected: true
+    inspected_paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_backends.py
+      - tests/test_engine_registry.py
+      - tests/test_preflight.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/renderplan_render.py
+    observed_behavior:
+      Added Piper native request measurements and honored an engine-reported
+      unknown maximum rather than substituting a planner ceiling.
+    public_impact: public
+    decision: grouped
+    stale: false
+    evidence_subject: "feat: piper measurement fixed"
+    target_entry_key: engine-measurement
+    target_entry_id: entry-0003
+    notes: ""

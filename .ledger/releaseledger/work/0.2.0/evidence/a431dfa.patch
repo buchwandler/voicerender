@@ -1,0 +1,264 @@
+ tests/test_render_v5.py            | 111 ++++++++++++++++++++++++++++++++++++-
+ tests/test_utterplan_v5.py         |  38 +++++++++++++
+ voicerender/inputs/utterplan_v5.py |  45 +++++++++++++++
+ 3 files changed, 193 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test_render_v5.py b/tests/test_render_v5.py
+index 39ee090..3cdb308 100644
+--- a/tests/test_render_v5.py
++++ b/tests/test_render_v5.py
+@@ -63,6 +63,8 @@ def _plan(
+     prosody=False,
+     pronunciation=False,
+     tokens=False,
++    replacement=False,
++    linguistic_tokens=None,
+     document_semantics=None,
+ ):
+     document_semantics = document_semantics or {}
+@@ -109,11 +111,47 @@ def _plan(
+             pronunciation_value = {"phonemes": "həˈləʊ", "alphabet": "ipa"}
+             segment["pronunciation"] = pronunciation_value
+             directives["pronunciation"] = pronunciation_value
+-        if tokens and index == 0 and text:
++        if linguistic_tokens and index == 0:
++            raw_tokens = {
++                "span": [[token["start"], token["end"]] for token in linguistic_tokens]
++            }
++            projection["tokens"] = []
++            for field in ("pos", "tag", "lemma", "morph"):
++                values = [token.get(field) for token in linguistic_tokens]
++                present = [(token_index, value) for token_index, value in enumerate(values) if value]
++                if present:
++                    raw_tokens[field] = (
++                        [[token_index, value] for token_index, value in present]
++                        if field in {"lemma", "morph"} or len(present) != len(values)
++                        else [value for _, value in present]
++                    )
++            segment["token"] = raw_tokens
++            projection["tokens"] = [
++                {
++                    "start": token["start"],
++                    "end": token["end"],
++                    "lemma": token.get(
++                        "lemma", text[token["start"] : token["end"]].casefold()
++                    ),
++                    **{
++                        field: token[field]
++                        for field in ("pos", "tag", "morph")
++                        if token.get(field)
++                    },
++                }
++                for token in linguistic_tokens
++            ]
++        elif tokens and index == 0 and text:
+             segment["token"] = {"span": [[0, len(text)]]}
+             projection["tokens"] = [
+                 {"start": 0, "end": len(text), "lemma": text.casefold()}
+             ]
++        if replacement and index == 0 and text:
++            segment["replacement"] = {
++                "span": [[0, len(text)]],
++                "source": ["unprepared source"],
++                "kind": [[0, "structured"]],
++            }
+         if directives:
+             projection["directives"] = directives
+         if pause_after is not None and index == len(operations) - 1:
+@@ -422,6 +460,77 @@ def test_pause_changes_semantic_identity_but_not_acoustic_cache_and_text_invalid
+     assert len(adapter.calls) == 2
+
+
++def test_replacement_provenance_preserves_text_and_acoustic_cache_identity(
++    tmp_path, monkeypatch
++):
++    adapter = _FakeAdapter()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    profile = _profile()
++    cache = tmp_path / "replacement-cache"
++    text = "Readable replacement."
++    plain = _plan([text], file_hash="d" * 64)
++    annotated = _plan([text], file_hash="e" * 64, replacement=True)
++
++    assert annotated.plan_id == plain.plan_id
++    assert annotated.segments[0].text == text
++    assert annotated.segments[0].semantic_segment_hash == plain.segments[0].semantic_segment_hash
++
++    first = render_utterplan_v5(
++        plain,
++        profile=profile,
++        output_dir=tmp_path / "plain-replacement",
++        cache_dir=cache,
++    )
++    second = render_utterplan_v5(
++        annotated,
++        profile=profile,
++        output_dir=tmp_path / "annotated-replacement",
++        cache_dir=cache,
++    )
++    first_entry = read_manifest(first.manifest_path)["segments"][0]
++    second_entry = read_manifest(second.manifest_path)["segments"][0]
++
++    assert second_entry["acoustic_cache_key"] == first_entry["acoustic_cache_key"]
++    assert second.reused_count == 1
++    assert len(adapter.calls) == 1
++    assert adapter.calls[0].text == text
++    assert "replacement" not in adapter.calls[0].options
++
++
++def test_linguistic_token_columns_reach_the_speech_request(tmp_path, monkeypatch):
++    adapter = _FakeAdapter(tokens=True)
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    plan = _plan(
++        ["I live here."],
++        linguistic_tokens=[
++            {
++                "start": 2,
++                "end": 6,
++                "pos": "VERB",
++                "tag": "VBP",
++                "lemma": "live",
++                "morph": "Tense=Pres|VerbForm=Fin",
++            }
++        ],
++    )
++
++    render_utterplan_v5(
++        plan,
++        profile=_profile(),
++        output_dir=tmp_path / "linguistic-token-render",
++        cache_dir=tmp_path / "linguistic-token-cache",
++    )
++
++    token = adapter.calls[0].tokens[0]
++    assert (token.start, token.end, token.text) == (2, 6, "live")
++    assert (token.pos, token.tag, token.lemma, token.morph) == (
++        "VERB",
++        "VBP",
++        "live",
++        "Tense=Pres|VerbForm=Fin",
++    )
++
++
+ def test_corrupt_shared_cache_wav_is_not_reused(tmp_path, monkeypatch):
+     adapter = _FakeAdapter()
+     monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+diff --git a/tests/test_utterplan_v5.py b/tests/test_utterplan_v5.py
+index 595e92d..8df433e 100644
+--- a/tests/test_utterplan_v5.py
++++ b/tests/test_utterplan_v5.py
+@@ -149,6 +149,44 @@ def test_v5_unknown_schema_fields_and_bad_flow_hash_fail_closed():
+         parse_utterplan_v5(data, file_sha256="a" * 64)
+
+
++
++def test_replacement_provenance_is_validated_but_discarded_from_render_segments():
++    plain_data = _synthetic_plan()
++    plain = parse_utterplan_v5(plain_data, file_sha256="a" * 64)
++
++    data = _synthetic_plan()
++    data["flow"][0]["segment"][0]["replacement"] = {
++        "span": [[0, 4]],
++        "source": ["Flow"],
++        "kind": [[0, "structured"]],
++        "rule": [[0, "test-rule"]],
++    }
++    annotated = parse_utterplan_v5(data, file_sha256="a" * 64)
++
++    assert annotated.plan_id == plain.plan_id
++    assert annotated.flows[0].flow_hash == plain.flows[0].flow_hash
++    assert annotated.segments[0].semantic_segment_hash == plain.segments[0].semantic_segment_hash
++    assert annotated.segments[0].text == plain.segments[0].text
++    assert not hasattr(annotated.segments[0], "replacements")
++
++
++def test_replacement_provenance_rejects_bad_columns_cardinality_bounds_and_sparse_indexes():
++    invalid_values = (
++        ({"span": [[0, 4]], "source": ["Flow"], "extra": []}, "Unknown"),
++        ({"span": [[0, 4]], "source": []}, "equal lengths"),
++        ({"span": [[0, 999]], "source": ["Flow"]}, "outside segment text"),
++        (
++            {"span": [[0, 4]], "source": ["Flow"], "kind": [[1, "structured"]]},
++            "ascending",
++        ),
++    )
++    for replacement, message in invalid_values:
++        data = _synthetic_plan()
++        data["flow"][0]["segment"][0]["replacement"] = replacement
++        with pytest.raises(PlanError, match=message):
++            parse_utterplan_v5(data, file_sha256="a" * 64)
++
++
+ def test_voice_toml_merges_backend_defaults_before_role_options(tmp_path):
+     path = tmp_path / "voice.toml"
+     path.write_text(
+diff --git a/voicerender/inputs/utterplan_v5.py b/voicerender/inputs/utterplan_v5.py
+index f7c4471..8fd24b7 100644
+--- a/voicerender/inputs/utterplan_v5.py
++++ b/voicerender/inputs/utterplan_v5.py
+@@ -62,6 +62,7 @@ SEGMENT_KEYS = {
+     "heading",
+     "token",
+     *DIRECTIVE_KEYS,
++    "replacement",
+ }
+ PAUSE_CLASSES = {
+     "none",
+@@ -302,6 +303,48 @@ def _tokens(raw: Any, text: str, path: str) -> tuple[dict[str, Any], ...]:
+     return tuple(output)
+
+
++def _replacements(raw: Any, text: str, path: str) -> None:
++    if not isinstance(raw, Mapping):
++        raise PlanError(f"{path} must be a replacement table")
++    unknown = set(raw).difference({"span", "source", "kind", "rule"})
++    if unknown:
++        raise PlanError(f"Unknown {path} columns: {sorted(unknown)}")
++    spans = raw.get("span")
++    sources = raw.get("source")
++    if not isinstance(spans, list) or not isinstance(sources, list):
++        raise PlanError(f"{path}.span and {path}.source are required arrays")
++    if len(spans) != len(sources):
++        raise PlanError(f"{path}.span and {path}.source must have equal lengths")
++    for index, span in enumerate(spans):
++        if (
++            not isinstance(span, list)
++            or len(span) != 2
++            or any(type(value) is not int for value in span)
++        ):
++            raise PlanError(f"{path}.span[{index}] must be an integer [start, end] pair")
++        start, end = span
++        if start < 0 or end < start or end > len(text):
++            raise PlanError(f"{path}.span[{index}] is outside segment text")
++    if any(not isinstance(source, str) for source in sources):
++        raise PlanError(f"{path}.source values must be strings")
++    for field in ("kind", "rule"):
++        if field not in raw:
++            continue
++        entries = raw[field]
++        if not isinstance(entries, list) or any(
++            not isinstance(entry, list) or len(entry) != 2 for entry in entries
++        ):
++            raise PlanError(f"{path}.{field} must be sparse [replacement_index, value] pairs")
++        values = _column_values(
++            entries,
++            field=field,
++            count=len(spans),
++            path=f"{path}.{field}",
++        )
++        if any(not value for value in values.values()):
++            raise PlanError(f"{path}.{field} values must be non-empty strings")
++
++
+ def _segment_projection(segment: RenderSegment) -> dict[str, Any]:
+     result: dict[str, Any] = {
+         "text": segment.text,
+@@ -509,6 +552,8 @@ def _parse(
+             )
+             directives = _directives(raw_segment, where)
+             tokens = _tokens(raw_segment.get("token"), text, f"{where}.token")
++            if "replacement" in raw_segment:
++                _replacements(raw_segment["replacement"], text, f"{where}.replacement")
+             markers_raw = raw_segment.get("marker", [])
+             if not isinstance(markers_raw, list) or any(
+                 not isinstance(marker, str) or not marker for marker in markers_raw
