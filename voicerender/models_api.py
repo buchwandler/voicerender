@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .engines.assets import (
+    EngineAssetManager,
     ModelArtifact,
     ModelInstallRequest,
     ModelInstallResult,
@@ -27,7 +28,7 @@ def _unsupported(engine: str, operation: str, target_id: str) -> str:
 
 def _capabilities(
     engine: str,
-) -> tuple[Any, ModelManagementCapabilities] | tuple[None, ModelManagementCapabilities]:
+) -> tuple[EngineAssetManager | None, ModelManagementCapabilities]:
     manager = get_asset_manager(engine)
     if manager is None:
         return None, ModelManagementCapabilities()

@@ -12,7 +12,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from renderplan import load_manifest, load_plan
 
@@ -43,7 +43,9 @@ from .errors import (
 from .events import RenderEvent, RenderEventKind
 from .models_api import (
     ModelInstallRequest,
+    ModelInstallResult,
     ModelRemoveRequest,
+    ModelRemoveResult,
     ModelVerifyResult,
     install_model,
     list_models,
@@ -740,10 +742,10 @@ def _profile_role_voice_source(args: argparse.Namespace) -> dict[str, Any] | Non
 
 def _profile_mutation_destination(args: argparse.Namespace) -> Path:
     if args.in_place:
-        return args.profile
+        return cast(Path, args.profile)
     if args.output.resolve() == args.profile.resolve():
         raise ValueError("profile output must not overwrite its source; use --in-place")
-    return args.output
+    return cast(Path, args.output)
 
 
 def _target_payload(target: Any) -> dict[str, Any]:
@@ -1179,17 +1181,17 @@ def _voice_source_command(args: argparse.Namespace) -> tuple[dict[str, Any], int
         return {"path": str(saved), "voice_source": source.as_mapping()}, 0
 
     if args.voice_source_command == "inspect":
-        source = load_voice_source(args.path)
+        loaded_source = load_voice_source(args.path)
         return {
             "path": str(args.path),
-            "kind": source["kind"],
-            "voice_source": dict(source),
-            "metadata": dict(source.get("metadata", {})),
+            "kind": loaded_source["kind"],
+            "voice_source": dict(loaded_source),
+            "metadata": dict(loaded_source.get("metadata", {})),
         }, 0
 
     try:
-        source = load_voice_source(args.path)
-        diagnostics = validate_voice_source(source)
+        validated_source = load_voice_source(args.path)
+        diagnostics = validate_voice_source(validated_source)
     except (VoiceRenderError, OSError, ValueError) as exc:
         diagnostic = {
             "code": getattr(exc, "code", "voice_source.invalid"),
@@ -1350,8 +1352,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"qualities={','.join(artifact.qualities) or '-'}"
                     )
                 return 0
+            model_result: ModelInstallResult | ModelRemoveResult | ModelVerifyResult
             if args.models_command == "install":
-                result = install_model(
+                model_result = install_model(
                     ModelInstallRequest(
                         args.engine,
                         args.target,
@@ -1364,38 +1367,41 @@ def main(argv: list[str] | None = None) -> int:
             elif args.models_command == "remove":
                 if not args.yes:
                     raise ValueError("model removal requires --yes")
-                result = remove_model(
+                model_result = remove_model(
                     ModelRemoveRequest(
                         args.engine, args.target, args.quality, args.cache_dir
                     )
                 )
             else:
-                result = verify_model(
+                model_result = verify_model(
                     args.engine,
                     args.target,
                     quality=args.quality,
                     cache_dir=args.cache_dir,
                 )
-            payload = model_result_to_dict(result)
+            payload = model_result_to_dict(model_result)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
             else:
                 operation = args.models_command
-                outcome = result.status
-                if hasattr(result, "changed"):
-                    outcome += f" changed={str(result.changed).lower()}"
-                elif isinstance(result, ModelVerifyResult):
-                    outcome += f" verified={str(result.verified).lower()}"
+                outcome = model_result.status
+                if hasattr(model_result, "changed"):
+                    outcome += f" changed={str(model_result.changed).lower()}"
+                elif isinstance(model_result, ModelVerifyResult):
+                    outcome += f" verified={str(model_result.verified).lower()}"
                 print(
-                    f"Model {operation} {result.engine}:{result.target_id}: {outcome}"
+                    f"Model {operation} {model_result.engine}:{model_result.target_id}: {outcome}"
                 )
-                for diagnostic in result.diagnostics:
+                for diagnostic in model_result.diagnostics:
                     print(f"diagnostic: {diagnostic}", file=sys.stderr)
-            if result.status == "unsupported":
+            if model_result.status == "unsupported":
                 return 2
-            if result.status in {"failed", "error"}:
+            if model_result.status in {"failed", "error"}:
                 return 1
-            if isinstance(result, ModelVerifyResult) and not result.verified:
+            if (
+                isinstance(model_result, ModelVerifyResult)
+                and not model_result.verified
+            ):
                 return 1
             return 0
 
@@ -1732,6 +1738,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report.status == "ok" else 2 if report.status == "replan" else 1
 
         if args.command == "render":
+            render_result: RenderPlanResult
             if args.recheck_report is not None and args.recheck_report.resolve() in {
                 args.plan.resolve(),
                 args.preflight.resolve(),
@@ -1741,7 +1748,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             progress = _progress_callback(args)
             try:
-                result = render_renderplan(
+                render_result = render_renderplan(
                     args.plan,
                     preflight=args.preflight,
                     output_dir=args.out_dir,
@@ -1755,27 +1762,27 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 if progress is not None:
                     progress.finish()
-            payload = _render_payload(result)
+            payload = _render_payload(render_result)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
-            elif result.failed:
+            elif render_result.failed:
                 print(
-                    f"Render incomplete: {result.error_code or 'render.failed'}: {result.error}; "
-                    f"manifest: {result.manifest_path}"
+                    f"Render incomplete: {render_result.error_code or 'render.failed'}: {render_result.error}; "
+                    f"manifest: {render_result.manifest_path}"
                 )
             else:
                 print(
                     f"Rendered {payload['speech_count']} speech items "
-                    f"({result.rendered_count} new, {result.reused_count} reused); "
-                    f"manifest: {result.manifest_path}"
+                    f"({render_result.rendered_count} new, {render_result.reused_count} reused); "
+                    f"manifest: {render_result.manifest_path}"
                 )
-            if result.pending_composition:
+            if render_result.pending_composition:
                 print(
                     "WARNING: emphasis is pending composition; see "
-                    f"{result.manifest_path.parent / RENDER_DIAGNOSTICS_FILENAME}"
+                    f"{render_result.manifest_path.parent / RENDER_DIAGNOSTICS_FILENAME}"
                 )
-            if result.failed:
-                fresh = result.fresh_preflight
+            if render_result.failed:
+                fresh = render_result.fresh_preflight
                 return 2 if fresh is not None and fresh.status == "replan" else 1
             return 0
 

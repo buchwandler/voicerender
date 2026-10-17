@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from typing import Any
 
@@ -26,8 +26,9 @@ def engine_options(
     if callable(raw):
         raw = raw(target_id=target_id)
     descriptors: dict[str, EngineOption] = {}
+    entries: Iterable[tuple[str, Any]]
     if isinstance(raw, Mapping):
-        entries = raw.items()
+        entries = ((str(name), value) for name, value in raw.items())
     elif raw is not None:
         entries = ((item.name, item) for item in raw)
     else:

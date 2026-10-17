@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from time import monotonic
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from renderplan import (
     PreflightReport,
@@ -247,7 +247,7 @@ class _BookProgress:
     @staticmethod
     def _selected_items(chapter: _LoadedChapter) -> tuple[Any, ...]:
         if chapter.speech_numbers is None:
-            return chapter.plan.speech
+            return cast(tuple[Any, ...], chapter.plan.speech)
         return tuple(
             item
             for item in chapter.plan.speech

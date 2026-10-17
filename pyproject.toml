@@ -65,6 +65,7 @@ extend-exclude = [
 # Current NumPy stubs use type statements introduced in Python 3.12.
 python_version = "3.12"
 strict = true
+exclude = ["build/"]
 
 [[tool.mypy.overrides]]
 module = [

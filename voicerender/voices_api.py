@@ -42,6 +42,7 @@ def parse_voice_selector(selector: str) -> ParsedVoiceSelector:
     engine, value = selector.split(":", 1)
     if not engine or not value:
         raise ProfileError("Voice selector engine and target must be non-empty")
+    speaker: str | int | None
     if "#" in value:
         if value.count("#") != 1:
             raise ProfileError(
@@ -53,7 +54,7 @@ def parse_voice_selector(selector: str) -> ParsedVoiceSelector:
         try:
             numeric_speaker = int(raw_speaker)
         except ValueError:
-            speaker: str | int = raw_speaker
+            speaker = raw_speaker
         else:
             speaker = (
                 numeric_speaker if str(numeric_speaker) == raw_speaker else raw_speaker
