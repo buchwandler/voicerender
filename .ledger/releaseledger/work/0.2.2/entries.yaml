@@ -1,0 +1,138 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.2
+git_base_ref: 7f466cc98bb9644372a562b621411ba778a9dba5
+git_base_sha: 7f466cc98bb9644372a562b621411ba778a9dba5
+git_head_ref: f093d362eb1e35533c997d9e97c850690848b94a
+git_head_sha: f093d362eb1e35533c997d9e97c850690848b94a
+include_merges: nontrivial
+entries:
+  - kind: docs
+    summary: "Documented release metadata for the prior release"
+    status: accepted
+    internal: true
+    source_refs:
+      - git:fdb106d099e7085933d3573089ec9bb7ff5f86ea
+    paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.0/release.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/audit/commit-audit.yaml
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0001.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0002.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0003.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0004.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0005.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - .ledger/releaseledger/work/0.2.1/audit-decisions.yaml
+      - .ledger/releaseledger/work/0.2.1/audit.yaml
+      - .ledger/releaseledger/work/0.2.1/entries.yaml
+      - .ledger/releaseledger/work/0.2.1/evidence/3342e15.patch
+      - .ledger/releaseledger/work/0.2.1/evidence/3c82349.patch
+      - .ledger/releaseledger/work/0.2.1/evidence/7f466cc.patch
+      - .ledger/releaseledger/work/0.2.1/evidence/84f629e.patch
+      - .ledger/releaseledger/work/0.2.1/evidence/b7e1917.patch
+      - .ledger/releaseledger/work/0.2.1/evidence/manifest.json
+      - .ledger/releaseledger/work/0.2.1/range.json
+      - docs/changelog.md
+    sources:
+      - git:fdb106d099e7085933d3573089ec9bb7ff5f86ea
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added model management, voice discovery, voice cloning, and RenderProfile role APIs and CLI commands"
+    status: accepted
+    source_refs:
+      - git:88617914750a7ab2f973bd9fac4992093136dd56
+    paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_control_surface_exports.py
+      - tests/test_engine_options.py
+      - tests/test_model_management_api.py
+      - tests/test_model_management_cli.py
+      - tests/test_profile_roles.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_storage.py
+      - tests/test_voice_clone.py
+      - tests/test_voice_clone_cli.py
+      - tests/test_voice_descriptors.py
+      - tests/test_voice_source_cli.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/engines/assets.py
+      - voicerender/engines/base.py
+      - voicerender/engines/options.py
+      - voicerender/engines/registry.py
+      - voicerender/models_api.py
+      - voicerender/profile_roles.py
+      - voicerender/storage.py
+      - voicerender/voice_clone.py
+      - voicerender/voice_design.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+      - voicerender/voices_api.py
+    sources:
+      - git:88617914750a7ab2f973bd9fac4992093136dd56
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added typed progress, workload estimates, and evidence-based ETA reporting"
+    status: accepted
+    source_refs:
+      - git:651054065218edf3812fedb2ec7963111a2cde13
+    paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0006.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - docs/index.md
+      - tests/test_cli.py
+      - tests/test_control_surface_exports.py
+      - tests/test_preflight.py
+      - tests/test_progress.py
+      - tests/test_render_book.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_render.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/estimates.py
+      - voicerender/events.py
+      - voicerender/preflight.py
+      - voicerender/progress.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+    sources:
+      - git:651054065218edf3812fedb2ec7963111a2cde13
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    summary: "Changed type annotations and mypy configuration without affecting runtime behavior"
+    status: accepted
+    internal: true
+    source_refs:
+      - git:f093d362eb1e35533c997d9e97c850690848b94a
+    paths:
+      - pyproject.toml
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/engines/options.py
+      - voicerender/models_api.py
+      - voicerender/profile_roles.py
+      - voicerender/voices_api.py
+    sources:
+      - git:f093d362eb1e35533c997d9e97c850690848b94a
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

@@ -1,0 +1,3992 @@
+ README.md                             |  45 +++
+ docs/index.md                         |   4 +
+ docs/renderprofile.md                 |  51 +++
+ tests/test_control_surface_exports.py |  40 ++
+ tests/test_engine_options.py          |  87 +++++
+ tests/test_model_management_api.py    | 127 +++++++
+ tests/test_model_management_cli.py    |  87 +++++
+ tests/test_profile_roles.py           | 250 +++++++++++++
+ tests/test_profile_roles_cli.py       | 149 ++++++++
+ tests/test_storage.py                 |  20 +
+ tests/test_voice_clone.py             | 149 ++++++++
+ tests/test_voice_clone_cli.py         |  68 ++++
+ tests/test_voice_descriptors.py       | 122 ++++++
+ tests/test_voice_source_cli.py        | 145 +++++++
+ voicerender/__init__.py               |  65 ++++
+ voicerender/cli.py                    | 684 +++++++++++++++++++++++++++++++++-
+ voicerender/engines/assets.py         | 124 ++++++
+ voicerender/engines/base.py           |  17 +
+ voicerender/engines/options.py        |  52 +++
+ voicerender/engines/registry.py       |  33 ++
+ voicerender/models_api.py             | 289 ++++++++++++++
+ voicerender/profile_roles.py          | 122 ++++++
+ voicerender/storage.py                |  29 ++
+ voicerender/voice_clone.py            | 166 +++++++++
+ voicerender/voice_design.py           |   4 +-
+ voicerender/voice_source_codec.py     |  50 ++-
+ voicerender/voice_sources.py          |  79 +++-
+ voicerender/voices_api.py             | 297 +++++++++++++++
+ 28 files changed, 3320 insertions(+), 35 deletions(-)
+
+diff --git a/README.md b/README.md
+index 12b8c56..f2c6c12 100644
+--- a/README.md
++++ b/README.md
+@@ -98,6 +98,51 @@ voicerender profile refresh narration.renderprofile.toml \
+   -o narration.refreshed.renderprofile.toml
+ ```
+
++## Engine, voice, and profile control surface
++
++VoiceRender exposes engine-facing discovery and lifecycle operations through its public Python API and CLI. Discovery does not open synthesis sessions; model installation/removal is delegated only to an engine's supported public asset API. Unsupported asset operations report the engine and operation rather than falling back to private modules or backend CLIs.
++
++```bash
++# Inspect normalized options and available model/voice descriptors.
++voicerender engines options kokoro --target v1.0 --json
++voicerender models list --engine kokoro --offline --json
++voicerender voices list --engine kokoro --lang en-US --json
++voicerender voices inspect 'kokoro:v1.0/af_heart' --json
++
++# Asset support is engine-specific; supported removals require explicit confirmation.
++voicerender models inspect TARGET --engine ENGINE --json
++voicerender models verify TARGET --engine ENGINE --json
++voicerender models remove TARGET --engine ENGINE --yes --json
++
++# Pin a reference without copying or modifying its WAV; inspect and verify it later.
++voicerender voice source create \
++  --reference-wav ./speaker.wav --transcript "Exact spoken words." \
++  --language en-US -o speaker.voice-source.toml
++voicerender voice source inspect speaker.voice-source.toml --json
++voicerender voice source verify speaker.voice-source.toml --json
++
++# Bind a pinned source to a reference-capable target; this does not synthesize.
++voicerender voice clone --engine ENGINE --target TARGET \
++  --language en-US --voice-source speaker.voice-source.toml \
++  --transcript "Exact spoken words." -o clone.renderprofile.toml --json
++```
++
++RenderProfiles can hold multiple independent role bindings. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves the other roles and user-authored planning/pause policy, and computes a new `profile_id`.
++
++```bash
++voicerender profile inspect narration.renderprofile.toml --json
++voicerender profile role list narration.renderprofile.toml --json
++voicerender profile role set narration.renderprofile.toml guest \
++  --engine piper --target en_US-amy-medium --language en-US \
++  -o narration.with-guest.renderprofile.toml --json
++voicerender profile default-role narration.with-guest.renderprofile.toml guest \
++  --in-place --json
++voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
++  --new-default-role guest --in-place --json
++```
++
++Role mutations require exactly one explicit `--output PATH` or `--in-place`; the input profile is otherwise left untouched. Removing the final role is rejected, and removing the current default requires `--new-default-role`. The package root exports the model-management, option/voice discovery, source/clone, and multi-role profile APIs for automation. See [RenderProfile lifecycle](docs/renderprofile.md) for API examples and policy details.
++
+ ## Reference voices
+
+ Kokoro, PocketSynth, and SoproSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
+diff --git a/docs/index.md b/docs/index.md
+index d230127..1c64ccf 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -9,6 +9,10 @@ renderprofile
+ changelog
+ ```
+
++## Engine and voice control
++
++VoiceRender owns its public engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice clone workflow, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and clone/profile preparation do not synthesize audio. See the repository README for command examples and [RenderProfile lifecycle](renderprofile.md#inspecting-and-mutating-profile-roles) for role APIs and write safety.
++
+ ## Workflow
+
+ 1. Create or update a RenderProfile and review engine-derived binding metadata (see the [RenderProfile lifecycle](renderprofile.md)).
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 461aa4d..21fba2b 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -30,6 +30,57 @@ Review refreshed bindings and policy before using the proposal. If identity-bear
+ profile semantics change, regenerate the associated RenderPlan using the refreshed
+ profile. Keep the original profile with its plans for provenance and inspection.
+
++## Inspecting and mutating profile roles
++
++A RenderProfile can bind several logical roles (for example, `narrator` and `guest`). Inspect the profile or list its role items without loading an engine:
++
++```bash
++voicerender profile inspect narration.renderprofile.toml --json
++voicerender profile role list narration.renderprofile.toml --json
++```
++
++Use VoiceRender's public role helpers when building or editing profiles programmatically:
++
++```python
++from voicerender import (
++    list_profile_roles,
++    load_render_profile,
++    remove_profile_role,
++    set_default_profile_role,
++    set_profile_role,
++)
++
++profile = load_render_profile("narration.renderprofile.toml")
++roles = list_profile_roles(profile)
++updated = set_profile_role(
++    profile,
++    "guest",
++    engine="piper",
++    target_id="en_US-amy-medium",
++    language="en-US",
++    options={"length_scale": 1.0},
++)
++updated = set_default_profile_role(updated, "guest")
++# If removing the current default, choose a remaining role explicitly.
++updated = remove_profile_role(updated, "narrator", new_default_role="guest")
++```
++
++`set_profile_role` resolves the engine binding and regenerates its derived requirements and capacity. Existing role bindings and the profile's planning/pause policy are preserved; each successful mutation recomputes `profile_id`. Invalid selections/options, a missing role, removal of the last role, or removal of the default without a replacement are rejected. The helpers return a new profile and never write the input file.
++
++For the CLI, each mutation requires exactly one of `--output PATH` and `--in-place`. Use `--output` to review a proposal before replacing the original; `--in-place` is an explicit request to write over the selected profile:
++
++```bash
++voicerender profile role set narration.renderprofile.toml guest \
++  --engine piper --target en_US-amy-medium --language en-US \
++  -o narration.with-guest.renderprofile.toml
++voicerender profile default-role narration.with-guest.renderprofile.toml guest \
++  --in-place
++voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
++  --new-default-role guest --in-place
++```
++
++The RenderPlan schema is unchanged: plans continue to carry the same profile identity and resolved per-role bindings.
++
+ ## UtterPlan book variants
+
+ [UtterPlan](https://pypi.org/project/utterplan/) can compile an SSMDBook into one
+diff --git a/tests/test_control_surface_exports.py b/tests/test_control_surface_exports.py
+new file mode 100644
+index 0000000..d5c1857
+--- /dev/null
++++ b/tests/test_control_surface_exports.py
+@@ -0,0 +1,40 @@
++from __future__ import annotations
++
++import voicerender
++
++
++def test_control_surface_apis_are_exported_from_package_root() -> None:
++    expected = {
++        "EngineAssetManager",
++        "EngineOption",
++        "ModelArtifact",
++        "ModelInstallRequest",
++        "ModelInstallResult",
++        "ModelManagementCapabilities",
++        "ModelRemoveRequest",
++        "ModelRemoveResult",
++        "ModelVerifyResult",
++        "ParsedVoiceSelector",
++        "RoleProfile",
++        "VoiceCloneRequest",
++        "VoiceDescriptor",
++        "VoiceKind",
++        "clone_voice_profile",
++        "create_voice_source",
++        "engine_options",
++        "inspect_voice",
++        "install_model",
++        "list_models",
++        "list_profile_roles",
++        "list_voices",
++        "model_status",
++        "parse_voice_selector",
++        "remove_model",
++        "remove_profile_role",
++        "set_default_profile_role",
++        "set_profile_role",
++        "verify_model",
++    }
++
++    assert expected.issubset(set(voicerender.__all__))
++    assert all(hasattr(voicerender, name) for name in expected)
+diff --git a/tests/test_engine_options.py b/tests/test_engine_options.py
+new file mode 100644
+index 0000000..f23c019
+--- /dev/null
++++ b/tests/test_engine_options.py
+@@ -0,0 +1,87 @@
++from __future__ import annotations
++
++import json
++from types import SimpleNamespace
++
++from voicerender import cli
++from voicerender.engines.base import EngineCapabilities, EngineOption
++from voicerender.engines.options import engine_options
++from voicerender.engines.selection import reject_incompatible_options
++
++
++def test_engine_options_lists_all_accepted_names_and_optional_metadata(
++    monkeypatch,
++) -> None:
++    adapter = SimpleNamespace(
++        capabilities=lambda: EngineCapabilities(
++            option_names=frozenset({"speed", "seed"}),
++            options=frozenset({"legacy_option"}),
++        ),
++        option_descriptors={
++            "speed": {
++                "value_type": "number",
++                "minimum": 0.5,
++                "maximum": 2.0,
++                "description": "Playback speed",
++            }
++        },
++    )
++    monkeypatch.setattr(
++        "voicerender.engines.options.get_adapter", lambda engine: adapter
++    )
++
++    options = engine_options("fake", target_id="demo")
++
++    assert [option.name for option in options] == ["legacy_option", "seed", "speed"]
++    assert next(item for item in options if item.name == "speed").value_type == "number"
++    assert all(isinstance(option, EngineOption) for option in options)
++    assert reject_incompatible_options(
++        "fake", {"unknown": 1}, frozenset(item.name for item in options)
++    ) == ["unknown"]
++
++
++def test_engine_options_command_emits_deterministic_json(monkeypatch, capsys) -> None:
++    option = EngineOption(name="speed", value_type="number", minimum=0.5, maximum=2.0)
++    monkeypatch.setattr(
++        cli, "engine_options", lambda engine, *, target_id=None: (option,)
++    )
++
++    exit_code = cli.main(["engines", "options", "kokoro", "--json"])
++
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    assert payload == [
++        {
++            "choices": [],
++            "default": None,
++            "description": "",
++            "identity_affecting": True,
++            "maximum": 2.0,
++            "minimum": 0.5,
++            "name": "speed",
++            "required": False,
++            "runtime_only": False,
++            "value_type": "number",
++        }
++    ]
++
++
++def test_engine_options_human_output_avoids_python_repr(monkeypatch, capsys) -> None:
++    options = (
++        EngineOption(
++            name="speed",
++            value_type="number",
++            default=0.8,
++            choices=(0.5, 1.0),
++        ),
++    )
++    monkeypatch.setattr(
++        cli, "engine_options", lambda engine, *, target_id=None: options
++    )
++
++    exit_code = cli.main(["engines", "options", "kokoro"])
++
++    output = capsys.readouterr().out
++    assert exit_code == 0
++    assert "speed\tnumber\tfalse\t0.8\t0.5, 1.0\t" in output
++    assert "EngineOption(" not in output
+diff --git a/tests/test_model_management_api.py b/tests/test_model_management_api.py
+new file mode 100644
+index 0000000..6c9c357
+--- /dev/null
++++ b/tests/test_model_management_api.py
+@@ -0,0 +1,127 @@
++from __future__ import annotations
++
++from pathlib import Path
++from types import SimpleNamespace
++
++from voicerender.engines.assets import (
++    ModelArtifact,
++    ModelInstallRequest,
++    ModelInstallResult,
++    ModelManagementCapabilities,
++    ModelRemoveRequest,
++    ModelRemoveResult,
++    ModelVerifyResult,
++)
++from voicerender.models_api import (
++    install_model,
++    list_models,
++    remove_model,
++    verify_model,
++)
++
++
++def test_model_listing_projects_discovery_without_opening_synthesis_runtime(
++    monkeypatch,
++) -> None:
++    target = SimpleNamespace(
++        engine="kokoro",
++        id="v1.0",
++        display_name="Kokoro v1",
++        runtime_available=True,
++        status="ready",
++        languages=("en-US",),
++        qualities=("fp32",),
++        metadata={},
++    )
++    monkeypatch.setattr("voicerender.models_api.get_asset_manager", lambda engine: None)
++    monkeypatch.setattr(
++        "voicerender.models_api.discover_targets", lambda *a, **k: (target,)
++    )
++    monkeypatch.setattr(
++        "voicerender.engines.registry.open_session",
++        lambda *a, **k: (_ for _ in ()).throw(
++            AssertionError("synthesis session opened")
++        ),
++    )
++
++    models = list_models("kokoro", installed=True)
++
++    assert models == (
++        ModelArtifact(
++            engine="kokoro",
++            target_id="v1.0",
++            display_name="Kokoro v1",
++            installed=True,
++            status="ready",
++            languages=("en-US",),
++            qualities=("fp32",),
++            installed_qualities=("fp32",),
++        ),
++    )
++
++
++def test_unsupported_install_has_stable_engine_operation_diagnostic(
++    monkeypatch,
++) -> None:
++    monkeypatch.setattr("voicerender.models_api.get_asset_manager", lambda engine: None)
++
++    result = install_model(ModelInstallRequest("kokoro", "v1.0"))
++
++    assert result.status == "unsupported"
++    assert result.changed is False
++    assert result.diagnostics == (
++        "Engine 'kokoro' does not support model install for target 'v1.0'",
++    )
++
++
++def test_install_delegates_to_registered_public_asset_manager(
++    monkeypatch, tmp_path: Path
++) -> None:
++    class Manager:
++        called = None
++
++        def capabilities(self):
++            return ModelManagementCapabilities(can_install=True, supports_quality=True)
++
++        def install_model(self, request):
++            self.called = request
++            return ModelInstallResult("kokoro", request.target_id, "installed", True)
++
++    manager = Manager()
++    monkeypatch.setattr(
++        "voicerender.models_api.get_asset_manager", lambda engine: manager
++    )
++
++    result = install_model(
++        ModelInstallRequest("kokoro", "v1.0", "fp32", cache_dir=tmp_path, force=True)
++    )
++
++    assert result.status == "installed"
++    assert manager.called == ModelInstallRequest(
++        "kokoro", "v1.0", "fp32", cache_dir=tmp_path, force=True
++    )
++
++
++def test_remove_and_verify_delegate_to_public_asset_manager(
++    monkeypatch, tmp_path: Path
++) -> None:
++    class Manager:
++        def capabilities(self):
++            return ModelManagementCapabilities(can_remove=True, can_verify=True)
++
++        def remove_model(self, request):
++            return ModelRemoveResult("kokoro", request.target_id, "removed", True)
++
++        def verify_model(self, target_id, *, quality=None, cache_dir=None):
++            assert cache_dir == tmp_path
++            return ModelVerifyResult("kokoro", target_id, "verified", True)
++
++    monkeypatch.setattr(
++        "voicerender.models_api.get_asset_manager", lambda engine: Manager()
++    )
++
++    removed = remove_model(ModelRemoveRequest("kokoro", "v1.0", cache_dir=tmp_path))
++    verified = verify_model("kokoro", "v1.0", cache_dir=tmp_path)
++
++    assert removed.status == "removed" and removed.changed
++    assert verified.status == "verified" and verified.verified
+diff --git a/tests/test_model_management_cli.py b/tests/test_model_management_cli.py
+new file mode 100644
+index 0000000..016b91d
+--- /dev/null
++++ b/tests/test_model_management_cli.py
+@@ -0,0 +1,87 @@
++from __future__ import annotations
++
++import json
++
++from voicerender import cli
++from voicerender.engines.assets import ModelArtifact
++
++
++def test_models_list_json_uses_stable_model_fields(monkeypatch, capsys) -> None:
++    monkeypatch.setattr(
++        cli,
++        "list_models",
++        lambda *args, **kwargs: (
++            ModelArtifact("kokoro", "v1.0", "Kokoro v1", True, "ready", ("en-US",)),
++        ),
++    )
++
++    exit_code = cli.main(["models", "list", "--engine", "kokoro", "--json"])
++
++    assert exit_code == 0
++    rows = json.loads(capsys.readouterr().out)
++    assert rows == [
++        {
++            "display_name": "Kokoro v1",
++            "engine": "kokoro",
++            "installed": True,
++            "installed_qualities": [],
++            "languages": ["en-US"],
++            "metadata": {},
++            "path": None,
++            "qualities": [],
++            "revision": None,
++            "source": None,
++            "status": "ready",
++            "target_id": "v1.0",
++        }
++    ]
++
++
++def test_models_remove_requires_yes_before_calling_api(monkeypatch, capsys) -> None:
++    called = False
++
++    def remove(_request):
++        nonlocal called
++        called = True
++        raise AssertionError("removal API must not be called without --yes")
++
++    monkeypatch.setattr(cli, "remove_model", remove)
++
++    exit_code = cli.main(["models", "remove", "v1.0", "--engine", "kokoro"])
++
++    captured = capsys.readouterr()
++    assert exit_code == 1
++    assert "requires --yes" in captured.err
++    assert called is False
++
++
++def test_models_install_json_reports_unsupported_diagnostic(
++    monkeypatch, capsys
++) -> None:
++    monkeypatch.setattr(
++        cli,
++        "install_model",
++        lambda request: type(
++            "Result",
++            (),
++            {
++                "engine": request.engine,
++                "target_id": request.target_id,
++                "status": "unsupported",
++                "changed": False,
++                "diagnostics": (
++                    "Engine 'kokoro' does not support model install for target 'v1.0'",
++                ),
++                "artifact": None,
++            },
++        )(),
++    )
++
++    exit_code = cli.main(["models", "install", "v1.0", "--engine", "kokoro", "--json"])
++
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 2
++    assert payload["status"] == "unsupported"
++    assert payload["diagnostics"] == [
++        "Engine 'kokoro' does not support model install for target 'v1.0'"
++    ]
+diff --git a/tests/test_profile_roles.py b/tests/test_profile_roles.py
+new file mode 100644
+index 0000000..f09ef0f
+--- /dev/null
++++ b/tests/test_profile_roles.py
+@@ -0,0 +1,250 @@
++from __future__ import annotations
++
++from contextlib import contextmanager
++from dataclasses import replace
++from types import SimpleNamespace
++from typing import Any
++
++import pytest
++from renderplan import (
++    PausePolicy,
++    PlanningPolicy,
++    RenderProfile,
++)
++
++from voicerender.engines.api_probe import EngineApiProbe
++from voicerender.engines.base import (
++    EngineCapabilities,
++    EngineSelection,
++    RenderProfileFragment,
++)
++from voicerender.engines.profiles import make_renderprofile_fragment
++from voicerender.engines.registry import _ADAPTERS
++from voicerender.engines.selection import EngineRequest
++from voicerender.errors import ProfileError
++from voicerender.profile_roles import (
++    list_profile_roles,
++    remove_profile_role,
++    set_default_profile_role,
++    set_profile_role,
++)
++from voicerender.renderprofile import create_render_profile
++
++
++class _RoleAdapter:
++    id = "role-test"
++    package_name = "role-test"
++
++    def probe_api(self) -> EngineApiProbe:
++        return EngineApiProbe(
++            engine=self.id,
++            package=self.package_name,
++            compatible=True,
++            status="ready",
++            distribution_version="1.0",
++            expected_api_version=1,
++            api_version=1,
++            contract_source="explicit",
++        )
++
++    def capabilities(self) -> EngineCapabilities:
++        return EngineCapabilities(id=self.id)
++
++    def version(self) -> str:
++        return "1.0"
++
++    def resolve(self, request: EngineRequest):
++        return (
++            EngineSelection(
++                engine=self.id,
++                target_id=request.target_id or "target-v1",
++                language=request.language or "en-US",
++                voice=request.voice or "voice-a",
++                speaker=request.speaker,
++                options=request.options,
++            ),
++            (),
++        )
++
++    def validate_selection(self, selection: EngineSelection):
++        if selection.options.get("bad_option"):
++            return (
++                SimpleNamespace(
++                    severity="error",
++                    code="option.invalid",
++                    message="invalid option value",
++                ),
++            )
++        return ()
++
++    def target_metadata(self, selection: EngineSelection) -> dict[str, Any]:
++        return {"max_tokens": 96, "source_revision": "r1"}
++
++    def renderprofile_fragment(
++        self, selection: EngineSelection
++    ) -> RenderProfileFragment:
++        return make_renderprofile_fragment(
++            self,
++            selection,
++            token_fields=("span",),
++            frontend="role-test.frontend",
++            pronunciation="role-test.pronunciation",
++            capacity_key="max_tokens",
++            capacity_metric="model_tokens",
++        )
++
++    @contextmanager
++    def open(self, selection: EngineSelection):
++        yield object()
++
++
++def _install(monkeypatch: pytest.MonkeyPatch) -> _RoleAdapter:
++    adapter = _RoleAdapter()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    return adapter
++
++
++def _profile(monkeypatch: pytest.MonkeyPatch) -> RenderProfile:
++    _install(monkeypatch)
++    narrator = create_render_profile(
++        engine="role-test",
++        target_id="target-v1",
++        language="en-US",
++        role="narrator",
++        voice="voice-a",
++    )
++    guest = create_render_profile(
++        engine="role-test",
++        target_id="target-v1",
++        language="en-GB",
++        role="guest",
++        voice="voice-b",
++    )
++    return replace(
++        narrator,
++        roles={"narrator": narrator.roles["narrator"], "guest": guest.roles["guest"]},
++        planning=PlanningPolicy(split="clause", capacity_fallback=("token",)),
++        pauses=PausePolicy(mode="none"),
++        profile_id=None,
++    ).with_identity()
++
++
++def test_list_roles_and_set_new_role_preserve_policy_and_existing_binding(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile = _profile(monkeypatch)
++    original_narrator = profile.roles["narrator"]
++
++    updated = set_profile_role(
++        profile,
++        "announcer",
++        engine="role-test",
++        target_id="target-v1",
++        language="en-US",
++        voice="voice-c",
++        options={"style": "warm"},
++    )
++
++    assert list_profile_roles(profile) == profile.roles
++    assert updated.profile_id == updated.computed_id()
++    assert updated.profile_id != profile.profile_id
++    assert updated.planning == profile.planning
++    assert updated.pauses == profile.pauses
++    assert updated.default_role == profile.default_role
++    assert updated.roles["narrator"] is original_narrator
++    assert updated.roles["announcer"].binding["voice"] == "voice-c"
++    assert updated.roles["announcer"].binding["options"] == {"style": "warm"}
++    assert (
++        updated.roles["announcer"].renderer_capacity
++        == original_narrator.renderer_capacity
++    )
++
++
++def test_set_existing_role_can_update_default_and_recomputes_identity(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile = _profile(monkeypatch)
++
++    updated = set_profile_role(
++        profile,
++        "guest",
++        engine="role-test",
++        target_id="target-v1",
++        language="en-US",
++        voice="voice-new",
++        make_default=True,
++    )
++
++    assert updated.default_role == "guest"
++    assert updated.profile_id == updated.computed_id()
++    assert updated.profile_id != profile.profile_id
++    assert updated.roles["guest"].binding["voice"] == "voice-new"
++    assert updated.planning == profile.planning
++    assert updated.pauses == profile.pauses
++
++
++def test_role_mutation_rejects_invalid_engine_options(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile = _profile(monkeypatch)
++
++    with pytest.raises(ProfileError, match="option.invalid: invalid option value"):
++        set_profile_role(
++            profile,
++            "guest",
++            engine="role-test",
++            target_id="target-v1",
++            language="en-US",
++            options={"bad_option": True},
++        )
++
++
++def test_remove_role_requires_valid_default_and_recomputes_identity(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile = _profile(monkeypatch)
++
++    with pytest.raises(ProfileError, match="requires --new-default-role"):
++        remove_profile_role(profile, "narrator")
++    with pytest.raises(ProfileError, match="not present after removal"):
++        remove_profile_role(profile, "narrator", new_default_role="missing")
++
++    updated = remove_profile_role(profile, "narrator", new_default_role="guest")
++    assert set(updated.roles) == {"guest"}
++    assert updated.default_role == "guest"
++    assert updated.profile_id == updated.computed_id()
++    assert updated.profile_id != profile.profile_id
++    assert updated.planning == profile.planning
++    assert updated.pauses == profile.pauses
++
++
++def test_remove_final_or_unknown_role_and_set_unknown_default_fail(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile = _profile(monkeypatch)
++    single = RenderProfile(
++        roles={"narrator": profile.roles["narrator"]}, default_role="narrator"
++    ).with_identity()
++
++    with pytest.raises(ProfileError, match="final RenderProfile role"):
++        remove_profile_role(single, "narrator")
++    with pytest.raises(ProfileError, match="no role 'missing'"):
++        remove_profile_role(profile, "missing")
++    with pytest.raises(ProfileError, match="no role 'missing'"):
++        set_default_profile_role(profile, "missing")
++
++
++def test_default_role_mutation_preserves_roles_and_refreshes_identity(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile = _profile(monkeypatch)
++
++    updated = set_default_profile_role(profile, "guest")
++
++    assert updated.default_role == "guest"
++    assert updated.profile_id == updated.computed_id()
++    assert updated.profile_id != profile.profile_id
++    assert updated.roles == profile.roles
++    assert updated.planning == profile.planning
++    assert updated.pauses == profile.pauses
++    assert set_default_profile_role(updated, "guest") is updated
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+new file mode 100644
+index 0000000..0d04fc7
+--- /dev/null
++++ b/tests/test_profile_roles_cli.py
+@@ -0,0 +1,149 @@
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++from pathlib import Path
++
++from renderplan import RenderProfile, RoleProfile
++
++from voicerender import cli
++from voicerender.renderprofile import load_render_profile, save_render_profile
++
++
++def _write_profile(path: Path) -> RenderProfile:
++    profile = RenderProfile(
++        roles={
++            "narrator": RoleProfile(
++                language="en-US",
++                binding={"renderer": "fixture", "target_id": "target-a"},
++            ),
++            "guest": RoleProfile(
++                language="en-GB",
++                binding={"renderer": "fixture", "target_id": "target-b"},
++            ),
++        },
++        default_role="narrator",
++    ).with_identity()
++    save_render_profile(profile, path)
++    return profile
++
++
++def test_profile_role_set_writes_only_explicit_output(
++    tmp_path: Path, monkeypatch, capsys
++) -> None:
++    source = tmp_path / "source.renderprofile.toml"
++    output = tmp_path / "updated.renderprofile.toml"
++    original = _write_profile(source)
++
++    def fake_set_profile_role(profile, role, **kwargs):
++        loaded = load_render_profile(profile)
++        roles = dict(loaded.roles)
++        roles[role] = RoleProfile(
++            language=kwargs["language"],
++            binding={
++                "renderer": kwargs["engine"],
++                "target_id": kwargs["target_id"],
++                "options": dict(kwargs["options"] or {}),
++            },
++        )
++        return replace(loaded, roles=roles, profile_id=None).with_identity()
++
++    monkeypatch.setattr(cli, "set_profile_role", fake_set_profile_role)
++    exit_code = cli.main(
++        [
++            "profile",
++            "role",
++            "set",
++            str(source),
++            "announcer",
++            "--engine",
++            "fixture",
++            "--target",
++            "target-c",
++            "--language",
++            "en-US",
++            "--option",
++            'style="warm"',
++            "-o",
++            str(output),
++            "--json",
++        ]
++    )
++
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    assert load_render_profile(source) == original
++    updated = load_render_profile(output)
++    assert "announcer" in updated.roles
++    assert payload["path"] == str(output)
++    assert {item["role"] for item in payload["roles"]} == {
++        "announcer",
++        "guest",
++        "narrator",
++    }
++
++
++def test_default_role_in_place_and_inspect_json(tmp_path: Path, capsys) -> None:
++    source = tmp_path / "profile.renderprofile.toml"
++    _write_profile(source)
++
++    exit_code = cli.main(
++        ["profile", "default-role", str(source), "guest", "--in-place", "--json"]
++    )
++    mutation = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    assert mutation["default_role"] == "guest"
++    assert load_render_profile(source).default_role == "guest"
++
++    exit_code = cli.main(["profile", "inspect", str(source), "--json"])
++    inspection = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    assert inspection["default_role"] == "guest"
++    assert [item["role"] for item in inspection["roles"]] == ["guest", "narrator"]
++    assert next(item for item in inspection["roles"] if item["role"] == "guest")[
++        "default"
++    ]
++
++
++def test_role_remove_default_requires_replacement_without_writing(
++    tmp_path: Path, capsys
++) -> None:
++    source = tmp_path / "profile.renderprofile.toml"
++    output = tmp_path / "out.renderprofile.toml"
++    _write_profile(source)
++    original_bytes = source.read_bytes()
++
++    exit_code = cli.main(
++        [
++            "profile",
++            "role",
++            "remove",
++            str(source),
++            "narrator",
++            "-o",
++            str(output),
++            "--json",
++        ]
++    )
++
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 1
++    assert payload["status"] == "error"
++    assert "--new-default-role" in payload["error"]
++    assert source.read_bytes() == original_bytes
++    assert not output.exists()
++
++
++def test_role_list_human_output_is_descriptive_not_python_repr(
++    tmp_path: Path, capsys
++) -> None:
++    source = tmp_path / "profile.renderprofile.toml"
++    _write_profile(source)
++
++    exit_code = cli.main(["profile", "role", "list", str(source)])
++
++    output = capsys.readouterr().out
++    assert exit_code == 0
++    assert "* narrator  en-US  fixture/target-a" in output
++    assert "guest  en-GB  fixture/target-b" in output
++    assert "RoleProfile(" not in output
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+index 71ffae1..2360700 100644
+--- a/tests/test_storage.py
++++ b/tests/test_storage.py
+@@ -7,6 +7,26 @@ from voicerender.errors import ArtifactError
+ from voicerender.storage import atomic_wav
+
+
++def test_no_replace_file_install_falls_back_without_os_link(
++    tmp_path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    from voicerender import storage
++
++    source = tmp_path / "temporary.bin"
++    source.write_bytes(b"voice asset")
++    destination = tmp_path / "asset.bin"
++    monkeypatch.setattr(storage.os, "link", None, raising=False)
++
++    storage.install_file_no_replace(source, destination)
++
++    assert destination.read_bytes() == b"voice asset"
++    replacement = tmp_path / "replacement.bin"
++    replacement.write_bytes(b"do not overwrite")
++    with pytest.raises(FileExistsError):
++        storage.install_file_no_replace(replacement, destination)
++    assert destination.read_bytes() == b"voice asset"
++
++
+ def test_atomic_wav_remains_strict_for_out_of_range_audio(tmp_path) -> None:
+     path = tmp_path / "out-of-range.wav"
+
+diff --git a/tests/test_voice_clone.py b/tests/test_voice_clone.py
+new file mode 100644
+index 0000000..0082c52
+--- /dev/null
++++ b/tests/test_voice_clone.py
+@@ -0,0 +1,149 @@
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++from voicerender.engines.base import EngineCapabilities
++from voicerender.engines.catalog import SynthesisTarget
++from voicerender.errors import EngineSelectionError
++from voicerender.voice_clone import VoiceCloneRequest, clone_voice_profile
++
++
++def _target(*, reference: bool = True) -> SynthesisTarget:
++    return SynthesisTarget(
++        engine="fake",
++        id="clone-model",
++        display_name="Clone model",
++        languages=("en-US",),
++        capabilities=frozenset({"reference_voice"}) if reference else frozenset(),
++        metadata={},
++    )
++
++
++def test_clone_rejects_target_without_reference_voice_support(
++    monkeypatch, tmp_path: Path
++) -> None:
++    class Adapter:
++        id = "fake"
++
++        def capabilities(self):
++            return EngineCapabilities(id="fake", supports_reference_voice=False)
++
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"wav reference")
++    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
++    monkeypatch.setattr(
++        "voicerender.voice_clone.discover_targets",
++        lambda *a, **k: (_target(reference=False),),
++    )
++
++    with pytest.raises(EngineSelectionError) as error:
++        clone_voice_profile(
++            VoiceCloneRequest("fake", "clone-model", "en-US", reference_wav=reference)
++        )
++
++    assert error.value.code == "voice_clone.reference_unsupported"
++
++
++def test_clone_delegates_transcript_validation_and_never_synthesizes(
++    monkeypatch, tmp_path: Path
++) -> None:
++    class Adapter:
++        id = "fake"
++
++        def capabilities(self):
++            return EngineCapabilities(
++                id="fake",
++                supports_reference_voice=True,
++                option_names=frozenset({"reference_text", "temperature"}),
++            )
++
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"wav reference")
++    calls: list[dict[str, object]] = []
++    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
++    monkeypatch.setattr(
++        "voicerender.voice_clone.discover_targets", lambda *a, **k: (_target(),)
++    )
++
++    def create_profile(**kwargs):
++        calls.append(kwargs)
++        if "reference_text" not in kwargs["options"]:
++            raise EngineSelectionError(
++                "Exact reference transcript required",
++                engine="fake",
++                code="fake.reference_text_required",
++            )
++        return kwargs
++
++    monkeypatch.setattr("voicerender.voice_clone.create_render_profile", create_profile)
++    monkeypatch.setattr(
++        "voicerender.engines.registry.open_session",
++        lambda *a, **k: (_ for _ in ()).throw(
++            AssertionError("clone must not synthesize")
++        ),
++    )
++
++    with pytest.raises(EngineSelectionError) as error:
++        clone_voice_profile(
++            VoiceCloneRequest("fake", "clone-model", "en-US", reference_wav=reference)
++        )
++    assert error.value.code == "fake.reference_text_required"
++
++    result = clone_voice_profile(
++        VoiceCloneRequest(
++            "fake",
++            "clone-model",
++            "en-US",
++            reference_wav=reference,
++            transcript="Exact transcript.",
++            options={"temperature": 0.7},
++        ),
++        role="narrator",
++    )
++
++    assert result["options"]["reference_text"] == "Exact transcript."
++    assert result["options"]["temperature"] == 0.7
++    assert result["role"] == "narrator"
++    assert result["voice_source"]["kind"] == "reference"
++    assert len(calls) == 2
++
++
++def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
++    monkeypatch, tmp_path: Path
++) -> None:
++    from voicerender.voice_source_codec import save_voice_source
++    from voicerender.voice_sources import local_reference_source
++
++    class Adapter:
++        id = "fake"
++
++        def capabilities(self):
++            return EngineCapabilities(
++                id="fake",
++                supports_reference_voice=True,
++                option_names=frozenset({"transcript"}),
++            )
++
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"pinned")
++    source: dict[str, Any] = dict(local_reference_source(reference))
++    source["metadata"] = {"transcript": "From the source."}
++    sidecar = tmp_path / "speaker.toml"
++    save_voice_source(source, sidecar)
++    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
++    monkeypatch.setattr(
++        "voicerender.voice_clone.discover_targets", lambda *a, **k: (_target(),)
++    )
++    monkeypatch.setattr(
++        "voicerender.voice_clone.create_render_profile", lambda **kwargs: kwargs
++    )
++
++    result = clone_voice_profile(
++        VoiceCloneRequest("fake", "clone-model", "en-US", voice_source=sidecar)
++    )
++
++    assert result["options"]["transcript"] == "From the source."
++    assert result["voice_source"]["sha256"] == source["sha256"]
+diff --git a/tests/test_voice_clone_cli.py b/tests/test_voice_clone_cli.py
+new file mode 100644
+index 0000000..e1d0e37
+--- /dev/null
++++ b/tests/test_voice_clone_cli.py
+@@ -0,0 +1,68 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from renderplan import RenderProfile, RoleProfile
++
++from voicerender import cli
++
++
++def test_voice_clone_cli_emits_stable_json_and_persists_profile(
++    tmp_path: Path, monkeypatch, capsys
++) -> None:
++    reference = tmp_path / "reference.wav"
++    reference.write_bytes(b"reference audio")
++    output = tmp_path / "clone.renderprofile.toml"
++    profile = RenderProfile(
++        roles={
++            "narrator": RoleProfile(
++                language="en-US",
++                binding={"renderer": "fixture", "target_id": "target-a"},
++            )
++        },
++        default_role="narrator",
++    ).with_identity()
++    requests = []
++
++    def clone(request, *, role):
++        requests.append((request, role))
++        return profile
++
++    monkeypatch.setattr(cli, "clone_voice_profile", clone)
++    exit_code = cli.main(
++        [
++            "voice",
++            "clone",
++            "--engine",
++            "fixture",
++            "--target",
++            "target-a",
++            "--language",
++            "en-US",
++            "--reference-wav",
++            str(reference),
++            "--transcript",
++            "Exact words.",
++            "--option",
++            "temperature=0.7",
++            "-o",
++            str(output),
++            "--json",
++        ]
++    )
++
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    assert payload == {
++        "path": str(output),
++        "profile_id": profile.profile_id,
++        "role": "narrator",
++    }
++    assert len(requests) == 1
++    request, role = requests[0]
++    assert request.engine == "fixture"
++    assert request.transcript == "Exact words."
++    assert request.options == {"temperature": 0.7}
++    assert role == "narrator"
++    assert output.exists()
+diff --git a/tests/test_voice_descriptors.py b/tests/test_voice_descriptors.py
+new file mode 100644
+index 0000000..821f4dc
+--- /dev/null
++++ b/tests/test_voice_descriptors.py
+@@ -0,0 +1,122 @@
++from __future__ import annotations
++
++import json
++
++from voicerender import cli
++from voicerender.engines.catalog import SynthesisTarget, TargetVoice
++from voicerender.errors import ProfileError
++from voicerender.voices_api import (
++    VoiceDescriptor,
++    inspect_voice,
++    list_voices,
++    parse_voice_selector,
++    voice_descriptor_to_dict,
++)
++
++
++def _target() -> SynthesisTarget:
++    return SynthesisTarget(
++        engine="kokoro",
++        id="v1.0",
++        display_name="Kokoro",
++        languages=("en-US",),
++        runtime_available=True,
++        voices=("af_heart",),
++        speakers=("2",),
++        voice_details=(
++            TargetVoice(
++                id="af_heart",
++                gender="female",
++                language="en-US",
++                locale="en-US",
++                languages=("en-US",),
++            ),
++        ),
++        capabilities=frozenset({"reference_voice"}),
++        metadata={"source": "test"},
++    )
++
++
++def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
++    target = _target()
++    monkeypatch.setattr(
++        "voicerender.voices_api.discover_targets", lambda *a, **k: (target,)
++    )
++
++    descriptors = list_voices(engine="kokoro", language="en-US")
++    selectors = {descriptor.selector for descriptor in descriptors}
++
++    assert selectors == {
++        "kokoro:v1.0/af_heart",
++        "kokoro:v1.0#2",
++        "kokoro:v1.0/af_heart#2",
++        "kokoro:v1.0",
++    }
++    for descriptor in descriptors:
++        parsed = parse_voice_selector(descriptor.selector)
++        assert parsed.engine == descriptor.engine
++        assert parsed.target_id == descriptor.target_id
++        assert parsed.voice == descriptor.voice
++        assert parsed.speaker == descriptor.speaker
++    inspected = inspect_voice("kokoro:v1.0/af_heart", language="en-US")
++    assert inspected.kind == "builtin"
++    assert inspected.gender == "female"
++    assert voice_descriptor_to_dict(inspected)["languages"] == ["en-US"]
++
++
++def test_selector_rejects_noncanonical_delimiters() -> None:
++    try:
++        parse_voice_selector("kokoro:v1.0/a/b")
++    except ProfileError as exc:
++        assert "voice delimiter" in str(exc)
++    else:
++        raise AssertionError("multiple voice delimiters must be rejected")
++
++
++def test_list_voices_can_filter_target_and_kind(monkeypatch) -> None:
++    monkeypatch.setattr(
++        "voicerender.voices_api.discover_targets", lambda *a, **k: (_target(),)
++    )
++
++    descriptors = list_voices(engine="kokoro", target_id="v1.0")
++
++    assert descriptors
++    assert all(item.target_id == "v1.0" for item in descriptors)
++    assert {item.kind for item in descriptors} == {
++        "builtin",
++        "speaker",
++        "reference-capable",
++    }
++
++
++def test_voice_cli_list_filter_and_inspect_json(monkeypatch, capsys) -> None:
++    descriptor = _target_descriptor()
++    monkeypatch.setattr(cli, "list_voices", lambda **kwargs: (descriptor,))
++    monkeypatch.setattr(
++        cli, "inspect_voice", lambda selector, *, language=None: descriptor
++    )
++
++    list_exit = cli.main(
++        ["voices", "list", "--engine", "kokoro", "--kind", "builtin", "--json"]
++    )
++    listed = json.loads(capsys.readouterr().out)
++    inspect_exit = cli.main(["voices", "inspect", "kokoro:v1.0/af_heart", "--json"])
++    inspected = json.loads(capsys.readouterr().out)
++
++    assert list_exit == inspect_exit == 0
++    assert listed == [voice_descriptor_to_dict(descriptor)]
++    assert inspected == voice_descriptor_to_dict(descriptor)
++
++
++def _target_descriptor() -> VoiceDescriptor:
++    from voicerender.voices_api import VoiceDescriptor
++
++    return VoiceDescriptor(
++        selector="kokoro:v1.0/af_heart",
++        engine="kokoro",
++        target_id="v1.0",
++        voice="af_heart",
++        speaker=None,
++        kind="builtin",
++        languages=("en-US",),
++    )
+diff --git a/tests/test_voice_source_cli.py b/tests/test_voice_source_cli.py
+new file mode 100644
+index 0000000..66a843a
+--- /dev/null
++++ b/tests/test_voice_source_cli.py
+@@ -0,0 +1,145 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from voicerender import cli, voice_sources
++from voicerender.voice_source_codec import load_voice_source
++
++
++def test_source_create_inspect_and_verify_pins_metadata_and_never_mutates_audio(
++    tmp_path: Path, capsys
++) -> None:
++    wav = tmp_path / "speaker.wav"
++    original = b"exact reference WAV bytes"
++    wav.write_bytes(original)
++    sidecar = tmp_path / "speaker.voice-source.toml"
++
++    create_exit = cli.main(
++        [
++            "voice",
++            "source",
++            "create",
++            "--reference-wav",
++            str(wav),
++            "--language",
++            "en-US",
++            "--transcript",
++            "Exact words.",
++            "--name",
++            "Speaker",
++            "--metadata",
++            "rating=5",
++            "-o",
++            str(sidecar),
++            "--json",
++        ]
++    )
++    created = json.loads(capsys.readouterr().out)
++
++    assert create_exit == 0
++    source = load_voice_source(sidecar)
++    assert source["kind"] == "reference"
++    assert source["metadata"] == {
++        "language": "en-US",
++        "name": "Speaker",
++        "rating": 5,
++        "transcript": "Exact words.",
++    }
++    assert wav.read_bytes() == original
++    assert created["voice_source"]["sha256"] == source["sha256"]
++
++    inspect_exit = cli.main(["voice", "source", "inspect", str(sidecar), "--json"])
++    inspected = json.loads(capsys.readouterr().out)
++    assert inspect_exit == 0
++    assert inspected["metadata"]["transcript"] == "Exact words."
++
++    verify_exit = cli.main(["voice", "source", "verify", str(sidecar), "--json"])
++    verified = json.loads(capsys.readouterr().out)
++    assert verify_exit == 0
++    assert verified["valid"] is True
++
++    wav.write_bytes(b"changed bytes")
++    changed_exit = cli.main(["voice", "source", "verify", str(sidecar), "--json"])
++    changed = json.loads(capsys.readouterr().out)
++    assert changed_exit == 1
++    assert changed["valid"] is False
++    assert changed["diagnostics"][0]["code"] == "voice_source.reference_changed"
++
++
++def test_managed_source_creation_keeps_pins_without_fetching_audio(
++    monkeypatch, tmp_path: Path, capsys
++) -> None:
++    source = {
++        "kind": "managed_reference",
++        "resolver": "voicefolio",
++        "value": "catalog:voice-1",
++        "sha256": "a" * 64,
++        "source_revision": "revision-1",
++        "source_repository": "voice-repo",
++        "source_path": "voices/reference.wav",
++        "license": "CC0-1.0",
++    }
++    monkeypatch.setattr(
++        voice_sources, "managed_reference_source", lambda ref: dict(source)
++    )
++    monkeypatch.setattr(
++        voice_sources, "validate_managed_voice", lambda *args, **kwargs: None
++    )
++    monkeypatch.setattr(
++        voice_sources,
++        "resolve_managed_voice",
++        lambda *args, **kwargs: (_ for _ in ()).throw(
++            AssertionError("audio fetch attempted")
++        ),
++    )
++    sidecar = tmp_path / "managed.voice-source.toml"
++
++    exit_code = cli.main(
++        [
++            "voice",
++            "source",
++            "create",
++            "--voicefolio-ref",
++            "catalog:voice-1",
++            "--language",
++            "en-US",
++            "-o",
++            str(sidecar),
++            "--json",
++        ]
++    )
++    captured = capsys.readouterr()
++    assert exit_code == 0, captured.err
++    payload = json.loads(captured.out)
++
++    assert exit_code == 0
++    loaded = load_voice_source(sidecar)
++    assert loaded["kind"] == "managed_reference"
++    assert loaded["sha256"] == "a" * 64
++    assert loaded["source_revision"] == "revision-1"
++    assert loaded["metadata"]["language"] == "en-US"
++    assert payload["voice_source"]["resolver"] == "voicefolio"
++
++
++def test_source_creation_error_has_stable_json_payload(tmp_path: Path, capsys) -> None:
++    missing = tmp_path / "missing.wav"
++    sidecar = tmp_path / "missing.toml"
++
++    exit_code = cli.main(
++        [
++            "voice",
++            "source",
++            "create",
++            "--reference-wav",
++            str(missing),
++            "-o",
++            str(sidecar),
++            "--json",
++        ]
++    )
++
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 1
++    assert payload["status"] == "error"
++    assert payload["error_code"] == "voice_source.reference_missing"
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index 28a8cda..43753b8 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -7,6 +7,7 @@ from renderplan import (
+     RenderManifest,
+     RenderPlan,
+     RenderProfile,
++    RoleProfile,
+     SpeechItem,
+ )
+
+@@ -18,10 +19,21 @@ from .book import (
+     render_book,
+ )
+ from .engines.api_probe import EngineApiProbe
++from .engines.assets import (
++    EngineAssetManager,
++    ModelArtifact,
++    ModelInstallRequest,
++    ModelInstallResult,
++    ModelManagementCapabilities,
++    ModelRemoveRequest,
++    ModelRemoveResult,
++    ModelVerifyResult,
++)
+ from .engines.base import (
+     EngineAdapter,
+     EngineCapabilities,
+     EngineDiagnostic,
++    EngineOption,
+     EngineSelection,
+     EngineSession,
+     PronunciationSpan,
+@@ -33,6 +45,7 @@ from .engines.base import (
+     SpeechWordTiming,
+ )
+ from .engines.catalog import CatalogRequest, CatalogResult, SynthesisTarget, TargetVoice
++from .engines.options import engine_options
+ from .engines.registry import (
+     discover_targets,
+     engine_status,
+@@ -66,7 +79,20 @@ from .models import (
+     VoicePlan,
+     VoiceProfile,
+ )
++from .models_api import (
++    install_model,
++    list_models,
++    model_status,
++    remove_model,
++    verify_model,
++)
+ from .preflight import preflight_render_plan
++from .profile_roles import (
++    list_profile_roles,
++    remove_profile_role,
++    set_default_profile_role,
++    set_profile_role,
++)
+ from .render import render, render_plan
+ from .renderplan_render import RenderPlanResult, render_renderplan
+ from .renderprofile import (
+@@ -76,12 +102,14 @@ from .renderprofile import (
+     save_render_profile,
+     validate_render_profile,
+ )
++from .voice_clone import VoiceCloneRequest, clone_voice_profile
+ from .voice_source_codec import load_voice_source, save_voice_source
+ from .voice_sources import (
+     ResolvedPreparedVoice,
+     ResolvedReferenceAudio,
+     VoiceSource,
+     VoiceSourceKind,
++    create_voice_source,
+     local_prepared_voice_source,
+     local_reference_source,
+     managed_reference_source,
+@@ -91,6 +119,14 @@ from .voice_sources import (
+     validate_voice_source,
+     voice_source_identity,
+ )
++from .voices_api import (
++    ParsedVoiceSelector,
++    VoiceDescriptor,
++    VoiceKind,
++    inspect_voice,
++    list_voices,
++    parse_voice_selector,
++)
+
+ try:
+     __version__ = version("voicerender")
+@@ -108,16 +144,26 @@ __all__ = [
+     "EngineAdapter",
+     "EngineApiIncompatibleError",
+     "EngineApiProbe",
++    "EngineAssetManager",
+     "EngineCapabilities",
+     "EngineCapacityError",
+     "EngineDiagnostic",
+     "EngineError",
++    "EngineOption",
+     "EngineRequest",
+     "EngineSelection",
+     "EngineSelectionError",
+     "EngineSession",
+     "EngineSynthesisError",
+     "EngineUnavailableError",
++    "ModelArtifact",
++    "ModelInstallRequest",
++    "ModelInstallResult",
++    "ModelManagementCapabilities",
++    "ModelRemoveRequest",
++    "ModelRemoveResult",
++    "ModelVerifyResult",
++    "ParsedVoiceSelector",
+     "PlanError",
+     "PreflightReport",
+     "ProfileError",
+@@ -136,6 +182,7 @@ __all__ = [
+     "RequestMeasure",
+     "ResolvedPreparedVoice",
+     "ResolvedReferenceAudio",
++    "RoleProfile",
+     "SpeechItem",
+     "SpeechRequest",
+     "SpeechSegment",
+@@ -146,26 +193,41 @@ __all__ = [
+     "UnsupportedPlanSemanticsError",
+     "UnsupportedSynthesisFeatureError",
+     "VoiceBinding",
++    "VoiceCloneRequest",
+     "VoiceConfig",
++    "VoiceDescriptor",
++    "VoiceKind",
+     "VoicePlan",
+     "VoiceProfile",
+     "VoiceRenderError",
+     "VoiceSource",
+     "VoiceSourceKind",
+     "__version__",
++    "clone_voice_profile",
+     "create_render_profile",
++    "create_voice_source",
+     "discover_targets",
++    "engine_options",
+     "engine_status",
++    "inspect_voice",
++    "install_model",
+     "list_engines",
++    "list_models",
++    "list_profile_roles",
++    "list_voices",
+     "load_render_profile",
+     "load_voice_source",
+     "local_prepared_voice_source",
+     "local_reference_source",
+     "managed_reference_source",
++    "model_status",
+     "normalize_voice_source",
+     "open_session",
++    "parse_voice_selector",
+     "preflight_render_plan",
+     "refresh_render_profile",
++    "remove_model",
++    "remove_profile_role",
+     "render",
+     "render_book",
+     "render_plan",
+@@ -175,8 +237,11 @@ __all__ = [
+     "resolve_voice",
+     "save_render_profile",
+     "save_voice_source",
++    "set_default_profile_role",
++    "set_profile_role",
+     "synthesize",
+     "validate_render_profile",
+     "validate_voice_source",
++    "verify_model",
+     "voice_source_identity",
+ ]
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index bf765d5..f3e88a6 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -20,9 +20,9 @@ from . import (
+     __version__,
+     render_book,
+ )
++from .engines.options import engine_option_to_dict, engine_options
+ from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
+ from .engines.registry import (
+-    discover_targets,
+     engine_status,
+     get_adapter,
+     list_engines,
+@@ -38,7 +38,25 @@ from .errors import (
+     UnsupportedSynthesisFeatureError,
+     VoiceRenderError,
+ )
++from .models_api import (
++    ModelInstallRequest,
++    ModelRemoveRequest,
++    ModelVerifyResult,
++    install_model,
++    list_models,
++    model_artifact_to_dict,
++    model_result_to_dict,
++    model_status,
++    remove_model,
++    verify_model,
++)
+ from .preflight import preflight_render_plan
++from .profile_roles import (
++    list_profile_roles,
++    remove_profile_role,
++    set_default_profile_role,
++    set_profile_role,
++)
+ from .renderplan_render import (
+     RENDER_DIAGNOSTICS_FILENAME,
+     RenderPlanResult,
+@@ -51,17 +69,25 @@ from .renderprofile import (
+     save_render_profile,
+     validate_render_profile,
+ )
+-from .storage import wav_info
++from .storage import install_file_no_replace, wav_info
++from .voice_clone import VoiceCloneRequest, clone_voice_profile
+ from .voice_design import Qwen3VoiceDesignRecipe, design_qwen3_reference
+-from .voice_source_codec import load_voice_source
++from .voice_source_codec import load_voice_source, save_voice_source
+ from .voice_sources import (
++    create_voice_source,
+     local_prepared_voice_source,
+     local_reference_source,
+     managed_reference_source,
+     normalize_voice_source,
+     resolve_reference_audio,
++    validate_voice_source,
+     voice_source_identity,
+ )
++from .voices_api import (
++    inspect_voice,
++    list_voices,
++    voice_descriptor_to_dict,
++)
+
+
+ def build_parser() -> argparse.ArgumentParser:
+@@ -82,13 +108,70 @@ def build_parser() -> argparse.ArgumentParser:
+     engine_inspect.add_argument("engine")
+     engine_inspect.add_argument("--json", action="store_true")
+
++    engine_options = engine_commands.add_parser(
++        "options", help="List normalized engine option descriptors"
++    )
++    engine_options.add_argument("engine")
++    engine_options.add_argument("--target")
++    engine_options.add_argument("--json", action="store_true")
++
++    models = commands.add_parser("models", help="Manage engine model artifacts")
++    model_commands = models.add_subparsers(dest="models_command", required=True)
++    model_list = model_commands.add_parser("list", help="List engine models")
++    model_list.add_argument("--engine", required=True)
++    model_list.add_argument("--lang")
++    model_filter = model_list.add_mutually_exclusive_group()
++    model_filter.add_argument("--installed", action="store_true")
++    model_filter.add_argument("--available", action="store_true")
++    model_list.add_argument("--offline", action="store_true")
++    model_list.add_argument("--refresh", action="store_true")
++    model_list.add_argument("--json", action="store_true")
++    model_inspect = model_commands.add_parser("inspect", help="Inspect an engine model")
++    model_inspect.add_argument("target")
++    model_inspect.add_argument("--engine", required=True)
++    model_inspect.add_argument("--quality")
++    model_inspect.add_argument("--json", action="store_true")
++    model_install = model_commands.add_parser("install", help="Install an engine model")
++    model_install.add_argument("target")
++    model_install.add_argument("--engine", required=True)
++    model_install.add_argument("--quality")
++    model_install.add_argument("--source")
++    model_install.add_argument("--cache-dir", type=Path)
++    model_install.add_argument("--force", action="store_true")
++    model_install.add_argument("--json", action="store_true")
++    model_remove = model_commands.add_parser("remove", help="Remove an engine model")
++    model_remove.add_argument("target")
++    model_remove.add_argument("--engine", required=True)
++    model_remove.add_argument("--quality")
++    model_remove.add_argument("--cache-dir", type=Path)
++    model_remove.add_argument("--yes", action="store_true")
++    model_remove.add_argument("--json", action="store_true")
++    model_verify = model_commands.add_parser("verify", help="Verify an installed model")
++    model_verify.add_argument("target")
++    model_verify.add_argument("--engine", required=True)
++    model_verify.add_argument("--quality")
++    model_verify.add_argument("--cache-dir", type=Path)
++    model_verify.add_argument("--json", action="store_true")
++
+     voices = commands.add_parser("voices", help="Discover engine targets")
+     voice_commands = voices.add_subparsers(dest="voices_command", required=True)
+     voice_list = voice_commands.add_parser("list", help="List targets for an engine")
+-    voice_list.add_argument("--engine", required=True)
++    voice_list.add_argument("--engine")
+     voice_list.add_argument("--lang")
+     voice_list.add_argument("--offline", action="store_true")
+     voice_list.add_argument("--json", action="store_true")
++    voice_list.add_argument("--target")
++    voice_list.add_argument(
++        "--kind",
++        choices=("builtin", "speaker", "managed-reference", "reference-capable"),
++    )
++    voice_list.add_argument("--refresh", action="store_true")
++    voice_inspect = voice_commands.add_parser(
++        "inspect", help="Inspect a canonical voice selector"
++    )
++    voice_inspect.add_argument("selector")
++    voice_inspect.add_argument("--lang")
++    voice_inspect.add_argument("--json", action="store_true")
+
+     profiles = commands.add_parser("profile", help="Create and validate RenderProfiles")
+     profile_commands = profiles.add_subparsers(dest="profile_command", required=True)
+@@ -131,6 +214,70 @@ def build_parser() -> argparse.ArgumentParser:
+     profile_refresh.add_argument("-o", "--output", required=True, type=Path)
+     profile_refresh.add_argument("--json", action="store_true")
+
++    profile_inspect = profile_commands.add_parser(
++        "inspect", help="Inspect RenderProfile roles and policy"
++    )
++    profile_inspect.add_argument("profile", type=Path)
++    profile_inspect.add_argument("--json", action="store_true")
++
++    profile_roles = profile_commands.add_parser(
++        "role", help="Inspect or mutate RenderProfile roles"
++    )
++    role_commands = profile_roles.add_subparsers(
++        dest="profile_role_command", required=True
++    )
++    role_list = role_commands.add_parser("list", help="List configured roles")
++    role_list.add_argument("profile", type=Path)
++    role_list.add_argument("--json", action="store_true")
++
++    role_set = role_commands.add_parser("set", help="Add or replace a role binding")
++    role_set.add_argument("profile", type=Path)
++    role_set.add_argument("role")
++    role_set.add_argument("--engine", required=True)
++    role_set.add_argument("--target", required=True)
++    role_set.add_argument("--language", required=True)
++    role_source = role_set.add_mutually_exclusive_group()
++    role_source.add_argument("--voice")
++    role_source.add_argument("--voicefolio-ref")
++    role_source.add_argument("--reference-wav", type=Path)
++    role_source.add_argument("--prepared-voice", type=Path)
++    role_source.add_argument("--voice-source", type=Path)
++    role_set.add_argument("--speaker")
++    role_set.add_argument(
++        "--option",
++        action="append",
++        default=[],
++        metavar="KEY=VALUE",
++        help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
++    )
++    role_set.add_argument("--offline", action="store_true")
++    role_set.add_argument("--refresh", action="store_true")
++    role_set.add_argument("--make-default", action="store_true")
++    role_set_output = role_set.add_mutually_exclusive_group(required=True)
++    role_set_output.add_argument("-o", "--output", type=Path)
++    role_set_output.add_argument("--in-place", action="store_true")
++    role_set.add_argument("--json", action="store_true")
++
++    role_remove = role_commands.add_parser("remove", help="Remove a configured role")
++    role_remove.add_argument("profile", type=Path)
++    role_remove.add_argument("role")
++    role_remove.add_argument("--new-default-role")
++    role_remove_output = role_remove.add_mutually_exclusive_group(required=True)
++    role_remove_output.add_argument("-o", "--output", type=Path)
++    role_remove_output.add_argument("--in-place", action="store_true")
++    role_remove.add_argument("--json", action="store_true")
++
++    profile_default_role = profile_commands.add_parser(
++        "default-role", help="Select the default profile role"
++    )
++    profile_default_role.add_argument("profile", type=Path)
++    profile_default_role.add_argument("role")
++    default_role_output = profile_default_role.add_mutually_exclusive_group(
++        required=True
++    )
++    default_role_output.add_argument("-o", "--output", type=Path)
++    default_role_output.add_argument("--in-place", action="store_true")
++    profile_default_role.add_argument("--json", action="store_true")
+     voice = commands.add_parser("voice", help="Generate or inspect voice assets")
+     voice_commands = voice.add_subparsers(dest="voice_command", required=True)
+
+@@ -174,6 +321,56 @@ def build_parser() -> argparse.ArgumentParser:
+     prepare_qwen.add_argument("--force", action="store_true")
+     prepare_qwen.add_argument("--json", action="store_true")
+
++    source_command = voice_commands.add_parser(
++        "source", help="Create or inspect reusable voice sources"
++    )
++    source_subcommands = source_command.add_subparsers(
++        dest="voice_source_command", required=True
++    )
++    source_create = source_subcommands.add_parser(
++        "create", help="Create a pinned voice-source sidecar"
++    )
++    source_input = source_create.add_mutually_exclusive_group(required=True)
++    source_input.add_argument("--reference-wav", type=Path)
++    source_input.add_argument("--voicefolio-ref")
++    source_create.add_argument("--transcript")
++    source_create.add_argument("--language")
++    source_create.add_argument("--name")
++    source_create.add_argument(
++        "--metadata", action="append", default=[], metavar="KEY=VALUE"
++    )
++    source_create.add_argument("-o", "--output", required=True, type=Path)
++    source_create.add_argument("--force", action="store_true")
++    source_create.add_argument("--json", action="store_true")
++    for action in ("inspect", "verify"):
++        source_action = source_subcommands.add_parser(
++            action, help=f"{action.title()} a voice-source sidecar"
++        )
++        source_action.add_argument("path", type=Path)
++        source_action.add_argument("--json", action="store_true")
++
++    voice_clone = voice_commands.add_parser(
++        "clone", help="Bind a reference source to an engine profile"
++    )
++    voice_clone.add_argument("--engine", required=True)
++    voice_clone.add_argument("--target", required=True)
++    voice_clone.add_argument("--language", required=True)
++    voice_clone.add_argument("--role", default="narrator")
++    clone_source = voice_clone.add_mutually_exclusive_group(required=True)
++    clone_source.add_argument("--reference-wav", type=Path)
++    clone_source.add_argument("--voice-source", type=Path)
++    clone_source.add_argument("--voicefolio-ref")
++    voice_clone.add_argument("--transcript")
++    voice_clone.add_argument("--speaker")
++    voice_clone.add_argument(
++        "--option", action="append", default=[], metavar="KEY=VALUE"
++    )
++    voice_clone.add_argument("--offline", action="store_true")
++    voice_clone.add_argument("--refresh", action="store_true")
++    voice_clone.add_argument("-o", "--output", required=True, type=Path)
++    voice_clone.add_argument("--force", action="store_true")
++    voice_clone.add_argument("--json", action="store_true")
++
+     voice_inspect = voice_commands.add_parser(
+         "inspect", help="Inspect a voice-source sidecar or Qwen .qvoice profile"
+     )
+@@ -253,12 +450,12 @@ def build_parser() -> argparse.ArgumentParser:
+     return parser
+
+
+-def _json_options(entries: list[str]) -> dict[str, Any]:
++def _json_options(entries: list[str], *, label: str = "--option") -> dict[str, Any]:
+     result: dict[str, Any] = {}
+     for entry in entries:
+         key, separator, value = entry.partition("=")
+         if not separator or not key.strip():
+-            raise ValueError(f"invalid --option {entry!r}; expected KEY=VALUE")
++            raise ValueError(f"invalid {label} {entry!r}; expected KEY=VALUE")
+         key = key.strip()
+         try:
+             result[key] = json.loads(value)
+@@ -267,6 +464,65 @@ def _json_options(entries: list[str]) -> dict[str, Any]:
+     return result
+
+
++def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
++    return [
++        {
++            "role": role_name,
++            "default": role_name == profile.default_role,
++            "language": role.language,
++            "binding": dict(role.binding),
++        }
++        for role_name, role in sorted(list_profile_roles(profile).items())
++    ]
++
++
++def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
++    for item in roles:
++        marker = "*" if item["default"] else " "
++        binding = item["binding"]
++        renderer = _display_cli_value(binding.get("renderer", "unknown"))
++        target = _display_cli_value(binding.get("target_id", "unknown"))
++        print(f"{marker} {item['role']}  {item['language']}  {renderer}/{target}")
++
++
++def _display_cli_value(value: Any) -> str:
++    if value is None:
++        return "unknown"
++    if isinstance(value, str):
++        return value
++    if isinstance(value, bool):
++        return "true" if value else "false"
++    if isinstance(value, (int, float)):
++        return str(value)
++    return json.dumps(value, ensure_ascii=False, sort_keys=True)
++
++
++def _profile_role_voice_source(args: argparse.Namespace) -> dict[str, Any] | None:
++    if args.voicefolio_ref:
++        return managed_reference_source(args.voicefolio_ref)
++    if args.reference_wav is not None:
++        return local_reference_source(args.reference_wav)
++    if args.prepared_voice is not None:
++        if get_adapter(args.engine).id != "qwen3":
++            raise InvalidEngineOptionError(
++                "--prepared-voice is only supported for Qwen3 profiles",
++                code="qwen3.prepared_voice_engine_invalid",
++            )
++        source, _ = _prepared_voice_source(args.prepared_voice)
++        return source
++    if args.voice_source is not None:
++        return dict(load_voice_source(args.voice_source))
++    return None
++
++
++def _profile_mutation_destination(args: argparse.Namespace) -> Path:
++    if args.in_place:
++        return args.profile
++    if args.output.resolve() == args.profile.resolve():
++        raise ValueError("profile output must not overwrite its source; use --in-place")
++    return args.output
++
++
+ def _target_payload(target: Any) -> dict[str, Any]:
+     return {
+         "engine": target.engine,
+@@ -644,7 +900,7 @@ def _prepare_qwen_voice(args: argparse.Namespace) -> dict[str, Any]:
+             os.replace(temporary_path, output)
+         else:
+             try:
+-                os.link(temporary_path, output)
++                install_file_no_replace(temporary_path, output)
+             except FileExistsError as exc:
+                 raise ArtifactError(
+                     f"Qwen prepared voice output appeared during generation: {output}",
+@@ -675,6 +931,103 @@ def _prepare_qwen_voice(args: argparse.Namespace) -> dict[str, Any]:
+     }
+
+
++def _voice_source_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
++    if args.voice_source_command == "create":
++        output = args.output.expanduser().absolute()
++        if (output.exists() or output.is_symlink()) and not args.force:
++            raise ArtifactError(
++                f"Voice-source output already exists; pass --force to replace it: {output}",
++                code="voice_source.output_exists",
++            )
++        if (
++            args.reference_wav is not None
++            and output.resolve() == args.reference_wav.expanduser().resolve()
++        ):
++            raise ValueError("Voice-source output must not overwrite the reference WAV")
++        source = create_voice_source(
++            reference_wav=args.reference_wav,
++            voicefolio_ref=args.voicefolio_ref,
++            transcript=args.transcript,
++            language=args.language,
++            name=args.name,
++            metadata=_json_options(args.metadata, label="--metadata"),
++        )
++        saved = save_voice_source(source.as_mapping(), output)
++        return {"path": str(saved), "voice_source": source.as_mapping()}, 0
++
++    if args.voice_source_command == "inspect":
++        source = load_voice_source(args.path)
++        return {
++            "path": str(args.path),
++            "kind": source["kind"],
++            "voice_source": dict(source),
++            "metadata": dict(source.get("metadata", {})),
++        }, 0
++
++    try:
++        source = load_voice_source(args.path)
++        diagnostics = validate_voice_source(source)
++    except (VoiceRenderError, OSError, ValueError) as exc:
++        diagnostic = {
++            "code": getattr(exc, "code", "voice_source.invalid"),
++            "severity": "error",
++            "message": str(exc),
++            "details": dict(getattr(exc, "details", {})),
++        }
++        return {"path": str(args.path), "valid": False, "diagnostics": [diagnostic]}, 1
++    values = [diagnostic.as_dict() for diagnostic in diagnostics]
++    valid = not any(item["severity"] == "error" for item in values)
++    return {
++        "path": str(args.path),
++        "valid": valid,
++        "diagnostics": values,
++    }, 0 if valid else 1
++
++
++def _voice_clone_command(args: argparse.Namespace) -> dict[str, Any]:
++    output = args.output.expanduser().absolute()
++    if (output.exists() or output.is_symlink()) and not args.force:
++        raise ArtifactError(
++            f"RenderProfile output already exists; pass --force to replace it: {output}",
++            code="voice_clone.output_exists",
++        )
++    source_path = args.voice_source or args.reference_wav
++    if (
++        source_path is not None
++        and output.resolve() == source_path.expanduser().resolve()
++    ):
++        raise ValueError(
++            "RenderProfile output must not overwrite its voice-source input"
++        )
++    speaker: str | int | None = args.speaker
++    if isinstance(speaker, str):
++        try:
++            numeric_speaker = int(speaker)
++        except ValueError:
++            pass
++        else:
++            if str(numeric_speaker) == speaker:
++                speaker = numeric_speaker
++    profile = clone_voice_profile(
++        VoiceCloneRequest(
++            engine=args.engine,
++            target_id=args.target,
++            language=args.language,
++            reference_wav=args.reference_wav,
++            voice_source=args.voice_source,
++            voicefolio_ref=args.voicefolio_ref,
++            transcript=args.transcript,
++            speaker=speaker,
++            options=_json_options(args.option),
++            offline=args.offline,
++            refresh=args.refresh,
++        ),
++        role=args.role,
++    )
++    saved = save_render_profile(profile, output)
++    return {"profile_id": profile.profile_id, "path": str(saved), "role": args.role}
++
++
+ def main(argv: list[str] | None = None) -> int:
+     parser = build_parser()
+     args = parser.parse_args(argv)
+@@ -702,24 +1055,202 @@ def main(argv: list[str] | None = None) -> int:
+                     else engine_payload
+                 )
+                 return 0
++            if args.engines_command == "options":
++                options = engine_options(args.engine, target_id=args.target)
++                rows = [engine_option_to_dict(option) for option in options]
++                if args.json:
++                    print(
++                        json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True)
++                    )
++                else:
++                    print("NAME\tTYPE\tREQUIRED\tDEFAULT\tCHOICES\tDESCRIPTION")
++                    for option in options:
++                        default = (
++                            "-"
++                            if option.default is None
++                            else _display_cli_value(option.default)
++                        )
++                        choices = (
++                            ", ".join(
++                                _display_cli_value(choice) for choice in option.choices
++                            )
++                            or "-"
++                        )
++                        print(
++                            f"{option.name}\t{option.value_type}\t"
++                            f"{str(option.required).lower()}\t{default}\t"
++                            f"{choices}\t{option.description}"
++                        )
++                return 0
++
++        if args.command == "models":
++            if args.models_command == "list":
++                models = list_models(
++                    args.engine,
++                    language=args.lang,
++                    installed=True
++                    if args.installed
++                    else False
++                    if args.available
++                    else None,
++                    offline=args.offline,
++                    refresh=args.refresh,
++                )
++                rows = [model_artifact_to_dict(model) for model in models]
++                if args.json:
++                    print(
++                        json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True)
++                    )
++                else:
++                    print("ENGINE\tTARGET\tSTATUS\tINSTALLED\tLANGUAGES\tQUALITIES")
++                    for model in models:
++                        print(
++                            f"{model.engine}\t{model.target_id}\t{model.status}\t"
++                            f"{str(model.installed).lower()}\t{', '.join(model.languages) or '-'}\t"
++                            f"{', '.join(model.qualities) or '-'}"
++                        )
++                return 0
++            if args.models_command == "inspect":
++                artifact = model_status(args.engine, args.target, quality=args.quality)
++                payload = model_artifact_to_dict(artifact)
++                if args.json:
++                    print(
++                        json.dumps(
++                            payload, ensure_ascii=False, indent=2, sort_keys=True
++                        )
++                    )
++                else:
++                    print(
++                        f"{artifact.engine}\t{artifact.target_id}\t{artifact.status}\t"
++                        f"installed={str(artifact.installed).lower()}\t"
++                        f"languages={','.join(artifact.languages) or '-'}\t"
++                        f"qualities={','.join(artifact.qualities) or '-'}"
++                    )
++                return 0
++            if args.models_command == "install":
++                result = install_model(
++                    ModelInstallRequest(
++                        args.engine,
++                        args.target,
++                        args.quality,
++                        args.source,
++                        args.cache_dir,
++                        args.force,
++                    )
++                )
++            elif args.models_command == "remove":
++                if not args.yes:
++                    raise ValueError("model removal requires --yes")
++                result = remove_model(
++                    ModelRemoveRequest(
++                        args.engine, args.target, args.quality, args.cache_dir
++                    )
++                )
++            else:
++                result = verify_model(
++                    args.engine,
++                    args.target,
++                    quality=args.quality,
++                    cache_dir=args.cache_dir,
++                )
++            payload = model_result_to_dict(result)
++            if args.json:
++                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
++            else:
++                operation = args.models_command
++                outcome = result.status
++                if hasattr(result, "changed"):
++                    outcome += f" changed={str(result.changed).lower()}"
++                elif isinstance(result, ModelVerifyResult):
++                    outcome += f" verified={str(result.verified).lower()}"
++                print(
++                    f"Model {operation} {result.engine}:{result.target_id}: {outcome}"
++                )
++                for diagnostic in result.diagnostics:
++                    print(f"diagnostic: {diagnostic}", file=sys.stderr)
++            if result.status == "unsupported":
++                return 2
++            if result.status in {"failed", "error"}:
++                return 1
++            if isinstance(result, ModelVerifyResult) and not result.verified:
++                return 1
++            return 0
+
+         if args.command == "voices":
+-            adapter = get_adapter(args.engine)
+-            targets = discover_targets(
+-                adapter.id, language=args.lang, offline=args.offline
++            if args.voices_command == "inspect":
++                descriptor = inspect_voice(args.selector, language=args.lang)
++                payload = voice_descriptor_to_dict(descriptor)
++                if args.json:
++                    print(
++                        json.dumps(
++                            payload, ensure_ascii=False, indent=2, sort_keys=True
++                        )
++                    )
++                else:
++                    print(
++                        f"{descriptor.selector}\t{descriptor.kind}\t"
++                        f"{','.join(descriptor.languages) or '-'}"
++                    )
++                return 0
++            descriptors = list_voices(
++                engine=args.engine,
++                target_id=args.target,
++                language=args.lang,
++                offline=args.offline,
++                refresh=args.refresh,
+             )
+-            target_payloads = [_target_payload(target) for target in targets]
++            if args.kind is not None:
++                descriptors = tuple(
++                    item for item in descriptors if item.kind == args.kind
++                )
++            rows = [voice_descriptor_to_dict(item) for item in descriptors]
+             if args.json:
+-                print(json.dumps(target_payloads, ensure_ascii=False, indent=2))
++                print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+             else:
+-                for target in target_payloads:
++                print("SELECTOR\tKIND\tLANGUAGES\tGENDER\tLOCALE\tINSTALLED")
++                for item in descriptors:
+                     print(
+-                        f"{target['target_id']}\t{', '.join(target['languages']) or '-'}\t"
+-                        f"{target['name']}\t{', '.join(target['voices'])}"
++                        f"{item.selector}\t{item.kind}\t{','.join(item.languages) or '-'}\t"
++                        f"{item.gender}\t{item.locale}\t{item.installed}"
+                     )
+             return 0
+
+         if args.command == "voice":
++            if args.voice_command == "source":
++                payload, exit_code = _voice_source_command(args)
++                if args.json:
++                    print(
++                        json.dumps(
++                            payload, ensure_ascii=False, indent=2, sort_keys=True
++                        )
++                    )
++                elif args.voice_source_command == "create":
++                    source = payload["voice_source"]
++                    digest = source.get("sha256")
++                    print(
++                        f"Voice source {source['kind']} -> {payload['path']} sha256={digest or '-'}"
++                    )
++                elif args.voice_source_command == "inspect":
++                    print(f"Voice source {payload['kind']} {payload['path']}")
++                else:
++                    print(
++                        f"Voice source {payload['path']}: {'valid' if payload['valid'] else 'invalid'}"
++                    )
++                    for item in payload["diagnostics"]:
++                        if item["severity"] == "error":
++                            print(f"diagnostic: {item['message']}", file=sys.stderr)
++                return exit_code
++            if args.voice_command == "clone":
++                payload = _voice_clone_command(args)
++                if args.json:
++                    print(
++                        json.dumps(
++                            payload, ensure_ascii=False, indent=2, sort_keys=True
++                        )
++                    )
++                else:
++                    print(f"RenderProfile {payload['profile_id']} -> {payload['path']}")
++                return 0
+             if args.voice_command == "design":
+                 recipe = Qwen3VoiceDesignRecipe(
+                     prompt=args.prompt,
+@@ -835,7 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
+                     "path": str(args.profile),
+                     "valid": True,
+                 }
+-            else:
++            elif args.profile_command == "refresh":
+                 if args.output.resolve() == args.profile.resolve():
+                     raise ValueError(
+                         "profile refresh output must not overwrite its source"
+@@ -843,12 +1374,112 @@ def main(argv: list[str] | None = None) -> int:
+                 profile = refresh_render_profile(load_render_profile(args.profile))
+                 output = save_render_profile(profile, args.output)
+                 payload = {"profile_id": profile.profile_id, "path": str(output)}
++            elif args.profile_command == "inspect":
++                profile = load_render_profile(args.profile)
++                payload = {
++                    "profile_id": profile.profile_id or profile.computed_id(),
++                    "default_role": profile.default_role,
++                    "roles": _profile_role_items(profile),
++                    "planning": profile.planning.to_dict(),
++                    "pauses": profile.pauses.to_dict(),
++                }
++            elif args.profile_command == "role":
++                if args.profile_role_command == "list":
++                    profile = load_render_profile(args.profile)
++                    payload = {
++                        "profile_id": profile.profile_id or profile.computed_id(),
++                        "default_role": profile.default_role,
++                        "roles": _profile_role_items(profile),
++                    }
++                else:
++                    destination = _profile_mutation_destination(args)
++                    if args.profile_role_command == "set":
++                        source_paths = (
++                            args.reference_wav,
++                            args.prepared_voice,
++                            args.voice_source,
++                        )
++                        if any(
++                            path is not None and destination.resolve() == path.resolve()
++                            for path in source_paths
++                        ):
++                            raise ValueError(
++                                "profile output must not overwrite a voice-source input"
++                            )
++                        voice_source = _profile_role_voice_source(args)
++                        profile = set_profile_role(
++                            args.profile,
++                            args.role,
++                            engine=args.engine,
++                            target_id=args.target,
++                            language=args.language,
++                            voice=args.voice,
++                            speaker=args.speaker,
++                            voice_source=voice_source,
++                            options=_json_options(args.option),
++                            offline=args.offline,
++                            refresh=args.refresh,
++                            make_default=args.make_default,
++                        )
++                    else:
++                        profile = remove_profile_role(
++                            args.profile,
++                            args.role,
++                            new_default_role=args.new_default_role,
++                        )
++                    output = save_render_profile(profile, destination)
++                    payload = {
++                        "profile_id": profile.profile_id,
++                        "default_role": profile.default_role,
++                        "roles": _profile_role_items(profile),
++                        "path": str(output),
++                    }
++            else:
++                destination = _profile_mutation_destination(args)
++                profile = set_default_profile_role(args.profile, args.role)
++                output = save_render_profile(profile, destination)
++                payload = {
++                    "profile_id": profile.profile_id,
++                    "default_role": profile.default_role,
++                    "path": str(output),
++                }
+             if args.json:
+-                print(json.dumps(payload, ensure_ascii=False, indent=2))
++                print(
++                    json.dumps(
++                        payload,
++                        ensure_ascii=False,
++                        indent=2,
++                        sort_keys=True,
++                    )
++                )
++            elif args.profile_command in {"inspect", "role"} and (
++                args.profile_command == "inspect" or args.profile_role_command == "list"
++            ):
++                print(
++                    f"RenderProfile {payload['profile_id']} "
++                    f"(default role: {payload['default_role']})"
++                )
++                _print_profile_role_items(payload["roles"])
++                if args.profile_command == "inspect":
++                    planning = payload["planning"]
++                    fallbacks = ", ".join(planning["capacity_fallback"]) or "none"
++                    print(
++                        f"Planning: split={planning['split']}; capacity fallback={fallbacks}"
++                    )
++                    pauses = payload["pauses"]
++                    durations = ", ".join(
++                        f"{key}={value}"
++                        for key, value in sorted(pauses.items())
++                        if key != "mode"
++                    )
++                    print(
++                        f"Pauses: mode={pauses['mode']}; durations={durations or 'none'}"
++                    )
++            elif "path" in payload:
++                print(f"RenderProfile {payload['profile_id']} -> {payload['path']}")
+             else:
+-                print(f"RenderProfile {payload['profile_id']} -> {payload.get('path')}")
++                print(f"RenderProfile {payload['profile_id']} is valid")
+             return 0
+-
+         if args.command == "preflight":
+             if args.output.resolve() == args.plan.resolve():
+                 raise ValueError(
+@@ -970,6 +1601,21 @@ def main(argv: list[str] | None = None) -> int:
+                 "exit_code": 1,
+             }
+             print(json.dumps(payload, ensure_ascii=False, indent=2))
++        elif getattr(args, "json", False) and (
++            args.command in {"engines", "models", "voices"}
++            or (
++                args.command == "profile"
++                and args.profile_command in {"inspect", "role", "default-role"}
++            )
++            or (args.command == "voice" and args.voice_command in {"source", "clone"})
++        ):
++            payload = {
++                "status": "error",
++                "error": str(exc),
++                "error_code": getattr(exc, "code", "input.invalid"),
++                "details": dict(getattr(exc, "details", {})),
++            }
++            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+         else:
+             print(f"error: {exc}", file=sys.stderr)
+         return 1
+diff --git a/voicerender/engines/assets.py b/voicerender/engines/assets.py
+new file mode 100644
+index 0000000..e260e03
+--- /dev/null
++++ b/voicerender/engines/assets.py
+@@ -0,0 +1,124 @@
++"""Optional engine-owned model and asset management contracts."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any, Protocol
++
++
++@dataclass(frozen=True, slots=True)
++class ModelArtifact:
++    engine: str
++    target_id: str
++    display_name: str
++    installed: bool
++    status: str
++    languages: tuple[str, ...] = ()
++    qualities: tuple[str, ...] = ()
++    installed_qualities: tuple[str, ...] = ()
++    source: str | None = None
++    revision: str | None = None
++    path: Path | None = None
++    metadata: Mapping[str, Any] = field(default_factory=dict)
++
++
++@dataclass(frozen=True, slots=True)
++class ModelManagementCapabilities:
++    can_list: bool = True
++    can_install: bool = False
++    can_remove: bool = False
++    can_verify: bool = False
++    supports_quality: bool = False
++    supports_source: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class ModelInstallRequest:
++    engine: str
++    target_id: str
++    quality: str | None = None
++    source: str | None = None
++    cache_dir: Path | None = None
++    force: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class ModelRemoveRequest:
++    engine: str
++    target_id: str
++    quality: str | None = None
++    cache_dir: Path | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class ModelInstallResult:
++    engine: str
++    target_id: str
++    status: str
++    changed: bool
++    diagnostics: tuple[str, ...] = ()
++    artifact: ModelArtifact | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class ModelRemoveResult:
++    engine: str
++    target_id: str
++    status: str
++    changed: bool
++    diagnostics: tuple[str, ...] = ()
++    artifact: ModelArtifact | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class ModelVerifyResult:
++    engine: str
++    target_id: str
++    status: str
++    verified: bool
++    diagnostics: tuple[str, ...] = ()
++    artifact: ModelArtifact | None = None
++
++
++class EngineAssetManager(Protocol):
++    """Optional public backend surface for managing engine model assets."""
++
++    def capabilities(self) -> ModelManagementCapabilities: ...
++
++    def list_models(
++        self,
++        *,
++        language: str | None = None,
++        offline: bool = False,
++        refresh: bool = False,
++    ) -> tuple[ModelArtifact, ...]: ...
++
++    def inspect_model(
++        self, target_id: str, *, quality: str | None = None
++    ) -> ModelArtifact: ...
++
++    def install_model(self, request: ModelInstallRequest) -> ModelInstallResult: ...
++
++    def remove_model(self, request: ModelRemoveRequest) -> ModelRemoveResult: ...
++
++    def verify_model(
++        self,
++        target_id: str,
++        *,
++        quality: str | None = None,
++        cache_dir: Path | None = None,
++    ) -> ModelVerifyResult: ...
++
++
++__all__ = [
++    "EngineAssetManager",
++    "ModelArtifact",
++    "ModelInstallRequest",
++    "ModelInstallResult",
++    "ModelManagementCapabilities",
++    "ModelRemoveRequest",
++    "ModelRemoveResult",
++    "ModelVerifyResult",
++]
+diff --git a/voicerender/engines/base.py b/voicerender/engines/base.py
+index aa7e705..a1d6c6b 100644
+--- a/voicerender/engines/base.py
++++ b/voicerender/engines/base.py
+@@ -163,6 +163,22 @@ class EngineCapabilities:
+     supports_synthesis_request: bool = False
+
+
++@dataclass(frozen=True, slots=True)
++class EngineOption:
++    """Normalized metadata for one engine-accepted setting."""
++
++    name: str
++    value_type: str
++    required: bool = False
++    default: Any = None
++    choices: tuple[Any, ...] = ()
++    minimum: int | float | None = None
++    maximum: int | float | None = None
++    description: str = ""
++    identity_affecting: bool = True
++    runtime_only: bool = False
++
++
+ @dataclass(frozen=True, slots=True)
+ class EngineDiagnostic:
+     """Stable, machine-readable adapter selection or capability diagnostic."""
+@@ -444,6 +460,7 @@ __all__ = [
+     "EngineAdapter",
+     "EngineCapabilities",
+     "EngineDiagnostic",
++    "EngineOption",
+     "EngineSelection",
+     "EngineSession",
+     "PronunciationSpan",
+diff --git a/voicerender/engines/options.py b/voicerender/engines/options.py
+new file mode 100644
+index 0000000..5a91d20
+--- /dev/null
++++ b/voicerender/engines/options.py
+@@ -0,0 +1,52 @@
++"""Normalized introspection for adapter-accepted engine options."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import asdict
++from typing import Any
++
++from .base import EngineOption
++from .registry import get_adapter
++
++
++def engine_options(
++    engine: str, *, target_id: str | None = None
++) -> tuple[EngineOption, ...]:
++    """Describe every option an adapter currently accepts.
++
++    Adapters may expose richer metadata through an ``option_descriptors`` mapping or
++    callable. Missing metadata is represented with ``value_type='unknown'`` so
++    introspection remains complete without weakening adapter validation.
++    """
++    adapter = get_adapter(engine)
++    capabilities = adapter.capabilities()
++    accepted = set(capabilities.option_names) | set(capabilities.options)
++    raw = getattr(adapter, "option_descriptors", None)
++    if callable(raw):
++        raw = raw(target_id=target_id)
++    descriptors: dict[str, EngineOption] = {}
++    if isinstance(raw, Mapping):
++        entries = raw.items()
++    elif raw is not None:
++        entries = ((item.name, item) for item in raw)
++    else:
++        entries = ()
++    for name, value in entries:
++        if isinstance(value, EngineOption):
++            descriptors[name] = value
++        elif isinstance(value, Mapping):
++            descriptors[name] = EngineOption(name=name, **dict(value))
++    for name in accepted:
++        descriptors.setdefault(name, EngineOption(name=name, value_type="unknown"))
++    return tuple(descriptors[name] for name in sorted(descriptors))
++
++
++def engine_option_to_dict(option: EngineOption) -> dict[str, Any]:
++    """Return the stable JSON form of an option descriptor."""
++    value = asdict(option)
++    value["choices"] = list(option.choices)
++    return value
++
++
++__all__ = ["engine_option_to_dict", "engine_options"]
+diff --git a/voicerender/engines/registry.py b/voicerender/engines/registry.py
+index 1137363..7633f03 100644
+--- a/voicerender/engines/registry.py
++++ b/voicerender/engines/registry.py
+@@ -14,6 +14,7 @@ from ..errors import (
+     EngineUnavailableError,
+     ProfileError,
+ )
++from .assets import EngineAssetManager
+ from .base import (
+     EngineAdapter,
+     EngineSelection,
+@@ -71,6 +72,8 @@ _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
+ }
+ _ADAPTERS: dict[str, EngineAdapter] = {}
+
++_ASSET_MANAGERS: dict[str, EngineAssetManager] = {}
++
+
+ def normalize_engine_id(engine: str) -> str:
+     """Normalize a public engine identifier without importing its SDK."""
+@@ -101,6 +104,34 @@ def register_adapter(adapter: EngineAdapter) -> None:
+     _ADAPTERS[engine_id] = adapter
+
+
++def register_asset_manager(engine: str, manager: EngineAssetManager) -> None:
++    """Register optional model management independently of synthesis adapters."""
++    engine_id = normalize_engine_id(engine)
++    if engine_id not in _ENGINE_MODULES and engine_id not in _ADAPTERS:
++        raise ProfileError(
++            f"Cannot register asset manager for unknown engine {engine!r}"
++        )
++    required = (
++        "capabilities",
++        "list_models",
++        "inspect_model",
++        "install_model",
++        "remove_model",
++        "verify_model",
++    )
++    missing = [name for name in required if not callable(getattr(manager, name, None))]
++    if missing:
++        raise ProfileError(
++            f"Asset manager for engine {engine_id!r} is missing methods: {', '.join(missing)}"
++        )
++    _ASSET_MANAGERS[engine_id] = manager
++
++
++def get_asset_manager(engine: str) -> EngineAssetManager | None:
++    """Return an engine's optional asset manager without loading its SDK."""
++    return _ASSET_MANAGERS.get(normalize_engine_id(engine))
++
++
+ def get_adapter(engine: str) -> EngineAdapter:
+     """Return a request-centric adapter, importing its implementation lazily."""
+     engine_id = normalize_engine_id(engine)
+@@ -332,10 +363,12 @@ __all__ = [
+     "discover_targets",
+     "engine_status",
+     "get_adapter",
++    "get_asset_manager",
+     "list_engines",
+     "normalize_engine_id",
+     "open_session",
+     "register_adapter",
++    "register_asset_manager",
+     "resolve_voice",
+     "synthesize",
+ ]
+diff --git a/voicerender/models_api.py b/voicerender/models_api.py
+new file mode 100644
+index 0000000..324be2e
+--- /dev/null
++++ b/voicerender/models_api.py
+@@ -0,0 +1,289 @@
++"""Public model management API for VoiceRender engines."""
++
++from __future__ import annotations
++
++from dataclasses import asdict
++from pathlib import Path
++from typing import Any
++
++from .engines.assets import (
++    ModelArtifact,
++    ModelInstallRequest,
++    ModelInstallResult,
++    ModelManagementCapabilities,
++    ModelRemoveRequest,
++    ModelRemoveResult,
++    ModelVerifyResult,
++)
++from .engines.registry import discover_targets, get_asset_manager, normalize_engine_id
++from .errors import ProfileError
++
++
++def _unsupported(engine: str, operation: str, target_id: str) -> str:
++    return (
++        f"Engine {engine!r} does not support model {operation} for target {target_id!r}"
++    )
++
++
++def _capabilities(
++    engine: str,
++) -> tuple[Any, ModelManagementCapabilities] | tuple[None, ModelManagementCapabilities]:
++    manager = get_asset_manager(engine)
++    if manager is None:
++        return None, ModelManagementCapabilities()
++    capabilities = manager.capabilities()
++    return manager, capabilities
++
++
++def _from_target(target: Any) -> ModelArtifact:
++    installed = bool(target.runtime_available)
++    metadata = dict(target.metadata)
++    source = metadata.get("source")
++    revision = metadata.get("revision", metadata.get("source_revision"))
++    path = metadata.get("path")
++    return ModelArtifact(
++        engine=target.engine,
++        target_id=target.id,
++        display_name=target.display_name,
++        installed=installed,
++        status=target.status,
++        languages=tuple(target.languages),
++        qualities=tuple(target.qualities),
++        installed_qualities=tuple(target.qualities) if installed else (),
++        source=str(source) if source is not None else None,
++        revision=str(revision) if revision is not None else None,
++        path=Path(path) if isinstance(path, (str, Path)) else None,
++        metadata=metadata,
++    )
++
++
++def list_models(
++    engine: str,
++    *,
++    language: str | None = None,
++    installed: bool | None = None,
++    offline: bool = False,
++    refresh: bool = False,
++) -> tuple[ModelArtifact, ...]:
++    """List model artifacts without opening a synthesis runtime."""
++    engine_id = normalize_engine_id(engine)
++    manager, capabilities = _capabilities(engine_id)
++    if manager is not None and capabilities.can_list:
++        models = tuple(
++            manager.list_models(language=language, offline=offline, refresh=refresh)
++        )
++    else:
++        models = tuple(
++            _from_target(target)
++            for target in discover_targets(
++                engine_id, language=language, offline=offline, refresh=refresh
++            )
++        )
++    selected = (
++        model for model in models if installed is None or model.installed is installed
++    )
++    return tuple(sorted(selected, key=lambda model: (model.engine, model.target_id)))
++
++
++def model_status(
++    engine: str, target_id: str, *, quality: str | None = None
++) -> ModelArtifact:
++    """Inspect one target using its manager or side-effect-free target discovery."""
++    engine_id = normalize_engine_id(engine)
++    if not target_id.strip():
++        raise ProfileError("A model target identifier is required")
++    manager, capabilities = _capabilities(engine_id)
++    if manager is not None and capabilities.can_list:
++        model = manager.inspect_model(target_id, quality=quality)
++        if model.engine != engine_id or model.target_id != target_id:
++            raise ProfileError(
++                f"Engine {engine_id!r} returned a mismatched model artifact"
++            )
++        return model
++    for model in list_models(engine_id):
++        if model.target_id == target_id:
++            if quality is not None and quality not in model.qualities:
++                raise ProfileError(
++                    f"Engine {engine_id!r} target {target_id!r} does not provide quality {quality!r}"
++                )
++            return model
++    raise ProfileError(f"Engine {engine_id!r} has no model target {target_id!r}")
++
++
++def install_model(request: ModelInstallRequest) -> ModelInstallResult:
++    """Install a model through the engine's optional public asset manager."""
++    engine_id = normalize_engine_id(request.engine)
++    manager, capabilities = _capabilities(engine_id)
++    if manager is None or not capabilities.can_install:
++        return ModelInstallResult(
++            engine_id,
++            request.target_id,
++            "unsupported",
++            False,
++            (_unsupported(engine_id, "install", request.target_id),),
++        )
++    if request.quality is not None and not capabilities.supports_quality:
++        return ModelInstallResult(
++            engine_id,
++            request.target_id,
++            "unsupported",
++            False,
++            (
++                f"Engine {engine_id!r} does not support quality selection for model install",
++            ),
++        )
++    if request.source is not None and not capabilities.supports_source:
++        return ModelInstallResult(
++            engine_id,
++            request.target_id,
++            "unsupported",
++            False,
++            (
++                f"Engine {engine_id!r} does not support source selection for model install",
++            ),
++        )
++    normalized = ModelInstallRequest(
++        engine_id,
++        request.target_id,
++        request.quality,
++        request.source,
++        request.cache_dir,
++        request.force,
++    )
++    try:
++        return manager.install_model(normalized)
++    except Exception as exc:  # noqa: BLE001 - Backend failures become stable results.
++        return ModelInstallResult(
++            engine_id,
++            request.target_id,
++            "failed",
++            False,
++            (f"Engine {engine_id!r} model install failed: {exc}",),
++        )
++
++
++def remove_model(request: ModelRemoveRequest) -> ModelRemoveResult:
++    """Remove a model through the engine's optional public asset manager."""
++    engine_id = normalize_engine_id(request.engine)
++    manager, capabilities = _capabilities(engine_id)
++    if manager is None or not capabilities.can_remove:
++        return ModelRemoveResult(
++            engine_id,
++            request.target_id,
++            "unsupported",
++            False,
++            (_unsupported(engine_id, "remove", request.target_id),),
++        )
++    if request.quality is not None and not capabilities.supports_quality:
++        return ModelRemoveResult(
++            engine_id,
++            request.target_id,
++            "unsupported",
++            False,
++            (
++                f"Engine {engine_id!r} does not support quality selection for model removal",
++            ),
++        )
++    try:
++        return manager.remove_model(
++            ModelRemoveRequest(
++                engine_id, request.target_id, request.quality, request.cache_dir
++            )
++        )
++    except Exception as exc:  # noqa: BLE001 - Backend failures become stable results.
++        return ModelRemoveResult(
++            engine_id,
++            request.target_id,
++            "failed",
++            False,
++            (f"Engine {engine_id!r} model remove failed: {exc}",),
++        )
++
++
++def verify_model(
++    engine: str,
++    target_id: str,
++    *,
++    quality: str | None = None,
++    cache_dir: Path | None = None,
++) -> ModelVerifyResult:
++    """Verify an installed model through the engine's optional public API."""
++    engine_id = normalize_engine_id(engine)
++    manager, capabilities = _capabilities(engine_id)
++    if manager is None or not capabilities.can_verify:
++        return ModelVerifyResult(
++            engine_id,
++            target_id,
++            "unsupported",
++            False,
++            (_unsupported(engine_id, "verify", target_id),),
++        )
++    if quality is not None and not capabilities.supports_quality:
++        return ModelVerifyResult(
++            engine_id,
++            target_id,
++            "unsupported",
++            False,
++            (
++                f"Engine {engine_id!r} does not support quality selection for model verify",
++            ),
++        )
++    try:
++        return manager.verify_model(target_id, quality=quality, cache_dir=cache_dir)
++    except Exception as exc:  # noqa: BLE001 - Backend failures become stable results.
++        return ModelVerifyResult(
++            engine_id,
++            target_id,
++            "failed",
++            False,
++            (f"Engine {engine_id!r} model verify failed: {exc}",),
++        )
++
++
++def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
++    """Return the stable JSON representation of a model artifact."""
++    value = asdict(model)
++    value["path"] = str(model.path) if model.path is not None else None
++    value["languages"] = list(model.languages)
++    value["qualities"] = list(model.qualities)
++    value["installed_qualities"] = list(model.installed_qualities)
++    value["metadata"] = dict(model.metadata)
++    return value
++
++
++def model_result_to_dict(
++    result: ModelInstallResult | ModelRemoveResult | ModelVerifyResult,
++) -> dict[str, Any]:
++    """Return a stable JSON representation shared by model operations."""
++    value: dict[str, Any] = {
++        "engine": result.engine,
++        "target_id": result.target_id,
++        "status": result.status,
++        "diagnostics": list(result.diagnostics),
++    }
++    if isinstance(result, ModelVerifyResult):
++        value["verified"] = result.verified
++    else:
++        value["changed"] = result.changed
++    value["artifact"] = (
++        model_artifact_to_dict(result.artifact) if result.artifact is not None else None
++    )
++    return value
++
++
++__all__ = [
++    "ModelArtifact",
++    "ModelInstallRequest",
++    "ModelInstallResult",
++    "ModelManagementCapabilities",
++    "ModelRemoveRequest",
++    "ModelRemoveResult",
++    "ModelVerifyResult",
++    "install_model",
++    "list_models",
++    "model_artifact_to_dict",
++    "model_result_to_dict",
++    "model_status",
++    "remove_model",
++    "verify_model",
++]
+diff --git a/voicerender/profile_roles.py b/voicerender/profile_roles.py
+new file mode 100644
+index 0000000..c119d8e
+--- /dev/null
++++ b/voicerender/profile_roles.py
+@@ -0,0 +1,122 @@
++"""Public APIs for inspecting and mutating shared RenderProfile roles."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import replace
++from pathlib import Path
++from typing import Any
++
++from renderplan import RenderProfile, RoleProfile
++
++from .errors import ProfileError
++from .renderprofile import create_render_profile, load_render_profile
++
++
++def list_profile_roles(
++    profile: str | Path | RenderProfile,
++) -> Mapping[str, RoleProfile]:
++    """Return the profile's role bindings without changing their semantics."""
++    return load_render_profile(profile).roles
++
++
++def set_profile_role(
++    profile: str | Path | RenderProfile,
++    role: str,
++    *,
++    engine: str,
++    target_id: str,
++    language: str,
++    voice: str | None = None,
++    speaker: str | int | None = None,
++    voice_source: Mapping[str, Any] | None = None,
++    options: Mapping[str, Any] | None = None,
++    offline: bool = False,
++    refresh: bool = False,
++    make_default: bool = False,
++) -> RenderProfile:
++    """Add or replace a role using freshly resolved engine-derived facts."""
++    _validate_role_name(role)
++    original = load_render_profile(profile)
++    proposed = create_render_profile(
++        engine=engine,
++        target_id=target_id,
++        language=language,
++        role=role,
++        voice=voice,
++        speaker=speaker,
++        voice_source=voice_source,
++        options=options,
++        offline=offline,
++        refresh=refresh,
++    )
++    roles = dict(original.roles)
++    roles[role] = proposed.roles[role]
++    default_role = role if make_default else original.default_role
++    return replace(
++        original,
++        roles=roles,
++        default_role=default_role,
++        profile_id=None,
++    ).with_identity()
++
++
++def remove_profile_role(
++    profile: str | Path | RenderProfile,
++    role: str,
++    *,
++    new_default_role: str | None = None,
++) -> RenderProfile:
++    """Remove a role, requiring an explicit replacement for the current default."""
++    _validate_role_name(role)
++    original = load_render_profile(profile)
++    if role not in original.roles:
++        raise ProfileError(f"RenderProfile has no role {role!r}")
++    if len(original.roles) == 1:
++        raise ProfileError("Cannot remove the final RenderProfile role")
++    if role == original.default_role and new_default_role is None:
++        raise ProfileError("Removing the default role requires --new-default-role")
++
++    roles = dict(original.roles)
++    del roles[role]
++    default_role = original.default_role
++    if new_default_role is not None:
++        _validate_role_name(new_default_role)
++        if new_default_role not in roles:
++            raise ProfileError(
++                f"New default role {new_default_role!r} is not present after removal"
++            )
++        default_role = new_default_role
++    return replace(
++        original,
++        roles=roles,
++        default_role=default_role,
++        profile_id=None,
++    ).with_identity()
++
++
++def set_default_profile_role(
++    profile: str | Path | RenderProfile,
++    role: str,
++) -> RenderProfile:
++    """Set the default role and recompute the profile's content identity."""
++    _validate_role_name(role)
++    original = load_render_profile(profile)
++    if role not in original.roles:
++        raise ProfileError(f"RenderProfile has no role {role!r}")
++    if role == original.default_role:
++        return original
++    return replace(original, default_role=role, profile_id=None).with_identity()
++
++
++def _validate_role_name(role: str) -> None:
++    if not isinstance(role, str) or not role.strip():
++        raise ProfileError("Profile role name must not be empty")
++
++
++__all__ = [
++    "list_profile_roles",
++    "remove_profile_role",
++    "set_default_profile_role",
++    "set_profile_role",
++]
+diff --git a/voicerender/storage.py b/voicerender/storage.py
+index cb8bca8..e99dcf4 100644
+--- a/voicerender/storage.py
++++ b/voicerender/storage.py
+@@ -5,6 +5,8 @@ from __future__ import annotations
+ import hashlib
+ import json
+ import os
++import shutil
++import stat
+ import tempfile
+ from pathlib import Path
+ from typing import Any
+@@ -35,6 +37,33 @@ def file_hash(path: Path) -> str:
+     return h.hexdigest()
+
+
++def install_file_no_replace(source: Path, destination: Path) -> None:
++    """Install without replacement, using hard links when available.
++
++    Platforms without ``os.link`` use an exclusive destination and byte copy. This
++    preserves no-overwrite behavior, though readers may observe the in-progress copy.
++    """
++    link = getattr(os, "link", None)
++    if callable(link):
++        link(source, destination)
++        return
++
++    mode = stat.S_IMODE(source.stat().st_mode)
++    descriptor = os.open(
++        destination,
++        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
++        mode,
++    )
++    try:
++        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_stream:
++            shutil.copyfileobj(input_stream, output)
++            output.flush()
++            os.fsync(output.fileno())
++    except BaseException:
++        destination.unlink(missing_ok=True)
++        raise
++
++
+ def atomic_json(path: Path, value: Any) -> None:
+     path.parent.mkdir(parents=True, exist_ok=True)
+     fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
+diff --git a/voicerender/voice_clone.py b/voicerender/voice_clone.py
+new file mode 100644
+index 0000000..0b5e5a4
+--- /dev/null
++++ b/voicerender/voice_clone.py
+@@ -0,0 +1,166 @@
++"""Reusable reference-voice cloning through normal RenderProfile bindings."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any
++
++from renderplan import RenderProfile
++
++from .engines.registry import discover_targets, get_adapter
++from .errors import EngineSelectionError, ProfileError
++from .renderprofile import create_render_profile
++from .voice_source_codec import load_voice_source
++from .voice_sources import (
++    VoiceSource,
++    create_voice_source,
++    normalize_voice_source,
++    validate_voice_source,
++)
++
++
++@dataclass(frozen=True, slots=True)
++class VoiceCloneRequest:
++    engine: str
++    target_id: str
++    language: str
++    reference_wav: Path | None = None
++    voice_source: Path | Mapping[str, Any] | None = None
++    voicefolio_ref: str | None = None
++    transcript: str | None = None
++    speaker: str | int | None = None
++    options: Mapping[str, Any] = field(default_factory=dict)
++    offline: bool = False
++    refresh: bool = False
++
++
++def _source_for_request(request: VoiceCloneRequest) -> VoiceSource:
++    selected = sum(
++        value is not None
++        for value in (
++            request.reference_wav,
++            request.voice_source,
++            request.voicefolio_ref,
++        )
++    )
++    if selected != 1:
++        raise ProfileError(
++            "Exactly one of reference_wav, voice_source, or voicefolio_ref must be provided"
++        )
++    if request.reference_wav is not None:
++        return create_voice_source(
++            reference_wav=request.reference_wav,
++            transcript=request.transcript,
++            language=request.language,
++        )
++    if request.voicefolio_ref is not None:
++        return create_voice_source(
++            voicefolio_ref=request.voicefolio_ref,
++            transcript=request.transcript,
++            language=request.language,
++        )
++    source_value = request.voice_source
++    if isinstance(source_value, (Path, str)):
++        source_value = load_voice_source(source_value)
++    if isinstance(source_value, VoiceSource):
++        source_value = source_value.as_mapping()
++    if not isinstance(source_value, Mapping):
++        raise ProfileError("voice_source must be a source mapping or sidecar path")
++    source = normalize_voice_source(source_value, allow_named=False)
++    if request.transcript is not None:
++        metadata = dict(source.metadata)
++        metadata["transcript"] = request.transcript
++        source = normalize_voice_source(
++            {**source.as_mapping(), "metadata": metadata}, allow_named=False
++        )
++    return source
++
++
++def clone_voice_profile(
++    request: VoiceCloneRequest,
++    *,
++    role: str = "narrator",
++) -> RenderProfile:
++    """Validate a reference binding and return a reusable RenderProfile."""
++    if (
++        not request.engine.strip()
++        or not request.target_id.strip()
++        or not request.language.strip()
++    ):
++        raise ProfileError(
++            "Voice clone requires non-empty engine, target_id, and language"
++        )
++    source = _source_for_request(request)
++    if source.kind not in {"reference", "managed_reference"}:
++        raise ProfileError(
++            "Generic voice clone requires a reference or managed-reference source"
++        )
++    diagnostics = validate_voice_source(source, offline=request.offline)
++    errors = [item for item in diagnostics if item.severity == "error"]
++    if errors:
++        raise ProfileError(errors[0].message)
++
++    targets = discover_targets(
++        request.engine,
++        language=request.language,
++        offline=request.offline,
++        refresh=request.refresh,
++    )
++    target = next((item for item in targets if item.id == request.target_id), None)
++    if target is None:
++        raise ProfileError(
++            f"Engine {request.engine!r} does not expose target {request.target_id!r}"
++        )
++    adapter = get_adapter(request.engine)
++    engine_supports_reference = adapter.capabilities().supports_reference_voice
++    target_supports_reference = "reference_voice" in target.capabilities
++    if not engine_supports_reference and not target_supports_reference:
++        raise EngineSelectionError(
++            f"Engine {adapter.id!r} target {request.target_id!r} does not support reference voices",
++            engine=adapter.id,
++            target_id=request.target_id,
++            code="voice_clone.reference_unsupported",
++        )
++
++    options = dict(request.options)
++    if "voice_source" in options:
++        raise ProfileError(
++            "voice_source is selected by the clone request and cannot be overridden"
++        )
++    source_transcript = source.metadata.get("transcript")
++    if source_transcript is None and source.origin is not None:
++        source_transcript = source.origin.get("reference_text")
++    transcript = (
++        request.transcript if request.transcript is not None else source_transcript
++    )
++    accepted_options = set(adapter.capabilities().option_names) | set(
++        adapter.capabilities().options
++    )
++    transcript_option = next(
++        (name for name in ("reference_text", "transcript") if name in accepted_options),
++        None,
++    )
++    if transcript is not None and transcript_option is not None:
++        existing = options.get(transcript_option)
++        if existing is not None and existing != transcript:
++            raise ProfileError(
++                f"Conflicting transcript supplied in options.{transcript_option} and clone request"
++            )
++        options[transcript_option] = transcript
++
++    return create_render_profile(
++        engine=request.engine,
++        target_id=request.target_id,
++        language=request.language,
++        role=role,
++        speaker=request.speaker,
++        voice_source=source.as_mapping(),
++        options=options,
++        offline=request.offline,
++        refresh=request.refresh,
++    )
++
++
++__all__ = ["VoiceCloneRequest", "clone_voice_profile"]
+diff --git a/voicerender/voice_design.py b/voicerender/voice_design.py
+index 357b853..e29bcc1 100644
+--- a/voicerender/voice_design.py
++++ b/voicerender/voice_design.py
+@@ -22,7 +22,7 @@ from .errors import (
+     InvalidEngineOptionError,
+     UnsupportedSynthesisFeatureError,
+ )
+-from .storage import atomic_wav, file_hash
++from .storage import atomic_wav, file_hash, install_file_no_replace
+ from .voice_source_codec import save_voice_source
+ from .voice_sources import local_reference_source, normalize_voice_source
+
+@@ -299,7 +299,7 @@ def design_qwen3_reference(
+             os.replace(temporary_path, target)
+         else:
+             try:
+-                os.link(temporary_path, target)
++                install_file_no_replace(temporary_path, target)
+             except FileExistsError as exc:
+                 raise ArtifactError(
+                     f"VoiceDesign output appeared during generation: {target}",
+diff --git a/voicerender/voice_source_codec.py b/voicerender/voice_source_codec.py
+index 37f1a6e..22209eb 100644
+--- a/voicerender/voice_source_codec.py
++++ b/voicerender/voice_source_codec.py
+@@ -48,9 +48,9 @@ def _validated_source(source: Mapping[str, Any]) -> dict[str, Any]:
+             code=getattr(exc, "code", "voice_source.sidecar_invalid"),
+             details=getattr(exc, "details", {}),
+         ) from exc
+-    if normalized.kind not in {"reference", "prepared"}:
++    if normalized.kind not in {"reference", "managed_reference", "prepared"}:
+         raise InvalidEngineVoiceError(
+-            "Voice-source sidecars require a local reference or prepared voice",
++            "Voice-source sidecars require a local, managed, or prepared voice source",
+             code="voice_source.sidecar_invalid",
+         )
+     diagnostics = validate_voice_source(normalized)
+@@ -65,13 +65,12 @@ def _validated_source(source: Mapping[str, Any]) -> dict[str, Any]:
+
+
+ def _toml_value(value: Any) -> str:
+-    if isinstance(value, (list, tuple)) and all(
+-        isinstance(item, str) for item in value
+-    ):
+-        return (
+-            "["
+-            + ", ".join(json.dumps(item, ensure_ascii=False) for item in value)
+-            + "]"
++    if isinstance(value, (list, tuple)):
++        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
++    if isinstance(value, Mapping):
++        raise InvalidEngineVoiceError(
++            "Nested voice-source metadata must be encoded as a TOML table",
++            code="voice_source.sidecar_invalid",
+         )
+     if isinstance(value, str):
+         return json.dumps(value, ensure_ascii=False)
+@@ -87,6 +86,31 @@ def _toml_value(value: Any) -> str:
+     )
+
+
++def _toml_key(name: str) -> str:
++    if name and all(char.isalnum() or char in "_-" for char in name):
++        return name
++    return json.dumps(name, ensure_ascii=False)
++
++
++def _serialize_metadata_table(
++    lines: list[str], table: tuple[str, ...], metadata: Mapping[str, Any]
++) -> None:
++    lines.extend(("", "[" + ".".join(_toml_key(item) for item in table) + "]"))
++    nested: list[tuple[str, Mapping[str, Any]]] = []
++    for name, value in sorted(metadata.items()):
++        if not isinstance(name, str):
++            raise InvalidEngineVoiceError(
++                "Voice-source metadata keys must be strings",
++                code="voice_source.sidecar_invalid",
++            )
++        if isinstance(value, Mapping):
++            nested.append((name, value))
++        else:
++            lines.append(f"{_toml_key(name)} = {_toml_value(value)}")
++    for name, value in nested:
++        _serialize_metadata_table(lines, (*table, name), value)
++
++
+ def _serialize(source: Mapping[str, Any]) -> str:
+     lines = [
+         f"format = {_toml_value(VOICE_SOURCE_FORMAT)}",
+@@ -118,6 +142,14 @@ def _serialize(source: Mapping[str, Any]) -> str:
+             lines.extend(("", "[voice_source.origin.runtime_identity]"))
+             for name, value in runtime_identity.items():
+                 lines.append(f"{name} = {_toml_value(value)}")
++    metadata = source.get("metadata")
++    if metadata:
++        if not isinstance(metadata, Mapping):
++            raise InvalidEngineVoiceError(
++                "voice_source.metadata must be a table",
++                code="voice_source.sidecar_invalid",
++            )
++        _serialize_metadata_table(lines, ("voice_source", "metadata"), metadata)
+     return "\n".join(lines) + "\n"
+
+
+diff --git a/voicerender/voice_sources.py b/voicerender/voice_sources.py
+index c8d9ae8..c7064d6 100644
+--- a/voicerender/voice_sources.py
++++ b/voicerender/voice_sources.py
+@@ -7,7 +7,7 @@ import math
+ import re
+ import warnings
+ from collections.abc import Iterable, Mapping
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Any, Literal
+
+@@ -75,6 +75,7 @@ class VoiceSource:
+     model_revision: str | None = None
+     layout: str | None = None
+     origin: Mapping[str, Any] | None = None
++    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+     def as_mapping(self) -> dict[str, Any]:
+         result: dict[str, Any] = {"kind": self.kind, "value": self.value}
+@@ -97,6 +98,8 @@ class VoiceSource:
+                 result[name] = value
+         if self.origin is not None:
+             result["origin"] = dict(self.origin)
++        if self.metadata:
++            result["metadata"] = dict(self.metadata)
+         return result
+
+
+@@ -338,6 +341,14 @@ def normalize_voice_source(
+             "voice_source.invalid", "voice_source field names must be strings"
+         )
+
++    raw_metadata = source.get("metadata", {})
++    if not isinstance(raw_metadata, Mapping) or any(
++        not isinstance(key, str) for key in raw_metadata
++    ):
++        raise _voice_error(
++            "voice_source.invalid", "voice_source.metadata must be a string-keyed table"
++        )
++    source_metadata = dict(raw_metadata)
+     kind = source.get("kind")
+     value = source.get("value", source.get("path"))
+     if not isinstance(value, str) or not value.strip():
+@@ -360,7 +371,7 @@ def normalize_voice_source(
+                 "voice_source.invalid",
+                 "This engine does not accept named voice sources",
+             )
+-        return VoiceSource(kind="named", value=value)
++        return VoiceSource(kind="named", value=value, metadata=source_metadata)
+
+     sha256 = source.get("sha256")
+     if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+@@ -371,7 +382,7 @@ def normalize_voice_source(
+         )
+
+     if kind == "reference":
+-        allowed = {"kind", "value", "path", "sha256", "origin"}
++        allowed = {"kind", "value", "path", "sha256", "origin", "metadata"}
+         unknown = sorted(set(source) - allowed - set(_MANAGED_FIELDS))
+         if unknown:
+             raise _voice_error(
+@@ -400,7 +411,13 @@ def normalize_voice_source(
+             )
+         raw_origin = source.get("origin")
+         origin = _normalize_qwen_origin(raw_origin) if raw_origin is not None else None
+-        return VoiceSource(kind="reference", value=value, sha256=sha256, origin=origin)
++        return VoiceSource(
++            kind="reference",
++            value=value,
++            sha256=sha256,
++            origin=origin,
++            metadata=source_metadata,
++        )
+
+     if kind == "prepared":
+         allowed = {
+@@ -412,6 +429,7 @@ def normalize_voice_source(
+             "model_id",
+             "model_revision",
+             "layout",
++            "metadata",
+         }
+         unknown = sorted(set(source) - allowed)
+         if unknown:
+@@ -452,9 +470,10 @@ def normalize_voice_source(
+             model_id=metadata["model_id"],
+             model_revision=metadata["model_revision"],
+             layout=metadata["layout"],
++            metadata=source_metadata,
+         )
+
+-    allowed = {"kind", "value", "path", "sha256", *_MANAGED_FIELDS}
++    allowed = {"kind", "value", "path", "sha256", *_MANAGED_FIELDS, "metadata"}
+     unknown = sorted(set(source) - allowed)
+     if unknown:
+         raise _voice_error(
+@@ -515,6 +534,7 @@ def normalize_voice_source(
+         license=fields["license"],
+         dataset=fields["dataset"],
+         variant=fields["variant"],
++        metadata=source_metadata,
+     )
+
+
+@@ -622,6 +642,54 @@ def managed_reference_source(
+         ) from exc
+
+
++def create_voice_source(
++    *,
++    reference_wav: str | Path | None = None,
++    voicefolio_ref: str | None = None,
++    transcript: str | None = None,
++    language: str | None = None,
++    name: str | None = None,
++    metadata: Mapping[str, Any] | None = None,
++) -> VoiceSource:
++    """Create a pinned local or Voicefolio source with descriptive metadata."""
++    if (reference_wav is None) == (voicefolio_ref is None):
++        raise _voice_error(
++            "voice_source.selection_invalid",
++            "Exactly one of reference_wav or voicefolio_ref must be provided",
++        )
++    source: dict[str, Any]
++    if reference_wav is not None:
++        source = dict(local_reference_source(reference_wav))
++    else:
++        source = dict(managed_reference_source(str(voicefolio_ref)))
++    source_metadata = dict(metadata or {})
++    if any(not isinstance(key, str) or not key for key in source_metadata):
++        raise _voice_error(
++            "voice_source.metadata_invalid", "Metadata keys must be non-empty strings"
++        )
++    for key, value in (
++        ("name", name),
++        ("language", language),
++        ("transcript", transcript),
++    ):
++        if value is None:
++            continue
++        if not isinstance(value, str) or not value.strip():
++            raise _voice_error(
++                "voice_source.metadata_invalid",
++                f"Voice-source {key} must be a non-empty string when provided",
++            )
++        if key in source_metadata and source_metadata[key] != value:
++            raise _voice_error(
++                "voice_source.metadata_invalid",
++                f"Voice-source {key} was provided twice with different values",
++            )
++        source_metadata[key] = value
++    if source_metadata:
++        source["metadata"] = source_metadata
++    return normalize_voice_source(source)
++
++
+ def validate_voice_source(
+     source: VoiceSource | Mapping[str, Any],
+     *,
+@@ -876,6 +944,7 @@ __all__ = [
+     "ResolvedReferenceAudio",
+     "VoiceSource",
+     "VoiceSourceKind",
++    "create_voice_source",
+     "local_prepared_voice_source",
+     "local_reference_source",
+     "managed_reference_source",
+diff --git a/voicerender/voices_api.py b/voicerender/voices_api.py
+new file mode 100644
+index 0000000..c565d94
+--- /dev/null
++++ b/voicerender/voices_api.py
+@@ -0,0 +1,297 @@
++"""Normalized voice discovery and canonical selector handling."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import asdict, dataclass, field
++from typing import Any, Literal
++
++from .engines.registry import discover_targets, list_engines, normalize_engine_id
++from .errors import ProfileError
++
++VoiceKind = Literal["builtin", "speaker", "managed-reference", "reference-capable"]
++
++
++@dataclass(frozen=True, slots=True)
++class VoiceDescriptor:
++    selector: str
++    engine: str
++    target_id: str
++    voice: str | None
++    speaker: str | int | None
++    kind: VoiceKind
++    languages: tuple[str, ...]
++    gender: str = "unknown"
++    locale: str = "unknown"
++    installed: bool | None = None
++    metadata: Mapping[str, Any] = field(default_factory=dict)
++
++
++@dataclass(frozen=True, slots=True)
++class ParsedVoiceSelector:
++    engine: str
++    target_id: str
++    voice: str | None = None
++    speaker: str | int | None = None
++
++
++def parse_voice_selector(selector: str) -> ParsedVoiceSelector:
++    """Parse the canonical ENGINE:TARGET[/VOICE][#SPEAKER] grammar."""
++    if not isinstance(selector, str) or selector.count(":") != 1:
++        raise ProfileError("Voice selector must use ENGINE:TARGET[/VOICE][#SPEAKER]")
++    engine, value = selector.split(":", 1)
++    if not engine or not value:
++        raise ProfileError("Voice selector engine and target must be non-empty")
++    if "#" in value:
++        if value.count("#") != 1:
++            raise ProfileError(
++                "Voice selector contains more than one speaker delimiter"
++            )
++        value, raw_speaker = value.split("#", 1)
++        if not raw_speaker:
++            raise ProfileError("Voice selector speaker must be non-empty")
++        try:
++            numeric_speaker = int(raw_speaker)
++        except ValueError:
++            speaker: str | int = raw_speaker
++        else:
++            speaker = (
++                numeric_speaker if str(numeric_speaker) == raw_speaker else raw_speaker
++            )
++    else:
++        speaker = None
++    if "/" in value:
++        if value.count("/") != 1:
++            raise ProfileError("Voice selector contains more than one voice delimiter")
++        target_id, voice = value.split("/", 1)
++        if not voice:
++            raise ProfileError("Voice selector voice must be non-empty")
++    else:
++        target_id, voice = value, None
++    if not target_id:
++        raise ProfileError("Voice selector target must be non-empty")
++    return ParsedVoiceSelector(normalize_engine_id(engine), target_id, voice, speaker)
++
++
++def _selector(
++    engine: str, target_id: str, voice: str | None, speaker: str | int | None
++) -> str:
++    if any(
++        delimiter in engine or delimiter in target_id for delimiter in (":", "/", "#")
++    ):
++        raise ProfileError(
++            "Engine and target identifiers cannot contain selector delimiters"
++        )
++    result = f"{engine}:{target_id}"
++    if voice is not None:
++        if not voice or any(delimiter in voice for delimiter in ("/", "#")):
++            raise ProfileError(
++                "Voice identifiers must be non-empty and cannot contain / or #"
++            )
++        result += f"/{voice}"
++    if speaker is not None:
++        value = str(speaker)
++        if not value or "#" in value:
++            raise ProfileError(
++                "Speaker identifiers must be non-empty and cannot contain #"
++            )
++        result += f"#{value}"
++    return result
++
++
++def _descriptor(
++    *,
++    target: Any,
++    voice: str | None = None,
++    speaker: str | int | None = None,
++    kind: VoiceKind,
++    languages: tuple[str, ...] | None = None,
++    gender: str = "unknown",
++    locale: str = "unknown",
++    metadata: Mapping[str, Any] | None = None,
++) -> VoiceDescriptor:
++    return VoiceDescriptor(
++        selector=_selector(target.engine, target.id, voice, speaker),
++        engine=target.engine,
++        target_id=target.id,
++        voice=voice,
++        speaker=speaker,
++        kind=kind,
++        languages=tuple(languages if languages is not None else target.languages),
++        gender=gender,
++        locale=locale,
++        installed=bool(target.runtime_available),
++        metadata={"target": dict(target.metadata), **dict(metadata or {})},
++    )
++
++
++def _language_matches(descriptor: VoiceDescriptor, language: str | None) -> bool:
++    if language is None:
++        return True
++    expected = language.casefold()
++    return any(item.casefold() == expected for item in descriptor.languages)
++
++
++def _target_descriptors(target: Any) -> list[VoiceDescriptor]:
++    descriptors: list[VoiceDescriptor] = []
++    details = {detail.id: detail for detail in target.voice_details}
++    voice_ids = tuple(
++        dict.fromkeys(
++            (*target.voices, *((target.default_voice,) if target.default_voice else ()))
++        )
++    )
++    voice_kinds = target.metadata.get("voice_kinds", {})
++    if not isinstance(voice_kinds, Mapping):
++        voice_kinds = {}
++    voices: list[tuple[str, Any]] = []
++    for voice in voice_ids:
++        detail = details.get(voice)
++        kind: VoiceKind = (
++            "managed-reference"
++            if voice_kinds.get(voice) == "managed-reference"
++            else "builtin"
++        )
++        descriptors.append(
++            _descriptor(
++                target=target,
++                voice=voice,
++                kind=kind,
++                languages=tuple(detail.languages)
++                if detail and detail.languages
++                else None,
++                gender=detail.gender if detail else "unknown",
++                locale=detail.locale if detail else "unknown",
++                metadata={"voice": asdict(detail)} if detail else {},
++            )
++        )
++        voices.append((voice, detail))
++    speakers = tuple(target.speakers)
++    for speaker_value in speakers:
++        try:
++            numeric_speaker = int(speaker_value)
++        except (TypeError, ValueError):
++            speaker: str | int = str(speaker_value)
++        else:
++            speaker = (
++                numeric_speaker
++                if str(numeric_speaker) == str(speaker_value)
++                else str(speaker_value)
++            )
++        descriptors.append(_descriptor(target=target, speaker=speaker, kind="speaker"))
++    if voices and speakers:
++        for voice, detail in voices:
++            for speaker_value in speakers:
++                try:
++                    numeric_speaker = int(speaker_value)
++                except (TypeError, ValueError):
++                    speaker = str(speaker_value)
++                else:
++                    speaker = (
++                        numeric_speaker
++                        if str(numeric_speaker) == str(speaker_value)
++                        else str(speaker_value)
++                    )
++                descriptors.append(
++                    _descriptor(
++                        target=target,
++                        voice=voice,
++                        speaker=speaker,
++                        kind="speaker",
++                        languages=tuple(detail.languages)
++                        if detail and detail.languages
++                        else None,
++                        gender=detail.gender if detail else "unknown",
++                        locale=detail.locale if detail else "unknown",
++                        metadata={"voice": asdict(detail)} if detail else {},
++                    )
++                )
++    managed = target.metadata.get("managed_references", ())
++    if isinstance(managed, (list, tuple)):
++        for reference in managed:
++            if not isinstance(reference, Mapping):
++                continue
++            ref_id = reference.get("id", reference.get("ref"))
++            if not isinstance(ref_id, str) or not ref_id:
++                continue
++            languages = reference.get("languages")
++            descriptors.append(
++                _descriptor(
++                    target=target,
++                    voice=ref_id,
++                    kind="managed-reference",
++                    languages=tuple(languages)
++                    if isinstance(languages, (list, tuple))
++                    else None,
++                    metadata={"managed_reference": dict(reference)},
++                )
++            )
++    if "reference_voice" in target.capabilities:
++        descriptors.append(_descriptor(target=target, kind="reference-capable"))
++    return descriptors
++
++
++def list_voices(
++    *,
++    engine: str | None = None,
++    target_id: str | None = None,
++    language: str | None = None,
++    offline: bool = False,
++    refresh: bool = False,
++) -> tuple[VoiceDescriptor, ...]:
++    """List normalized voice choices without opening synthesis sessions."""
++    if engine is None:
++        engines = [str(item["id"]) for item in list_engines() if item.get("installed")]
++    else:
++        engines = [normalize_engine_id(engine)]
++    results: list[VoiceDescriptor] = []
++    for engine_id in engines:
++        targets = discover_targets(
++            engine_id,
++            language=language,
++            offline=offline,
++            refresh=refresh,
++        )
++        for target in targets:
++            if target_id is not None and target.id != target_id:
++                continue
++            results.extend(
++                descriptor
++                for descriptor in _target_descriptors(target)
++                if _language_matches(descriptor, language)
++            )
++    return tuple(
++        sorted(results, key=lambda item: (item.engine, item.target_id, item.selector))
++    )
++
++
++def inspect_voice(selector: str, *, language: str | None = None) -> VoiceDescriptor:
++    """Resolve one canonical voice selector to its normalized descriptor."""
++    parsed = parse_voice_selector(selector)
++    canonical = _selector(parsed.engine, parsed.target_id, parsed.voice, parsed.speaker)
++    for descriptor in list_voices(
++        engine=parsed.engine,
++        target_id=parsed.target_id,
++        language=language,
++    ):
++        if descriptor.selector == canonical:
++            return descriptor
++    raise ProfileError(f"No voice matches selector {canonical!r}")
++
++
++def voice_descriptor_to_dict(descriptor: VoiceDescriptor) -> dict[str, Any]:
++    """Return the stable JSON representation of a voice descriptor."""
++    value = asdict(descriptor)
++    value["languages"] = list(descriptor.languages)
++    value["metadata"] = dict(descriptor.metadata)
++    return value
++
++
++__all__ = [
++    "ParsedVoiceSelector",
++    "VoiceDescriptor",
++    "VoiceKind",
++    "inspect_voice",
++    "list_voices",
++    "parse_voice_selector",
++    "voice_descriptor_to_dict",
++]

@@ -1,0 +1,3613 @@
+ .../data/ledgers/main/events/events.jsonl          |   1 +
+ .../main/releases/0.2.1/entries/entry-0006.md      |  31 ++
+ .../data/ledgers/main/releases/0.2.1/release.md    |   4 +-
+ README.md                                          |  31 ++
+ docs/changelog.md                                  |   1 +
+ docs/index.md                                      |   8 +
+ tests/test_cli.py                                  | 323 +++++++++++++++++++
+ tests/test_control_surface_exports.py              |  51 +++
+ tests/test_preflight.py                            |  46 +++
+ tests/test_progress.py                             | 145 +++++++++
+ tests/test_render_book.py                          | 271 +++++++++++++++-
+ tests/test_renderer.py                             |  69 +++-
+ tests/test_renderplan_render.py                    | 246 ++++++++++++++
+ voicerender/__init__.py                            |  15 +-
+ voicerender/book.py                                | 352 ++++++++++++++++++++-
+ voicerender/cli.py                                 | 297 +++++++++++++++--
+ voicerender/estimates.py                           | 179 +++++++++++
+ voicerender/events.py                              |  60 +++-
+ voicerender/preflight.py                           | 135 +++++++-
+ voicerender/progress.py                            | 177 +++++++++++
+ voicerender/render.py                              | 142 ++++++++-
+ voicerender/renderplan_render.py                   | 218 ++++++++++++-
+ 22 files changed, 2733 insertions(+), 69 deletions(-)
+
+diff --git a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+index c04d46f..483e36e 100644
+--- a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
++++ b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+@@ -21,3 +21,4 @@
+ {"data":{"row_count":5},"event":"audit.created","event_id":"event-0021","record_revisions":{"commit_audit_sheet":1},"release_version":"0.2.1","schema_version":2}
+ {"data":{"updated_rows":5},"event":"audit.updated","event_id":"event-0022","record_revisions":{"commit_audit_sheet":2},"release_version":"0.2.1","schema_version":2}
+ {"data":{"entry_ids":["entry-0001","entry-0002","entry-0003","entry-0004","entry-0005"],"synced_audit_rows":5},"event":"entry.batch_added","event_id":"event-0023","record_revisions":{"commit_audit_sheet":3,"entry:0.2.1/entry-0001":1,"entry:0.2.1/entry-0002":1,"entry:0.2.1/entry-0003":1,"entry:0.2.1/entry-0004":1,"entry:0.2.1/entry-0005":1,"release:0.2.1":3},"release_version":"0.2.1","schema_version":2}
++{"data":{"kind":"added","status":"accepted"},"entry_id":"entry-0006","event":"entry.added","event_id":"event-0024","record_revisions":{"entry:0.2.1/entry-0006":1,"release:0.2.1":4},"release_version":"0.2.1","schema_version":2}
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0006.md b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0006.md
+new file mode 100644
+index 0000000..089d395
+--- /dev/null
++++ b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0006.md
+@@ -0,0 +1,31 @@
++---
++schema_version: 2
++object_type: release_entry
++versioning:
++  schema_version: 1
++  revision: 1
++entry_id: entry-0006
++release_version: 0.2.1
++kind: added
++summary: Added typed progress, evidence-based ETA, and workload estimates
++status: accepted
++audience: null
++scopes: []
++source_refs: []
++paths:
++  - voicerender/events.py
++  - voicerender/progress.py
++  - voicerender/cli.py
++  - voicerender/estimates.py
++  - README.md
++  - docs/index.md
++issues: []
++prs: []
++sources: []
++contributors: []
++breaking: false
++internal: false
++order: 6
++---
++
++Render and preflight callbacks expose item and chapter progress with ETA only after successful synthesis timing samples. CLI progress stays on stderr, while pre-run estimates report verified output reuse and unknown duration without a calibrated timing model.
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+index 6533be5..cd6ecc6 100644
+--- a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
++++ b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+@@ -3,7 +3,7 @@ schema_version: 2
+ object_type: release
+ versioning:
+   schema_version: 1
+-  revision: 3
++  revision: 4
+ version: 0.2.1
+ status: planned
+ history_state: curated
+@@ -16,7 +16,7 @@ changelog_file: null
+ boundary_ref: null
+ source_refs: []
+ source_count: null
+-entry_count: 5
++entry_count: 6
+ artifact_count: 0
+ git_base_ref: v0.2.0
+ git_base_sha: a627d2d625bc3e6daae8e3bee58abb77231918ec
+diff --git a/README.md b/README.md
+index f2c6c12..8a26ace 100644
+--- a/README.md
++++ b/README.md
+@@ -324,6 +324,37 @@ if report.status == "ok":
+     print(result.manifest_path)
+ ```
+
++### Live progress, ETA, and workload estimates
++
++`render`, `render-book`, and `preflight` accept `--progress` and `--no-progress`. By default progress is enabled only for interactive stderr and non-JSON output. `--progress` forces it (including with `--json`), but progress always stays on stderr; JSON stdout remains a single unchanged result. Forced redirected output uses throttled newline records without ANSI escapes or carriage returns. Use `--no-progress` to disable it.
++
++Python callers can subscribe to typed events during rendering and preflight. Events carry progress counts, phase/chapter context, elapsed time, and an ETA when synthesis timing evidence is available:
++
++```python
++from voicerender import RenderEvent, RenderEventKind, render_book
++
++
++def on_event(event: RenderEvent) -> None:
++    if event.kind is RenderEventKind.SEGMENT_RENDERED:
++        print(event.progress, event.eta_seconds, event.eta_confidence)
++
++
++result = render_book("Novel.ssmdbook", variant="narration--<profile-id>", on_event=on_event)
++```
++
++The keyword-only `on_event` callback is also available on `preflight_render_plan()`, `render_renderplan()`, and the legacy `render()`/`render_plan()` APIs. Preflight events report required-occurrence work, but its capacity measurements are not synthesis timing and do not produce an ETA.
++
++`estimate_renderplan()` and `estimate_render_book()` provide side-effect-free workload and verified existing-output reuse counts. Without a calibrated timing model, they return `estimated_seconds=None`, `confidence="unavailable"`, and `source="workload-only"`. Live ETA becomes available only after successful synthesis duration samples exist; it is approximate and can remain unknown for work whose engine has no timing evidence.
++
++```python
++from voicerender import estimate_renderplan
++
++estimate = estimate_renderplan(plan, output_dir="renders/narration")
++print(estimate.selected_count, estimate.known_output_reuse_count, estimate.pending_count)
++```
++
++Preflight capacity values describe whether a request fits the engine's limits; they are not wall-clock predictions and are never converted into duration estimates.
++
+ For an emphasis-bearing plan, the Python API uses the same safe default (`reject`). A pipeline that declares the composition handler must pass the opt-in policy to both stages:
+
+ ```python
+diff --git a/docs/changelog.md b/docs/changelog.md
+index b8bc52e..42f9011 100644
+--- a/docs/changelog.md
++++ b/docs/changelog.md
+@@ -6,6 +6,7 @@
+
+ - Added optional Qwen3Synth support for VoiceDesign references, prepared voice profiles, and Qwen Base rendering
+ - Added KittenSynth model-token capacity metadata and preflight-aware request handling
++- Added typed progress, evidence-based ETA, and workload estimates
+
+ ### Fixed
+
+diff --git a/docs/index.md b/docs/index.md
+index 1c64ccf..8c5509e 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -69,3 +69,11 @@ A speech window can succeed (exit 0) while the whole-chapter manifest remains pa
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+
+ Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
++
++## Progress, ETA, and estimates
++
++The `render`, `render-book`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
++
++Python render and preflight APIs accept an optional keyword-only `on_event` callback with typed `RenderEvent` snapshots. Book events aggregate speech occurrences across chapters and preserve chapter and preflight phase context. ETA uses successful synthesis timing evidence only, so it may be unavailable at startup or for engines without samples. `estimate_renderplan()` and `estimate_render_book()` expose selected work and verified output reuse without synthesizing or creating outputs; estimated seconds remain unknown unless a calibrated timing model is available.
++
++Capacity measurements in preflight describe request fit, not synthesis latency. They are never used as a wall-clock prediction. See [Live progress and ETA in the README](../README.md#live-progress-eta-and-workload-estimates) for usage examples.
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 29e49ea..da1b2f2 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -622,3 +622,326 @@ def test_cli_voice_design_preserves_recipe_text(
+     assert captured["recipe"].reference_text == "  Exact reference text.  "
+     assert captured["path"] == output
+     assert "runtime_identity" in __import__("json").loads(capsys.readouterr().out)
++
++
++def test_cli_progress_printer_formats_tty_and_cleans_up_line() -> None:
++    import io
++
++    from voicerender.cli import _ProgressPrinter
++    from voicerender.events import RenderEvent, RenderEventKind
++
++    stream = io.StringIO()
++    printer = _ProgressPrinter(stream, is_tty=True, clock=lambda: 0.0)
++    printer(
++        RenderEvent(
++            kind=RenderEventKind.RENDER_STARTED,
++            scope="render",
++            phase="render",
++            completed_count=118,
++            total_count=319,
++            progress=0.37,
++            rendered_count=91,
++            reused_count=27,
++            elapsed_seconds=761,
++            eta_seconds=1295,
++        )
++    )
++    printer.finish()
++
++    output = stream.getvalue()
++    assert output.startswith("\r[ 37.0%] 118/319 speech")
++    assert "91 rendered, 27 reused" in output
++    assert "elapsed 12:41 | ETA 21:35" in output
++    assert output.endswith("\n")
++    assert "\x1b" not in output
++
++
++def test_cli_progress_printer_throttles_non_tty_with_injected_clock() -> None:
++    import io
++
++    from voicerender.cli import _ProgressPrinter
++    from voicerender.events import RenderEvent, RenderEventKind
++
++    now = [0.0]
++    stream = io.StringIO()
++    printer = _ProgressPrinter(stream, is_tty=False, clock=lambda: now[0])
++
++    def event(kind: RenderEventKind, progress: float) -> RenderEvent:
++        completed = int(progress * 100)
++        return RenderEvent(
++            kind=kind,
++            scope="render",
++            phase="render",
++            completed_count=completed,
++            total_count=100,
++            progress=progress,
++            elapsed_seconds=now[0],
++        )
++
++    printer(event(RenderEventKind.RENDER_STARTED, 0.0))
++    now[0] = 1.0
++    printer(event(RenderEventKind.SEGMENT_RENDERED, 0.02))
++    now[0] = 2.0
++    printer(event(RenderEventKind.SEGMENT_RENDERED, 0.05))
++    now[0] = 32.0
++    printer(event(RenderEventKind.SEGMENT_STARTED, 0.05))
++    now[0] = 33.0
++    printer(event(RenderEventKind.SEGMENT_FAILED, 0.05))
++
++    output = stream.getvalue()
++    assert len(output.splitlines()) == 4
++    assert "progress 5.0% 5/100" in output
++    assert "failed_speech_item" in output
++    assert "\r" not in output and "\x1b" not in output
++
++
++def test_cli_progress_auto_force_disable_and_json_modes() -> None:
++    import io
++    from types import SimpleNamespace
++
++    from voicerender.cli import _progress_callback, build_parser
++
++    class TestStream(io.StringIO):
++        def __init__(self, *, tty: bool) -> None:
++            super().__init__()
++            self.tty = tty
++
++        def isatty(self) -> bool:
++            return self.tty
++
++    parser = build_parser()
++    render_args = ["render", "plan", "--preflight", "report", "--out-dir", "out"]
++    assert parser.parse_args(render_args).progress is None
++    assert parser.parse_args([*render_args, "--no-progress"]).progress is False
++
++    tty = TestStream(tty=True)
++    assert _progress_callback(SimpleNamespace(progress=None, json=False), stream=tty)
++    assert (
++        _progress_callback(SimpleNamespace(progress=None, json=True), stream=tty)
++        is None
++    )
++    assert (
++        _progress_callback(SimpleNamespace(progress=False, json=False), stream=tty)
++        is None
++    )
++
++    non_tty = TestStream(tty=False)
++    assert _progress_callback(SimpleNamespace(progress=True, json=True), stream=non_tty)
++    assert (
++        _progress_callback(SimpleNamespace(progress=None, json=False), stream=non_tty)
++        is None
++    )
++
++
++def test_preflight_cli_forced_progress_stays_on_stderr_with_json(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    import io
++    from types import SimpleNamespace
++
++    from voicerender import cli
++    from voicerender.events import RenderEvent, RenderEventKind
++
++    class NonTtyStream(io.StringIO):
++        def isatty(self) -> bool:
++            return False
++
++    stderr = NonTtyStream()
++    monkeypatch.setattr(cli.sys, "stderr", stderr)
++    monkeypatch.setattr(cli, "load_plan", lambda _path: object())
++
++    def fake_preflight(_plan, _output, *, on_event, **_kwargs):
++        assert on_event is not None
++        on_event(
++            RenderEvent(
++                kind=RenderEventKind.PREFLIGHT_STARTED,
++                scope="preflight",
++                phase="preflight",
++                completed_count=0,
++                total_count=2,
++                progress=0.0,
++                phase_completed_count=0,
++                phase_total_count=2,
++                phase_progress=0.0,
++                elapsed_seconds=0.0,
++            )
++        )
++        on_event(
++            RenderEvent(
++                kind=RenderEventKind.PREFLIGHT_ITEM_FINISHED,
++                scope="preflight",
++                phase="preflight",
++                completed_count=1,
++                total_count=2,
++                progress=0.5,
++                phase_completed_count=1,
++                phase_total_count=2,
++                phase_progress=0.5,
++                elapsed_seconds=2.0,
++            )
++        )
++        return SimpleNamespace(
++            checks=[],
++            replan=[],
++            status="ok",
++            render_plan_id="plan",
++            render_profile_id="profile",
++        )
++
++    monkeypatch.setattr(cli, "preflight_render_plan", fake_preflight)
++    output = tmp_path / "preflight.toml"
++    assert (
++        cli.main(
++            ["preflight", "plan.toml", "--output", str(output), "--json", "--progress"]
++        )
++        == 0
++    )
++    stdout = capsys.readouterr().out
++    payload = __import__("json").loads(stdout)
++    assert payload["status"] == "ok"
++    assert "preflight progress 0.0%" in stderr.getvalue()
++    assert "preflight progress 50.0%" in stderr.getvalue()
++    assert "\r" not in stderr.getvalue() and "\x1b" not in stderr.getvalue()
++
++
++def test_preflight_cli_json_auto_and_disabled_progress_are_silent(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
++) -> None:
++    import io
++    from types import SimpleNamespace
++
++    from voicerender import cli
++    from voicerender.events import RenderEvent, RenderEventKind
++
++    class NonTtyStream(io.StringIO):
++        def isatty(self) -> bool:
++            return False
++
++    stderr = NonTtyStream()
++    monkeypatch.setattr(cli.sys, "stderr", stderr)
++    monkeypatch.setattr(cli, "load_plan", lambda _path: object())
++    callbacks: list[bool] = []
++
++    def fake_preflight(_plan, _output, *, on_event, **_kwargs):
++        callbacks.append(on_event is not None)
++        if on_event is not None:
++            on_event(
++                RenderEvent(
++                    kind=RenderEventKind.PREFLIGHT_STARTED,
++                    scope="preflight",
++                    phase="preflight",
++                    completed_count=0,
++                    total_count=1,
++                    progress=0.0,
++                    phase_completed_count=0,
++                    phase_total_count=1,
++                    phase_progress=0.0,
++                    elapsed_seconds=0.0,
++                )
++            )
++        return SimpleNamespace(
++            checks=[],
++            replan=[],
++            status="ok",
++            render_plan_id="plan",
++            render_profile_id="profile",
++        )
++
++    monkeypatch.setattr(cli, "preflight_render_plan", fake_preflight)
++    base = [
++        "preflight",
++        "plan.toml",
++        "--output",
++        str(tmp_path / "preflight.toml"),
++        "--json",
++    ]
++    assert cli.main(base) == 0
++    assert __import__("json").loads(capsys.readouterr().out)["status"] == "ok"
++    assert stderr.getvalue() == ""
++
++    assert cli.main([*base, "--no-progress"]) == 0
++    assert __import__("json").loads(capsys.readouterr().out)["status"] == "ok"
++    assert stderr.getvalue() == ""
++    assert callbacks == [False, False]
++
++
++@pytest.mark.parametrize("command", ["render", "render-book"])
++def test_render_command_progress_callbacks_keep_json_stdout_clean(
++    command: str,
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    capsys: pytest.CaptureFixture[str],
++) -> None:
++    import io
++    from types import SimpleNamespace
++
++    from voicerender import cli
++    from voicerender.events import RenderEvent, RenderEventKind, RenderScope
++
++    class NonTtyStream(io.StringIO):
++        def isatty(self) -> bool:
++            return False
++
++    stderr = NonTtyStream()
++    monkeypatch.setattr(cli.sys, "stderr", stderr)
++
++    def event_callback(on_event, scope: RenderScope) -> None:
++        assert on_event is not None
++        on_event(
++            RenderEvent(
++                kind=RenderEventKind.SEGMENT_RENDERED,
++                scope=scope,
++                phase="render",
++                completed_count=1,
++                total_count=2,
++                progress=0.5,
++                rendered_count=1,
++                reused_count=0,
++                elapsed_seconds=1.0,
++            )
++        )
++
++    if command == "render":
++
++        def fake_render(*_args, on_event, **_kwargs):
++            event_callback(on_event, "render")
++            return SimpleNamespace(
++                failed=False,
++                pending_composition=False,
++                rendered_count=1,
++                reused_count=0,
++            )
++
++        monkeypatch.setattr(cli, "render_renderplan", fake_render)
++        monkeypatch.setattr(cli, "_render_payload", lambda _result: {"speech_count": 2})
++        args = [
++            "render",
++            "plan.toml",
++            "--preflight",
++            "preflight.toml",
++            "--out-dir",
++            str(tmp_path / "rendered"),
++            "--json",
++            "--progress",
++        ]
++    else:
++
++        def fake_render_book(*_args, on_event, **_kwargs):
++            event_callback(on_event, "book")
++            return SimpleNamespace(to_dict=lambda: {"items": []}, exit_code=0)
++
++        monkeypatch.setattr(cli, "render_book", fake_render_book)
++        args = [
++            "render-book",
++            str(tmp_path / "book"),
++            "--variant",
++            "narration",
++            "--json",
++            "--progress",
++        ]
++
++    assert cli.main(args) == 0
++    stdout = capsys.readouterr().out
++    assert isinstance(__import__("json").loads(stdout), dict)
++    assert "progress 50.0%" in stderr.getvalue()
++    assert "\r" not in stderr.getvalue() and "\x1b" not in stderr.getvalue()
+diff --git a/tests/test_control_surface_exports.py b/tests/test_control_surface_exports.py
+index d5c1857..9831b9d 100644
+--- a/tests/test_control_surface_exports.py
++++ b/tests/test_control_surface_exports.py
+@@ -1,6 +1,12 @@
+ from __future__ import annotations
+
++from dataclasses import FrozenInstanceError
++
++import pytest
++
+ import voicerender
++from voicerender.errors import RenderEventCallbackError
++from voicerender.events import RenderEvent, RenderEventKind, emit_render_event
+
+
+ def test_control_surface_apis_are_exported_from_package_root() -> None:
+@@ -34,7 +40,52 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
+         "set_default_profile_role",
+         "set_profile_role",
+         "verify_model",
++        "EtaConfidence",
++        "RenderProgress",
++        "RenderEstimate",
++        "estimate_render_book",
++        "estimate_renderplan",
++        "RenderScope",
+     }
+
+     assert expected.issubset(set(voicerender.__all__))
+     assert all(hasattr(voicerender, name) for name in expected)
++
++
++def test_progress_types_and_event_dispatch_are_public_and_typed() -> None:
++    assert hasattr(voicerender, "RenderProgress")
++    snapshot = voicerender.RenderProgress(
++        completed_count=1,
++        total_count=2,
++        progress=0.5,
++        rendered_count=1,
++        reused_count=0,
++        failed_count=0,
++        elapsed_seconds=1.25,
++        eta_seconds=1.25,
++        eta_confidence="low",
++    )
++    event = RenderEvent(
++        kind=RenderEventKind.SEGMENT_RENDERED,
++        scope="render",
++        progress_snapshot=snapshot,
++    )
++    assert event.progress_snapshot is snapshot
++    with pytest.raises(FrozenInstanceError):
++        snapshot.progress = 0.75  # type: ignore[misc]
++
++
++def test_event_dispatch_wraps_callback_errors() -> None:
++    event = RenderEvent(kind=RenderEventKind.RENDER_STARTED)
++
++    def broken_callback(_event: RenderEvent) -> None:
++        raise ValueError("callback failed")
++
++    with pytest.raises(RenderEventCallbackError) as error:
++        emit_render_event(broken_callback, event)
++    assert error.value.event_kind == "render_started"
++    assert error.value.native_error_type == "ValueError"
++
++
++def test_event_dispatch_is_noop_without_callback() -> None:
++    emit_render_event(None, RenderEvent(kind=RenderEventKind.RENDER_STARTED))
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index b2689bc..3303c9e 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -38,6 +38,7 @@ from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+ from voicerender.engines.registry import _ADAPTERS
+ from voicerender.engines.selection import EngineRequest
+ from voicerender.errors import EngineUnavailableError, SpeechRequestTooLongError
++from voicerender.events import RenderEvent, RenderEventKind
+ from voicerender.preflight import (
+     preflight_exit_code,
+     preflight_render_plan,
+@@ -873,3 +874,48 @@ def test_preflight_cli_refuses_to_overwrite_input_plan(
+     assert exit_code == 1
+     assert "must not overwrite" in capsys.readouterr().err
+     assert plan_path.read_bytes() == original
++
++
++def test_preflight_events_count_required_items_including_terminal_errors(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan(
++        ("not required", False, "sentence"),
++        ("too long", True, "sentence"),
++        ("measurement error", True, "sentence"),
++    )
++    adapter.measurements["too long"] = RequestMeasure(
++        fits=False,
++        amount=101,
++        maximum=100,
++        unit="model_tokens",
++        source="fake.frontend_measure",
++    )
++    adapter.measurements["measurement error"] = RuntimeError("measurement failed")
++    events: list[RenderEvent] = []
++
++    report = preflight_render_plan(
++        plan,
++        tmp_path / "events-preflight.toml",
++        on_event=events.append,
++    )
++
++    assert report.status == "reject"
++    assert events[0].kind is RenderEventKind.PREFLIGHT_STARTED
++    assert events[0].total_count == 2
++    assert events[0].completed_count == 0
++    finished = [
++        event
++        for event in events
++        if event.kind is RenderEventKind.PREFLIGHT_ITEM_FINISHED
++    ]
++    assert [event.status for event in finished] == ["too_long", "error"]
++    assert [event.completed_count for event in finished] == [1, 2]
++    assert [event.progress for event in finished] == [0.5, 1.0]
++    assert all(event.total_count == 2 for event in finished)
++    assert all(event.eta_confidence == "unavailable" for event in finished)
++    assert events[-1].kind is RenderEventKind.PREFLIGHT_FINISHED
++    assert events[-1].status == "reject"
++    assert events[-1].progress == 1.0
++    assert adapter.synthesized_texts == []
+diff --git a/tests/test_progress.py b/tests/test_progress.py
+new file mode 100644
+index 0000000..768a2d2
+--- /dev/null
++++ b/tests/test_progress.py
+@@ -0,0 +1,145 @@
++from __future__ import annotations
++
++import pytest
++
++from voicerender.progress import ProgressTracker, RollingEta
++
++
++class _Clock:
++    def __init__(self, value: float = 0.0) -> None:
++        self.value = value
++
++    def __call__(self) -> float:
++        return self.value
++
++
++def test_tracker_starts_at_zero_and_uses_injected_monotonic_clock() -> None:
++    clock = _Clock(10.0)
++    tracker = ProgressTracker(2, clock=clock)
++
++    initial = tracker.snapshot()
++    assert initial.completed_count == 0
++    assert initial.progress == 0.0
++    assert initial.eta_seconds is None
++    assert initial.eta_confidence == "unavailable"
++
++    clock.value = 13.25
++    assert tracker.snapshot().elapsed_seconds == 3.25
++
++
++def test_terminal_outcomes_advance_progress_and_finish_at_one() -> None:
++    tracker = ProgressTracker(3, clock=_Clock())
++
++    first = tracker.complete("reused")
++    second = tracker.complete("failed")
++    final = tracker.complete("rendered", synthesis_seconds=2.5)
++
++    assert [first.progress, second.progress, final.progress] == [1 / 3, 2 / 3, 1.0]
++    assert final.completed_count == final.total_count == 3
++    assert final.rendered_count == 1
++    assert final.reused_count == 1
++    assert final.failed_count == 1
++    assert final.eta_seconds == 0.0
++    assert [first.progress, second.progress, final.progress] == sorted(
++        [first.progress, second.progress, final.progress]
++    )
++
++
++def test_zero_total_is_a_complete_empty_workload() -> None:
++    snapshot = ProgressTracker(0, clock=_Clock()).snapshot()
++
++    assert snapshot.completed_count == 0
++    assert snapshot.total_count == 0
++    assert snapshot.progress == 1.0
++    assert snapshot.eta_seconds == 0.0
++
++
++def test_eta_is_unknown_until_synthesis_and_reuse_reduces_remaining_work() -> None:
++    tracker = ProgressTracker(4, clock=_Clock())
++
++    reused = tracker.complete("reused")
++    assert reused.eta_seconds is None
++    assert reused.eta_confidence == "unavailable"
++
++    synthesized = tracker.complete("rendered", synthesis_seconds=3.0)
++    assert synthesized.eta_seconds == 6.0
++    assert synthesized.eta_confidence == "low"
++
++    after_reuse = tracker.complete("reused")
++    assert after_reuse.eta_seconds == 3.0
++    assert after_reuse.eta_confidence == "low"
++
++
++def test_reuse_cannot_contribute_a_synthesis_timing_sample() -> None:
++    tracker = ProgressTracker(3, clock=_Clock())
++    tracker.complete("rendered", synthesis_seconds=10.0)
++
++    with pytest.raises(ValueError, match="only rendered"):
++        tracker.complete("reused", synthesis_seconds=0.001)
++
++    snapshot = tracker.snapshot()
++    assert snapshot.completed_count == 1
++    assert snapshot.eta_seconds == 20.0
++
++
++def test_eta_uses_bounded_rolling_median_and_confidence_thresholds() -> None:
++    estimator = RollingEta(window_size=8)
++    assert estimator.confidence == "unavailable"
++    assert estimator.estimate(3) is None
++
++    estimator.add_sample(10.0)
++    assert estimator.confidence == "low"
++    assert estimator.estimate(2) == 20.0
++
++    estimator.add_sample(2.0)
++    assert estimator.confidence == "medium"
++    assert estimator.estimate(2) == 12.0
++    estimator.add_sample(4.0)
++    estimator.add_sample(6.0)
++    assert estimator.confidence == "medium"
++    estimator.add_sample(8.0)
++    assert estimator.confidence == "high"
++
++    # The first 10-second warmup sample has fallen outside the bounded window.
++    for duration in (10.0, 10.0, 10.0, 10.0):
++        estimator.add_sample(duration)
++    assert estimator.sample_count == 8
++    assert estimator.estimate(1) == 9.0
++
++
++def test_elapsed_time_never_regresses_if_test_clock_moves_backwards() -> None:
++    clock = _Clock(5.0)
++    tracker = ProgressTracker(2, clock=clock)
++    clock.value = 8.0
++    assert tracker.snapshot().elapsed_seconds == 3.0
++    clock.value = 7.0
++    assert tracker.snapshot().elapsed_seconds == 3.0
++
++
++def test_invalid_totals_durations_and_over_completion_are_rejected() -> None:
++    with pytest.raises(ValueError, match="total_count"):
++        ProgressTracker(-1, clock=_Clock())
++
++    with pytest.raises(ValueError, match="finite non-negative"):
++        RollingEta().add_sample(float("nan"))
++
++    with pytest.raises(ValueError, match="remaining_items"):
++        RollingEta().estimate(-1)
++
++    tracker = ProgressTracker(1, clock=_Clock())
++    tracker.complete("failed")
++    with pytest.raises(ValueError, match="more items"):
++        tracker.complete("failed")
++
++
++def test_advance_tracks_non_synthesis_work_without_result_counts() -> None:
++    tracker = ProgressTracker(2, clock=_Clock())
++
++    snapshot = tracker.advance()
++
++    assert snapshot.completed_count == 1
++    assert snapshot.progress == 0.5
++    assert (
++        snapshot.rendered_count == snapshot.reused_count == snapshot.failed_count == 0
++    )
++    assert snapshot.eta_seconds is None
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index a705762..95cea4d 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -45,6 +45,13 @@ from voicerender import (
+ )
+ from voicerender.book_contract import load_renderplan_set
+ from voicerender.errors import ArtifactError
++from voicerender.events import (
++    RenderEvent,
++    RenderEventKind,
++    RenderScope,
++    emit_render_event,
++)
++from voicerender.progress import ProgressTracker
+ from voicerender.renderplan_render import (
+     RENDER_DIAGNOSTICS_FILENAME,
+     RENDER_MANIFEST_FILENAME,
+@@ -178,6 +185,40 @@ def _preflight(plan: RenderPlan, path: Path) -> PreflightReport:
+     return report
+
+
++def _emit_test_progress(
++    callback: Any,
++    kind: RenderEventKind,
++    tracker: ProgressTracker,
++    *,
++    scope: RenderScope,
++    **context: Any,
++) -> None:
++    snapshot = tracker.snapshot()
++    emit_render_event(
++        callback,
++        RenderEvent(
++            kind=kind,
++            scope=scope,  # type: ignore[arg-type]
++            phase=scope,
++            completed_count=snapshot.completed_count,
++            total_count=snapshot.total_count,
++            progress=snapshot.progress,
++            phase_completed_count=snapshot.completed_count,
++            phase_total_count=snapshot.total_count,
++            phase_progress=snapshot.progress,
++            rendered_count=snapshot.rendered_count,
++            reused_count=snapshot.reused_count,
++            failed_count=snapshot.failed_count,
++            selected_count=snapshot.total_count,
++            elapsed_seconds=snapshot.elapsed_seconds,
++            eta_seconds=snapshot.eta_seconds,
++            eta_confidence=snapshot.eta_confidence,
++            progress_snapshot=snapshot,
++            **context,
++        ),
++    )
++
++
+ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+     preflight_calls: list[str] = []
+     render_calls: list[tuple[str, frozenset[int] | None]] = []
+@@ -189,10 +230,58 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+         path: str | Path,
+         *,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++        on_event: Any = None,
+     ) -> PreflightReport:
+         preflight_calls.append(plan.plan_id or plan.computed_id())
+         policy_calls.append(f"preflight:{emphasis_policy.value}")
+-        return _preflight(plan, Path(path))
++        report = _preflight(plan, Path(path))
++        if on_event is not None:
++            required = [item for item in plan.speech if item.preflight_required]
++            tracker = ProgressTracker(len(required))
++            plan_id = plan.plan_id or plan.computed_id()
++            _emit_test_progress(
++                on_event,
++                RenderEventKind.PREFLIGHT_STARTED,
++                tracker,
++                scope="preflight",
++                plan_id=plan_id,
++            )
++            checks = {
++                (check.segment_number, check.segment_id): check
++                for check in report.checks
++            }
++            for item in required:
++                segment_id = item.segment_id or item.computed_id()
++                _emit_test_progress(
++                    on_event,
++                    RenderEventKind.PREFLIGHT_ITEM_STARTED,
++                    tracker,
++                    scope="preflight",
++                    plan_id=plan_id,
++                    segment_number=item.number,
++                    segment_id=segment_id,
++                )
++                tracker.advance()
++                check = checks[(item.number, segment_id)]
++                _emit_test_progress(
++                    on_event,
++                    RenderEventKind.PREFLIGHT_ITEM_FINISHED,
++                    tracker,
++                    scope="preflight",
++                    plan_id=plan_id,
++                    segment_number=item.number,
++                    segment_id=segment_id,
++                    status=check.status,
++                )
++            _emit_test_progress(
++                on_event,
++                RenderEventKind.PREFLIGHT_FINISHED,
++                tracker,
++                scope="preflight",
++                plan_id=plan_id,
++                status=report.status,
++            )
++        return report
+
+     def render(
+         plan: RenderPlan,
+@@ -205,6 +294,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+         recheck_report_path: str | Path | None = None,
+         speech_numbers: set[int] | frozenset[int] | None = None,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++        on_event: Any = None,
+     ) -> RenderPlanResult:
+         del cache_dir, recheck_report_path, reset_stale_output
+         policy_calls.append(f"render:{emphasis_policy.value}")
+@@ -219,6 +309,14 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+                 None if speech_numbers is None else frozenset(speech_numbers),
+             )
+         )
++        tracker = ProgressTracker(len(selected))
++        _emit_test_progress(
++            on_event,
++            RenderEventKind.RENDER_STARTED,
++            tracker,
++            scope="render",
++            plan_id=plan.plan_id or plan.computed_id(),
++        )
+         output = Path(output_dir)
+         output.mkdir(parents=True, exist_ok=True)
+         manifest_path = output / RENDER_MANIFEST_FILENAME
+@@ -232,10 +330,13 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+                 (item.segment_number, item.segment_id): item for item in prior.speech
+             }
+         rendered = reused = 0
++        rendered_keys: set[tuple[int, str]] = set()
++        reused_keys: set[tuple[int, str]] = set()
+         for item in selected:
+             key = (item.number, item.segment_id or item.computed_id())
+             if key in artifacts and not force:
+                 reused += 1
++                reused_keys.add(key)
+                 continue
+             wav_path = output / item.wav
+             info = atomic_wav(wav_path, [0.0, 0.1, -0.1], 24000)
+@@ -249,6 +350,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+                 channels=int(info["channels"]),
+             )
+             rendered += 1
++            rendered_keys.add(key)
+         ordered = tuple(
+             artifacts[(item.number, item.segment_id or item.computed_id())]
+             for item in plan.speech
+@@ -295,7 +397,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+         selected_keys = {
+             (item.number, item.segment_id or item.computed_id()) for item in selected
+         }
+-        return RenderPlanResult(
++        result = RenderPlanResult(
+             manifest=manifest,
+             manifest_path=manifest_path,
+             planned_count=len(plan.speech),
+@@ -306,6 +408,37 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+             selection_complete=selected_keys.issubset(set(artifacts)),
+             pending_composition=pending_composition,
+         )
++        for item in selected:
++            key = (item.number, item.segment_id or item.computed_id())
++            if key in rendered_keys:
++                tracker.complete("rendered", synthesis_seconds=0.25)
++                kind = RenderEventKind.SEGMENT_RENDERED
++                synthesis_seconds = 0.25
++            else:
++                tracker.complete("reused")
++                kind = RenderEventKind.SEGMENT_REUSED
++                synthesis_seconds = None
++            _emit_test_progress(
++                on_event,
++                kind,
++                tracker,
++                scope="render",
++                plan_id=plan.plan_id or plan.computed_id(),
++                segment_number=item.number,
++                segment_id=key[1],
++                engine=str(item.binding.get("renderer", "test")),
++                status="rendered" if synthesis_seconds is not None else "reused",
++                synthesis_seconds=synthesis_seconds,
++            )
++        _emit_test_progress(
++            on_event,
++            RenderEventKind.RENDER_COMPLETED,
++            tracker,
++            scope="render",
++            plan_id=plan.plan_id or plan.computed_id(),
++            status="completed",
++        )
++        return result
+
+     monkeypatch.setattr(book_module, "preflight_render_plan", preflight)
+     monkeypatch.setattr(book_module, "render_renderplan", render)
+@@ -744,10 +877,22 @@ def test_fail_fast_skips_remaining_chapters_but_default_continues(
+         return original(*args, **kwargs)
+
+     monkeypatch.setattr(book_module, "render_renderplan", fail_first)
+-    fast = book_module.render_book(workspace, variant=variant, fail_fast=True)
++    fast_events: list[RenderEvent] = []
++    fast = book_module.render_book(
++        workspace,
++        variant=variant,
++        fail_fast=True,
++        on_event=fast_events.append,
++    )
+     assert [item.status for item in fast.outcomes] == ["failed", "skipped", "skipped"]
+     assert fast.failed == 1 and fast.skipped == 2
+     assert fast.outcomes[0].error_code == "artifact.invalid"
++    skipped_events = [
++        event for event in fast_events if event.kind is RenderEventKind.CHAPTER_SKIPPED
++    ]
++    assert len(skipped_events) == 2
++    assert fast_events[-1].kind is RenderEventKind.BOOK_COMPLETED
++    assert fast_events[-1].progress is not None and fast_events[-1].progress < 1.0
+     assert tomllib.loads(fast.report_path.read_text(encoding="utf-8"))["skipped"] == 2
+
+     # The default mode continues with each later selected chapter.
+@@ -932,3 +1077,123 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
+         assert api_result.written == expected_written
+         assert api_result.reused == expected_reused
+         assert_parity(api_result, cli_payload)
++
++
++def test_book_emits_global_speech_progress_and_preflight_phase_context(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++    events: list[RenderEvent] = []
++
++    result = render_book(workspace, variant=variant, on_event=events.append)
++
++    assert result.elapsed_seconds >= 0
++    assert all(outcome.elapsed_seconds >= 0 for outcome in result.outcomes)
++    assert events[0].kind is RenderEventKind.BOOK_STARTED
++    assert events[0].total_count == 6
++    assert events[-1].kind is RenderEventKind.BOOK_COMPLETED
++    assert all(event.total_count == 6 for event in events)
++
++    preflight_items = [
++        event
++        for event in events
++        if event.kind is RenderEventKind.PREFLIGHT_ITEM_FINISHED
++    ]
++    assert preflight_items
++    assert preflight_items[0].scope == "book"
++    assert preflight_items[0].chapter_id is not None
++    assert preflight_items[0].phase_total_count == 2
++    assert preflight_items[0].phase_progress == 0.5
++    assert preflight_items[0].progress == 0.0
++
++    rendered = [
++        event for event in events if event.kind is RenderEventKind.SEGMENT_RENDERED
++    ]
++    assert len(rendered) == 6
++    assert [event.completed_count for event in rendered] == [1, 2, 3, 4, 5, 6]
++    assert [event.progress for event in rendered] == [
++        1 / 6,
++        2 / 6,
++        3 / 6,
++        4 / 6,
++        5 / 6,
++        1.0,
++    ]
++    assert rendered[0].eta_seconds is not None
++    assert rendered[0].eta_confidence == "low"
++
++    first_chapter_finish = next(
++        index
++        for index, event in enumerate(events)
++        if event.kind is RenderEventKind.CHAPTER_FINISHED
++    )
++    assert any(
++        event.kind is RenderEventKind.SEGMENT_RENDERED
++        for event in events[:first_chapter_finish]
++    )
++
++
++def test_reused_chapters_advance_book_progress_immediately(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++    render_book(workspace, variant=variant)
++    events: list[RenderEvent] = []
++
++    result = render_book(workspace, variant=variant, on_event=events.append)
++
++    assert all(outcome.status == "reused" for outcome in result.outcomes)
++    reused_chapters = [
++        event for event in events if event.kind is RenderEventKind.CHAPTER_REUSED
++    ]
++    assert len(reused_chapters) == 3
++    assert [event.progress for event in reused_chapters] == [2 / 6, 5 / 6, 1.0]
++    assert [event.eta_seconds for event in reused_chapters] == [None, None, 0.0]
++    assert events[-1].kind is RenderEventKind.BOOK_COMPLETED
++    assert events[-1].progress == 1.0
++
++
++def test_estimate_render_book_is_workload_only_and_does_not_create_outputs(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from voicerender import estimate_render_book
++
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++    output_root = tmp_path / "estimated-output"
++
++    initial = estimate_render_book(workspace, variant=variant, output_root=output_root)
++    assert initial.selected_count == 6
++    assert initial.known_output_reuse_count == 0
++    assert initial.pending_count == 6
++    assert initial.estimated_seconds is None
++    assert initial.confidence == "unavailable"
++    assert initial.source == "workload-only"
++    assert not output_root.exists()
++
++    render_book(workspace, variant=variant, output_root=output_root)
++    before_files = {
++        path.relative_to(output_root): path.read_bytes()
++        for path in output_root.rglob("*")
++        if path.is_file()
++    }
++    complete = estimate_render_book(workspace, variant=variant, output_root=output_root)
++    partial = estimate_render_book(
++        workspace,
++        variant=variant,
++        chapters="5",
++        speech="2-3",
++        output_root=output_root,
++    )
++
++    assert (complete.selected_count, complete.known_output_reuse_count) == (6, 6)
++    assert (complete.pending_count, complete.estimated_seconds) == (0, None)
++    assert (partial.selected_count, partial.known_output_reuse_count) == (2, 2)
++    after_files = {
++        path.relative_to(output_root): path.read_bytes()
++        for path in output_root.rglob("*")
++        if path.is_file()
++    }
++    assert after_files == before_files
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+index 3e8cbae..fdf9c74 100644
+--- a/tests/test_renderer.py
++++ b/tests/test_renderer.py
+@@ -234,8 +234,14 @@ def test_plan_load_and_legacy_render(tmp_path, mock_engine):
+     )
+     plan = VoicePlan.load(plan_path)
+     out = tmp_path / "o"
+-    render_plan(plan, profile=profile(), output_dir=out)
++    events = []
++    render_plan(plan, profile=profile(), output_dir=out, on_event=events.append)
+     assert read_manifest(out)["source_plan_id"] == "plan123"
++    from voicerender.events import RenderEventKind
++
++    assert events[0].kind is RenderEventKind.RENDER_STARTED
++    assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
++    assert any(event.kind is RenderEventKind.SEGMENT_RENDERED for event in events)
+     text = plan_path.read_text() + 'engine_options = "unsupported"\n'
+     plan_path.write_text(text)
+     with pytest.raises(PlanError, match="Unsupported speech metadata"):
+@@ -262,3 +268,64 @@ def test_missing_role_rejected_before_manifest(tmp_path, mock_engine):
+             output_dir=out,
+         )
+     assert not (out / "manifest.json").exists()
++
++
++def test_legacy_render_progress_counts_rendered_then_reused_items(
++    tmp_path: Path, mock_engine: FakeEngine
++) -> None:
++    from voicerender.events import RenderEventKind
++
++    output_dir = tmp_path / "legacy-progress"
++    events = []
++    result = render(
++        segments(), profile=profile(), output_dir=output_dir, on_event=events.append
++    )
++
++    assert result.rendered_count == 3
++    rendered = [
++        event for event in events if event.kind is RenderEventKind.SEGMENT_RENDERED
++    ]
++    assert [event.completed_count for event in rendered] == [1, 2, 3]
++    assert rendered[0].eta_seconds is not None
++    assert events[0].kind is RenderEventKind.RENDER_STARTED
++    assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
++
++    reused_events = []
++    reused = render(
++        segments(),
++        profile=profile(),
++        output_dir=output_dir,
++        on_event=reused_events.append,
++    )
++    assert (reused.rendered_count, reused.reused_count) == (0, 3)
++    assert (
++        sum(event.kind is RenderEventKind.SEGMENT_REUSED for event in reused_events)
++        == 3
++    )
++    assert reused_events[-1].progress == 1.0
++    assert len(mock_engine.calls) == 3
++
++
++def test_legacy_render_callback_failure_is_not_recorded_as_synthesis_failure(
++    tmp_path: Path, mock_engine: FakeEngine
++) -> None:
++    from voicerender import RenderEventCallbackError
++    from voicerender.events import RenderEventKind
++
++    output_dir = tmp_path / "callback-failure"
++
++    def callback(event) -> None:
++        if event.kind is RenderEventKind.SEGMENT_RENDERED:
++            raise RuntimeError("consumer failed")
++
++    with pytest.raises(RenderEventCallbackError):
++        render(
++            segments(),
++            profile=profile(),
++            output_dir=output_dir,
++            fail_fast=False,
++            on_event=callback,
++        )
++    statuses = [item["status"] for item in read_manifest(output_dir)["segments"]]
++    assert statuses == ["rendered", "pending", "pending"]
++    assert len(mock_engine.calls) == 1
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 1114bc9..a2f2c09 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+
+ import json
++import shutil
+ from collections.abc import Iterator
+ from contextlib import contextmanager
+ from dataclasses import replace
+@@ -48,8 +49,10 @@ from voicerender.engines.selection import EngineRequest
+ from voicerender.errors import (
+     ArtifactError,
+     PlanError,
++    RenderEventCallbackError,
+     UnsupportedSynthesisFeatureError,
+ )
++from voicerender.events import RenderEvent, RenderEventKind
+ from voicerender.preflight import preflight_render_plan
+ from voicerender.renderplan_render import (
+     RENDER_DIAGNOSTICS_FILENAME,
+@@ -1394,3 +1397,246 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
+         "split child part one",
+         "split child part two",
+     ]
++
++
++def test_render_events_report_ordered_progress_and_final_timing(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("one", "two")
++    report = _report(adapter, plan, tmp_path)
++    events: list[RenderEvent] = []
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "event-render",
++        cache_dir=tmp_path / "event-cache",
++        on_event=events.append,
++    )
++
++    kinds = [event.kind for event in events]
++    assert kinds[0] is RenderEventKind.RENDER_STARTED
++    assert kinds[-1] is RenderEventKind.RENDER_COMPLETED
++    assert kinds.count(RenderEventKind.SEGMENT_STARTED) == 2
++    assert kinds.count(RenderEventKind.SEGMENT_RENDERED) == 2
++    assert kinds.count(RenderEventKind.ENGINE_OPEN_STARTED) == 1
++    assert kinds.count(RenderEventKind.ENGINE_OPEN_FINISHED) == 1
++    terminal = [
++        event
++        for event in events
++        if event.kind
++        in {
++            RenderEventKind.SEGMENT_RENDERED,
++            RenderEventKind.SEGMENT_REUSED,
++            RenderEventKind.SEGMENT_FAILED,
++        }
++    ]
++    assert [event.completed_count for event in terminal] == [1, 2]
++    assert [event.progress for event in terminal] == [0.5, 1.0]
++    assert all(event.total_count == 2 for event in terminal)
++    assert all(
++        event.elapsed_seconds is not None and event.elapsed_seconds >= 0
++        for event in events
++    )
++    engine_opened = next(
++        event for event in events if event.kind is RenderEventKind.ENGINE_OPEN_FINISHED
++    )
++    assert engine_opened.phase_elapsed_seconds is not None
++    assert result.elapsed_seconds >= 0
++    assert events[-1].eta_seconds == 0.0
++
++
++def test_existing_output_reuse_advances_progress_without_opening_engine(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("reuse me")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "existing-output"
++    cache = tmp_path / "existing-cache"
++    render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
++    adapter.open_count = 0
++    events: list[RenderEvent] = []
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        on_event=events.append,
++    )
++
++    assert result.reused_count == 1
++    assert adapter.open_count == 0
++    assert [event.kind for event in events] == [
++        RenderEventKind.RENDER_STARTED,
++        RenderEventKind.SEGMENT_REUSED,
++        RenderEventKind.RENDER_COMPLETED,
++    ]
++    assert events[1].completed_count == 1
++    assert events[1].progress == 1.0
++
++
++def test_cache_reuse_is_reported_after_materialization(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("cache me")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "cached-output"
++    cache = tmp_path / "shared-cache"
++    render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
++    shutil.rmtree(output)
++    adapter.open_count = 0
++    events: list[RenderEvent] = []
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        on_event=events.append,
++    )
++
++    reused_events = [
++        event for event in events if event.kind is RenderEventKind.SEGMENT_REUSED
++    ]
++    assert result.reused_count == 1
++    assert adapter.open_count == 0
++    assert len(reused_events) == 1
++    assert reused_events[0].status == "reused"
++    assert (output / plan.speech[0].wav).is_file()
++
++
++def test_partial_selection_uses_selected_denominator(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("one", "two", "three", "four")
++    report = _report(adapter, plan, tmp_path)
++    events: list[RenderEvent] = []
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "partial-output",
++        cache_dir=tmp_path / "partial-cache",
++        speech_numbers={2, 4},
++        on_event=events.append,
++    )
++
++    assert not result.failed
++    assert all(event.total_count == 2 for event in events)
++    assert [
++        event.progress
++        for event in events
++        if event.kind is RenderEventKind.SEGMENT_RENDERED
++    ] == [0.5, 1.0]
++
++
++def test_callback_failure_propagates_after_commit_and_output_is_resumable(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("committed before callback")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "callback-output"
++    cache = tmp_path / "callback-cache"
++
++    def fail_after_commit(event: RenderEvent) -> None:
++        if event.kind is RenderEventKind.SEGMENT_RENDERED:
++            raise RuntimeError("consumer stopped")
++
++    with pytest.raises(RenderEventCallbackError):
++        render_renderplan(
++            plan,
++            preflight=report,
++            output_dir=output,
++            cache_dir=cache,
++            on_event=fail_after_commit,
++        )
++
++    adapter.open_count = 0
++    resumed_events: list[RenderEvent] = []
++    resumed = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        on_event=resumed_events.append,
++    )
++    assert not resumed.failed
++    assert resumed.reused_count == 1
++    assert adapter.open_count == 0
++    assert any(event.kind is RenderEventKind.SEGMENT_REUSED for event in resumed_events)
++
++
++def test_open_failure_emits_typed_terminal_progress(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("will fail")
++    report = _report(adapter, plan, tmp_path)
++    adapter.open_error = RuntimeError("engine startup failed")
++    events: list[RenderEvent] = []
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "failed-output",
++        cache_dir=tmp_path / "failed-cache",
++        on_event=events.append,
++    )
++
++    assert result.failed
++    failed = [event for event in events if event.kind is RenderEventKind.SEGMENT_FAILED]
++    assert len(failed) == 1
++    assert failed[0].completed_count == 1
++    assert failed[0].progress == 1.0
++    assert failed[0].error_type == "RuntimeError"
++    assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
++    assert events[-1].status == "failed"
++
++
++def test_estimate_renderplan_reports_verified_reuse_without_side_effects(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from voicerender import estimate_renderplan
++
++    adapter = _install(monkeypatch)
++    plan = _plan("estimate one", "estimate two")
++    output_dir = tmp_path / "render-output"
++
++    initial = estimate_renderplan(plan, output_dir=output_dir)
++    assert initial.selected_count == 2
++    assert initial.known_output_reuse_count == 0
++    assert initial.pending_count == 2
++    assert initial.estimated_seconds is None
++    assert initial.confidence == "unavailable"
++    assert initial.source == "workload-only"
++    assert not output_dir.exists()
++    assert adapter.open_count == 0 and adapter.synthesized_texts == []
++
++    report = _report(adapter, plan, tmp_path)
++    render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output_dir,
++        cache_dir=tmp_path / "cache",
++    )
++    before_manifest = (output_dir / "render-manifest.toml").read_bytes()
++    before_open_count = adapter.open_count
++    before_synthesized = list(adapter.synthesized_texts)
++
++    complete = estimate_renderplan(plan, output_dir=output_dir)
++    partial = estimate_renderplan(plan, output_dir=output_dir, speech_numbers=(1,))
++    forced = estimate_renderplan(plan, output_dir=output_dir, force=True)
++
++    assert (complete.selected_count, complete.known_output_reuse_count) == (2, 2)
++    assert (complete.pending_count, complete.estimated_seconds) == (0, None)
++    assert (partial.selected_count, partial.known_output_reuse_count) == (1, 1)
++    assert (forced.known_output_reuse_count, forced.pending_count) == (0, 2)
++    assert adapter.open_count == before_open_count
++    assert adapter.synthesized_texts == before_synthesized
++    assert (output_dir / "render-manifest.toml").read_bytes() == before_manifest
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index 43753b8..534d65d 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -70,7 +70,13 @@ from .errors import (
+     UnsupportedSynthesisFeatureError,
+     VoiceRenderError,
+ )
+-from .events import RenderEvent, RenderEventCallback, RenderEventKind
++from .estimates import RenderEstimate, estimate_render_book, estimate_renderplan
++from .events import (
++    RenderEvent,
++    RenderEventCallback,
++    RenderEventKind,
++    RenderScope,
++)
+ from .models import (
+     RenderResult,
+     SpeechSegment,
+@@ -93,6 +99,7 @@ from .profile_roles import (
+     set_default_profile_role,
+     set_profile_role,
+ )
++from .progress import EtaConfidence, RenderProgress
+ from .render import render, render_plan
+ from .renderplan_render import RenderPlanResult, render_renderplan
+ from .renderprofile import (
+@@ -156,6 +163,7 @@ __all__ = [
+     "EngineSession",
+     "EngineSynthesisError",
+     "EngineUnavailableError",
++    "EtaConfidence",
+     "ModelArtifact",
+     "ModelInstallRequest",
+     "ModelInstallResult",
+@@ -168,6 +176,7 @@ __all__ = [
+     "PreflightReport",
+     "ProfileError",
+     "PronunciationSpan",
++    "RenderEstimate",
+     "RenderEvent",
+     "RenderEventCallback",
+     "RenderEventCallbackError",
+@@ -177,7 +186,9 @@ __all__ = [
+     "RenderPlanResult",
+     "RenderProfile",
+     "RenderProfileFragment",
++    "RenderProgress",
+     "RenderResult",
++    "RenderScope",
+     "RenderedSpeech",
+     "RequestMeasure",
+     "ResolvedPreparedVoice",
+@@ -209,6 +220,8 @@ __all__ = [
+     "discover_targets",
+     "engine_options",
+     "engine_status",
++    "estimate_render_book",
++    "estimate_renderplan",
+     "inspect_voice",
+     "install_model",
+     "list_engines",
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 1849015..3aa7879 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -6,9 +6,11 @@ import json
+ import os
+ import re
+ import tempfile
++from collections import Counter
+ from collections.abc import Mapping, Sequence
+-from dataclasses import dataclass
++from dataclasses import dataclass, replace
+ from pathlib import Path, PurePosixPath
++from time import monotonic
+ from typing import Any, Literal
+
+ from renderplan import (
+@@ -49,7 +51,9 @@ from .book_layout import (
+     resolve_workspace as _resolve_workspace,
+ )
+ from .errors import ArtifactError, PlanError
++from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .preflight import preflight_render_plan
++from .progress import EtaConfidence, ProgressTracker, RenderProgress, RollingEta
+ from .renderplan_input import EMPHASIS_COMPOSITION_CAPABILITY, EmphasisPolicy
+ from .renderplan_render import (
+     RENDER_DIAGNOSTICS_FILENAME,
+@@ -117,6 +121,7 @@ class ChapterRenderOutcome:
+
+     preflight_report: Path | None = None
+     replan_required: bool = False
++    elapsed_seconds: float = 0.0
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -124,6 +129,7 @@ class BookRenderResult:
+     request: BookRenderRequest
+     report_path: Path
+     outcomes: tuple[ChapterRenderOutcome, ...]
++    elapsed_seconds: float = 0.0
+
+     @property
+     def workspace(self) -> Path:
+@@ -218,6 +224,214 @@ class BookRenderResult:
+         }
+
+
++class _BookProgress:
++    def __init__(
++        self,
++        chapters: Sequence[_LoadedChapter],
++        total_count: int,
++    ) -> None:
++        self.total_count = total_count
++        self.tracker = ProgressTracker(total_count)
++        self._engine_by_item: dict[tuple[str, int, str], str] = {}
++        self._remaining_by_engine: Counter[str] = Counter()
++        self._timings: dict[str, RollingEta] = {}
++        for chapter in chapters:
++            for item in self._selected_items(chapter):
++                segment_id = item.segment_id or item.computed_id()
++                engine = self._engine_name(item.binding)
++                self._engine_by_item[(chapter.entry.id, item.number, segment_id)] = (
++                    engine
++                )
++                self._remaining_by_engine[engine] += 1
++
++    @staticmethod
++    def _selected_items(chapter: _LoadedChapter) -> tuple[Any, ...]:
++        if chapter.speech_numbers is None:
++            return chapter.plan.speech
++        return tuple(
++            item
++            for item in chapter.plan.speech
++            if item.number in chapter.speech_numbers
++        )
++
++    @staticmethod
++    def _engine_name(binding: Mapping[str, Any]) -> str:
++        engine = binding.get("renderer", binding.get("engine"))
++        return engine if isinstance(engine, str) and engine else "unknown"
++
++    def _eta(self) -> tuple[float | None, EtaConfidence]:
++        active = {
++            engine: count
++            for engine, count in self._remaining_by_engine.items()
++            if count > 0
++        }
++        samples = [timing for timing in self._timings.values() if timing.sample_count]
++        if not active:
++            if not samples:
++                return 0.0, "unavailable"
++            return 0.0, min(
++                (timing.confidence for timing in samples),
++                key=("unavailable", "low", "medium", "high").index,
++            )
++
++        remaining_seconds = 0.0
++        confidence: list[EtaConfidence] = []
++        for engine, count in active.items():
++            timing = self._timings.get(engine)
++            if timing is None or timing.sample_count == 0:
++                return None, "unavailable"
++            estimate = timing.estimate(count)
++            if estimate is None:
++                return None, "unavailable"
++            remaining_seconds += estimate
++            confidence.append(timing.confidence)
++        return remaining_seconds, min(
++            confidence, key=("unavailable", "low", "medium", "high").index
++        )
++
++    def snapshot(self) -> RenderProgress:
++        snapshot = self.tracker.snapshot()
++        eta_seconds, confidence = self._eta()
++        return replace(
++            snapshot,
++            eta_seconds=eta_seconds,
++            eta_confidence=confidence,
++        )
++
++    def complete(
++        self,
++        chapter_id: str,
++        segment_number: int,
++        segment_id: str,
++        outcome: Literal["rendered", "reused", "failed"],
++        *,
++        engine: str | None = None,
++        synthesis_seconds: float | None = None,
++    ) -> None:
++        item_key = (chapter_id, segment_number, segment_id)
++        engine_name = self._engine_by_item.get(item_key, engine or "unknown")
++        if outcome == "rendered":
++            self.tracker.complete("rendered", synthesis_seconds=synthesis_seconds)
++        elif outcome == "reused":
++            self.tracker.complete("reused")
++        else:
++            self.tracker.complete("failed")
++        if self._remaining_by_engine[engine_name] > 0:
++            self._remaining_by_engine[engine_name] -= 1
++        if outcome == "rendered" and synthesis_seconds is not None:
++            self._timings.setdefault(engine_name, RollingEta()).add_sample(
++                synthesis_seconds
++            )
++
++    def complete_chapter(
++        self,
++        chapter: _LoadedChapter,
++        outcome: Literal["reused", "failed"],
++    ) -> None:
++        for item in self._selected_items(chapter):
++            self.complete(
++                chapter.entry.id,
++                item.number,
++                item.segment_id or item.computed_id(),
++                outcome,
++            )
++
++    def event(
++        self,
++        kind: RenderEventKind,
++        *,
++        chapter_id: str | None = None,
++        chapter_index: int | None = None,
++        chapter_count: int | None = None,
++        phase: str = "render",
++        status: str | None = None,
++    ) -> RenderEvent:
++        snapshot = self.snapshot()
++        return RenderEvent(
++            kind=kind,
++            scope="book",
++            phase=phase,
++            chapter_id=chapter_id,
++            chapter_index=chapter_index,
++            chapter_count=chapter_count,
++            status=status,
++            completed_count=snapshot.completed_count,
++            total_count=self.total_count,
++            progress=snapshot.progress,
++            rendered_count=snapshot.rendered_count,
++            reused_count=snapshot.reused_count,
++            failed_count=snapshot.failed_count,
++            selected_count=self.total_count,
++            elapsed_seconds=snapshot.elapsed_seconds,
++            eta_seconds=snapshot.eta_seconds,
++            eta_confidence=snapshot.eta_confidence,
++            progress_snapshot=snapshot,
++        )
++
++    def wrap_child(
++        self,
++        event: RenderEvent,
++        *,
++        chapter_id: str,
++        chapter_index: int,
++        chapter_count: int,
++    ) -> RenderEvent:
++        if event.kind in {
++            RenderEventKind.SEGMENT_RENDERED,
++            RenderEventKind.SEGMENT_REUSED,
++            RenderEventKind.SEGMENT_FAILED,
++        }:
++            if event.kind is RenderEventKind.SEGMENT_RENDERED:
++                outcome: Literal["rendered", "reused", "failed"] = "rendered"
++            elif event.kind is RenderEventKind.SEGMENT_REUSED:
++                outcome = "reused"
++            else:
++                outcome = "failed"
++            if event.segment_number is not None and event.segment_id is not None:
++                self.complete(
++                    chapter_id,
++                    event.segment_number,
++                    event.segment_id,
++                    outcome,
++                    engine=event.engine,
++                    synthesis_seconds=event.synthesis_seconds,
++                )
++        snapshot = self.snapshot()
++        return replace(
++            event,
++            scope="book",
++            chapter_id=chapter_id,
++            chapter_index=chapter_index,
++            chapter_count=chapter_count,
++            phase_completed_count=(
++                event.phase_completed_count
++                if event.phase_completed_count is not None
++                else event.completed_count
++            ),
++            phase_total_count=(
++                event.phase_total_count
++                if event.phase_total_count is not None
++                else event.total_count
++            ),
++            phase_progress=(
++                event.phase_progress
++                if event.phase_progress is not None
++                else event.progress
++            ),
++            completed_count=snapshot.completed_count,
++            total_count=self.total_count,
++            progress=snapshot.progress,
++            rendered_count=snapshot.rendered_count,
++            reused_count=snapshot.reused_count,
++            failed_count=snapshot.failed_count,
++            selected_count=self.total_count,
++            elapsed_seconds=snapshot.elapsed_seconds,
++            eta_seconds=snapshot.eta_seconds,
++            eta_confidence=snapshot.eta_confidence,
++            progress_snapshot=snapshot,
++        )
++
++
+ def render_book(
+     workspace: str | Path,
+     *,
+@@ -231,8 +445,10 @@ def render_book(
+     reset_stale_output: bool = False,
+     fail_fast: bool = False,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    on_event: RenderEventCallback | None = None,
+ ) -> BookRenderResult:
+     """Render selected chapters in a RenderPlan variant using shared preflight and render APIs."""
++    book_started = monotonic()
+     try:
+         resolved_emphasis_policy = EmphasisPolicy(emphasis_policy)
+     except (TypeError, ValueError) as exc:
+@@ -261,19 +477,121 @@ def render_book(
+             code="workspace.invalid",
+         )
+
++    book_total = sum(
++        len(chapter.plan.speech)
++        if chapter.speech_numbers is None
++        else len(chapter.speech_numbers)
++        for chapter in request._loaded_chapters
++    )
++    progress = _BookProgress(request._loaded_chapters, book_total)
++    chapter_count = len(request._loaded_chapters)
++    emit_render_event(
++        on_event,
++        progress.event(
++            RenderEventKind.BOOK_STARTED,
++            chapter_count=chapter_count,
++        ),
++    )
++
+     outcomes: list[ChapterRenderOutcome] = []
+     stopped = False
+     for index, chapter in enumerate(request._loaded_chapters, start=1):
++        chapter_started = monotonic()
++        emit_render_event(
++            on_event,
++            progress.event(
++                RenderEventKind.CHAPTER_STARTED,
++                chapter_id=chapter.entry.id,
++                chapter_index=index,
++                chapter_count=chapter_count,
++            ),
++        )
++        completed_before_chapter = progress.tracker.completed_count
+         if stopped:
+             outcome = _skipped_outcome(chapter, index)
++            emit_render_event(
++                on_event,
++                progress.event(
++                    RenderEventKind.CHAPTER_SKIPPED,
++                    chapter_id=chapter.entry.id,
++                    chapter_index=index,
++                    chapter_count=chapter_count,
++                    status="skipped",
++                ),
++            )
+         else:
+-            outcome = _render_chapter(request, chapter, index)
++            if on_event is None:
++                outcome = _render_chapter(request, chapter, index)
++            else:
++
++                def forward_child_event(
++                    event: RenderEvent,
++                    chapter_id: str = chapter.entry.id,
++                    chapter_index: int = index,
++                ) -> None:
++                    emit_render_event(
++                        on_event,
++                        progress.wrap_child(
++                            event,
++                            chapter_id=chapter_id,
++                            chapter_index=chapter_index,
++                            chapter_count=chapter_count,
++                        ),
++                    )
++
++                outcome = _render_chapter(
++                    request,
++                    chapter,
++                    index,
++                    on_event=forward_child_event,
++                )
++            if outcome.status == "reused":
++                progress.complete_chapter(chapter, "reused")
++                event_kind = RenderEventKind.CHAPTER_REUSED
++            else:
++                if (
++                    outcome.status == "failed"
++                    and progress.tracker.completed_count == completed_before_chapter
++                ):
++                    progress.complete_chapter(chapter, "failed")
++                event_kind = RenderEventKind.CHAPTER_FINISHED
++            emit_render_event(
++                on_event,
++                progress.event(
++                    event_kind,
++                    chapter_id=chapter.entry.id,
++                    chapter_index=index,
++                    chapter_count=chapter_count,
++                    status=outcome.status,
++                ),
++            )
++        outcome = replace(
++            outcome,
++            elapsed_seconds=max(0.0, monotonic() - chapter_started),
++        )
+         outcomes.append(outcome)
+         if request.fail_fast and outcome.status == "failed":
+             stopped = True
+
+-    result = BookRenderResult(request, report_path, tuple(outcomes))
++    result = BookRenderResult(
++        request,
++        report_path,
++        tuple(outcomes),
++        elapsed_seconds=max(0.0, monotonic() - book_started),
++    )
+     _write_book_report(result)
++    result = replace(
++        result,
++        elapsed_seconds=max(0.0, monotonic() - book_started),
++    )
++    emit_render_event(
++        on_event,
++        progress.event(
++            RenderEventKind.BOOK_COMPLETED,
++            chapter_count=chapter_count,
++            status="failed" if result.failed else "completed",
++        ),
++    )
+     return result
+
+
+@@ -473,7 +791,11 @@ def _resolve_request(
+
+
+ def _render_chapter(
+-    request: BookRenderRequest, chapter: _LoadedChapter, index: int
++    request: BookRenderRequest,
++    chapter: _LoadedChapter,
++    index: int,
++    *,
++    on_event: RenderEventCallback | None = None,
+ ) -> ChapterRenderOutcome:
+     entry = chapter.entry
+     planned = len(chapter.plan.speech)
+@@ -514,8 +836,14 @@ def _render_chapter(
+         _assert_safe_output_metadata(preflight_path, chapter.output_dir)
+         recheck_report_path = chapter.output_dir / RECHECK_PREFLIGHT_FILENAME
+         _assert_safe_output_metadata(recheck_report_path, chapter.output_dir)
++        preflight_options: dict[str, Any] = {}
++        if on_event is not None:
++            preflight_options["on_event"] = on_event
+         preflight = _get_preflight(
+-            chapter.plan, preflight_path, emphasis_policy=request.emphasis_policy
++            chapter.plan,
++            preflight_path,
++            emphasis_policy=request.emphasis_policy,
++            **preflight_options,
+         )
+     except BookRenderError as exc:
+         return _failure_outcome(chapter, index, planned, selected, exc.code, str(exc))
+@@ -546,6 +874,9 @@ def _render_chapter(
+
+     try:
+         _assert_safe_output_metadata(manifest_path, chapter.output_dir)
++        render_options: dict[str, Any] = {}
++        if on_event is not None:
++            render_options["on_event"] = on_event
+         result = render_renderplan(
+             chapter.plan,
+             preflight=preflight,
+@@ -556,6 +887,7 @@ def _render_chapter(
+             recheck_report_path=recheck_report_path,
+             speech_numbers=chapter.speech_numbers,
+             emphasis_policy=request.emphasis_policy,
++            **render_options,
+         )
+     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
+         error_code = getattr(exc, "code", None)
+@@ -609,6 +941,7 @@ def _get_preflight(
+     path: Path,
+     *,
+     emphasis_policy: EmphasisPolicy,
++    on_event: RenderEventCallback | None = None,
+ ) -> PreflightReport:
+     if path.exists() or path.is_symlink():
+         if path.is_symlink():
+@@ -627,7 +960,14 @@ def _get_preflight(
+                     return existing
+             except (OSError, ValueError, TypeError):
+                 pass
+-    return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
++    if on_event is None:
++        return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
++    return preflight_render_plan(
++        plan,
++        path,
++        emphasis_policy=emphasis_policy,
++        on_event=on_event,
++    )
+
+
+ def _preflight_is_reusable(
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index f3e88a6..b8d7223 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -9,8 +9,10 @@ import json
+ import os
+ import sys
+ import tempfile
++import time
++from collections.abc import Callable
+ from pathlib import Path
+-from typing import Any
++from typing import Any, TextIO
+
+ from renderplan import load_manifest, load_plan
+
+@@ -38,6 +40,7 @@ from .errors import (
+     UnsupportedSynthesisFeatureError,
+     VoiceRenderError,
+ )
++from .events import RenderEvent, RenderEventKind
+ from .models_api import (
+     ModelInstallRequest,
+     ModelRemoveRequest,
+@@ -90,6 +93,15 @@ from .voices_api import (
+ )
+
+
++def _add_progress_option(parser: argparse.ArgumentParser) -> None:
++    parser.add_argument(
++        "--progress",
++        action=argparse.BooleanOptionalAction,
++        default=None,
++        help="Show live progress on stderr (default: auto for interactive human output)",
++    )
++
++
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(
+         prog="voicerender",
+@@ -383,6 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
+     preflight.add_argument("plan", type=Path)
+     preflight.add_argument("-o", "--output", required=True, type=Path)
+     preflight.add_argument("--json", action="store_true")
++    _add_progress_option(preflight)
+
+     preflight.add_argument(
+         "--emphasis-policy",
+@@ -405,6 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
+         help="Reset output owned by a different RenderPlan while reusing cache entries",
+     )
+     render.add_argument("--json", action="store_true")
++    _add_progress_option(render)
+     render.add_argument(
+         "--emphasis-policy",
+         choices=("reject", "defer-to-compose"),
+@@ -440,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     book_render.add_argument("--fail-fast", action="store_true")
+     book_render.add_argument("--json", action="store_true")
++    _add_progress_option(book_render)
+
+     inspect = commands.add_parser(
+         "inspect-manifest", help="Verify a render manifest and its WAVs"
+@@ -450,6 +465,214 @@ def build_parser() -> argparse.ArgumentParser:
+     return parser
+
+
++_PROGRESS_TRANSITIONS = frozenset(
++    {
++        RenderEventKind.PREFLIGHT_STARTED,
++        RenderEventKind.PREFLIGHT_FINISHED,
++        RenderEventKind.RENDER_STARTED,
++        RenderEventKind.RENDER_COMPLETED,
++        RenderEventKind.BOOK_STARTED,
++        RenderEventKind.BOOK_COMPLETED,
++        RenderEventKind.CHAPTER_STARTED,
++        RenderEventKind.CHAPTER_FINISHED,
++        RenderEventKind.CHAPTER_REUSED,
++        RenderEventKind.CHAPTER_SKIPPED,
++        RenderEventKind.ENGINE_OPEN_STARTED,
++        RenderEventKind.ENGINE_OPEN_FINISHED,
++        RenderEventKind.SEGMENT_FAILED,
++    }
++)
++
++
++def _format_duration(seconds: float | None) -> str:
++    if seconds is None:
++        return "--:--"
++    whole_seconds = max(0, int(seconds))
++    hours, remainder = divmod(whole_seconds, 3600)
++    minutes, seconds = divmod(remainder, 60)
++    if hours:
++        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
++    return f"{minutes:02d}:{seconds:02d}"
++
++
++class _ProgressPrinter:
++    """Render typed progress events to stderr without touching stdout."""
++
++    def __init__(
++        self,
++        stream: TextIO,
++        *,
++        is_tty: bool,
++        clock: Callable[[], float] = time.monotonic,
++        min_progress_delta: float = 0.05,
++        min_interval_seconds: float = 30.0,
++    ) -> None:
++        self.stream = stream
++        self.is_tty = is_tty
++        self._clock = clock
++        self._min_progress_delta = min_progress_delta
++        self._min_interval_seconds = min_interval_seconds
++        self._last_output_at: float | None = None
++        self._last_output_progress: float | None = None
++        self._last_phase: str | None = None
++        self._last_chapter: tuple[str | None, int | None] | None = None
++        self._line_open = False
++
++    def __call__(self, event: RenderEvent) -> None:
++        now = self._clock()
++        phase = event.phase or event.scope
++        chapter = (event.chapter_id, event.chapter_index)
++        phase_changed = self._last_phase is not None and phase != self._last_phase
++        chapter_changed = (
++            chapter[1] is not None
++            and self._last_chapter is not None
++            and chapter != self._last_chapter
++        )
++        self._last_phase = phase or self._last_phase
++        if chapter[1] is not None:
++            self._last_chapter = chapter
++
++        progress = (
++            event.phase_progress
++            if phase == "preflight" and event.phase_progress is not None
++            else event.progress
++        )
++        if self.is_tty:
++            self.stream.write("\r" + self._format_event(event, progress))
++            self.stream.flush()
++            self._line_open = True
++            return
++
++        advanced = (
++            progress is not None
++            and self._last_output_progress is not None
++            and progress - self._last_output_progress >= self._min_progress_delta
++        )
++        timed_out = (
++            self._last_output_at is not None
++            and now - self._last_output_at >= self._min_interval_seconds
++        )
++        if not (
++            self._last_output_at is None
++            or event.kind in _PROGRESS_TRANSITIONS
++            or phase_changed
++            or chapter_changed
++            or advanced
++            or timed_out
++        ):
++            return
++        self.stream.write(self._format_event(event, progress, non_tty=True) + "\n")
++        self.stream.flush()
++        self._last_output_at = now
++        if progress is not None:
++            self._last_output_progress = progress
++
++    def _format_event(
++        self,
++        event: RenderEvent,
++        progress: float | None,
++        *,
++        non_tty: bool = False,
++    ) -> str:
++        is_preflight = event.phase == "preflight" or event.scope == "preflight"
++        percent = "--.-%" if progress is None else f"{progress * 100:.1f}%"
++        completed = (
++            event.phase_completed_count
++            if is_preflight and event.phase_completed_count is not None
++            else event.completed_count
++        )
++        total = (
++            event.phase_total_count
++            if is_preflight and event.phase_total_count is not None
++            else event.total_count
++        )
++        count = f"{completed if completed is not None else '?'}"
++        count += f"/{total if total is not None else '?'}"
++        elapsed = (
++            event.phase_elapsed_seconds
++            if is_preflight and event.phase_elapsed_seconds is not None
++            else event.elapsed_seconds
++        )
++        chapter = (
++            f"chapter {event.chapter_index}/{event.chapter_count}"
++            if event.chapter_index is not None and event.chapter_count is not None
++            else None
++        )
++        if is_preflight:
++            prefix = "preflight "
++            details = [
++                f"{prefix}[{progress * 100:5.1f}%] {count} speech"
++                if progress is not None
++                else f"{prefix}[--.-%] {count} speech"
++            ]
++        else:
++            details = [
++                f"[{progress * 100:5.1f}%] {count} speech"
++                if progress is not None
++                else f"[--.-%] {count} speech"
++            ]
++            if event.rendered_count is not None or event.reused_count is not None:
++                details.append(
++                    f"{event.rendered_count or 0} rendered, {event.reused_count or 0} reused"
++                )
++        status = self._event_status(event)
++        if status is not None:
++            details.append(status)
++        details.append(f"elapsed {_format_duration(elapsed)}")
++        if not is_preflight:
++            details.append(f"ETA {_format_duration(event.eta_seconds)}")
++        if chapter is not None:
++            details.append(chapter)
++        if non_tty:
++            label = "preflight progress" if is_preflight else "progress"
++            fields = [label, percent, count]
++            if event.rendered_count is not None:
++                fields.append(f"rendered={event.rendered_count}")
++            if event.reused_count is not None:
++                fields.append(f"reused={event.reused_count}")
++            fields.append(f"elapsed={_format_duration(elapsed)}")
++            if not is_preflight:
++                fields.append(f"eta={_format_duration(event.eta_seconds)}")
++            if status is not None:
++                fields.append(status.replace(" ", "_"))
++            if chapter is not None:
++                fields.append(chapter.replace(" ", "_"))
++            return " ".join(fields)
++        return " | ".join(details)
++
++    @staticmethod
++    def _event_status(event: RenderEvent) -> str | None:
++        if event.kind is RenderEventKind.ENGINE_OPEN_STARTED:
++            return f"opening {event.engine or 'engine'}"
++        if event.kind is RenderEventKind.ENGINE_OPEN_FINISHED:
++            return f"opened {event.engine or 'engine'}"
++        if event.kind is RenderEventKind.SEGMENT_STARTED and event.engine:
++            return f"synthesizing {event.engine}"
++        if event.kind is RenderEventKind.SEGMENT_FAILED:
++            return f"failed {event.error_code or event.status or 'speech item'}"
++        return None
++
++    def finish(self) -> None:
++        if self.is_tty and self._line_open:
++            self.stream.write("\n")
++            self.stream.flush()
++            self._line_open = False
++
++
++def _progress_callback(
++    args: Any,
++    *,
++    stream: TextIO | None = None,
++    clock: Callable[[], float] = time.monotonic,
++) -> _ProgressPrinter | None:
++    output = sys.stderr if stream is None else stream
++    is_tty = output.isatty()
++    enabled = args.progress if args.progress is not None else is_tty and not args.json
++    if not enabled:
++        return None
++    return _ProgressPrinter(output, is_tty=is_tty, clock=clock)
++
++
+ def _json_options(entries: list[str], *, label: str = "--option") -> dict[str, Any]:
+     result: dict[str, Any] = {}
+     for entry in entries:
+@@ -1485,9 +1708,17 @@ def main(argv: list[str] | None = None) -> int:
+                 raise ValueError(
+                     "preflight report path must not overwrite its RenderPlan"
+                 )
+-            report = preflight_render_plan(
+-                load_plan(args.plan), args.output, emphasis_policy=args.emphasis_policy
+-            )
++            progress = _progress_callback(args)
++            try:
++                report = preflight_render_plan(
++                    load_plan(args.plan),
++                    args.output,
++                    emphasis_policy=args.emphasis_policy,
++                    on_event=progress,
++                )
++            finally:
++                if progress is not None:
++                    progress.finish()
+             payload = _preflight_payload(report)
+             payload["output"] = str(args.output)
+             if args.json:
+@@ -1508,16 +1739,22 @@ def main(argv: list[str] | None = None) -> int:
+                 raise ValueError(
+                     "fresh preflight report must not overwrite the RenderPlan or supplied report"
+                 )
+-            result = render_renderplan(
+-                args.plan,
+-                preflight=args.preflight,
+-                output_dir=args.out_dir,
+-                cache_dir=args.cache_dir,
+-                recheck_report_path=args.recheck_report,
+-                force=args.force,
+-                reset_stale_output=args.reset_stale,
+-                emphasis_policy=args.emphasis_policy,
+-            )
++            progress = _progress_callback(args)
++            try:
++                result = render_renderplan(
++                    args.plan,
++                    preflight=args.preflight,
++                    output_dir=args.out_dir,
++                    cache_dir=args.cache_dir,
++                    recheck_report_path=args.recheck_report,
++                    force=args.force,
++                    reset_stale_output=args.reset_stale,
++                    emphasis_policy=args.emphasis_policy,
++                    on_event=progress,
++                )
++            finally:
++                if progress is not None:
++                    progress.finish()
+             payload = _render_payload(result)
+             if args.json:
+                 print(json.dumps(payload, ensure_ascii=False, indent=2))
+@@ -1543,20 +1780,26 @@ def main(argv: list[str] | None = None) -> int:
+             return 0
+
+         if args.command == "render-book":
++            progress = _progress_callback(args)
+             try:
+-                book_result = render_book(
+-                    args.book,
+-                    variant=args.variant,
+-                    chapters=args.chapters,
+-                    speech=args.speech,
+-                    renderplan_root=args.renderplan_root,
+-                    output_root=args.output_root,
+-                    cache_dir=args.cache_dir,
+-                    force=args.force,
+-                    reset_stale_output=args.reset_stale,
+-                    fail_fast=args.fail_fast,
+-                    emphasis_policy=args.emphasis_policy,
+-                )
++                try:
++                    book_result = render_book(
++                        args.book,
++                        variant=args.variant,
++                        chapters=args.chapters,
++                        speech=args.speech,
++                        renderplan_root=args.renderplan_root,
++                        output_root=args.output_root,
++                        cache_dir=args.cache_dir,
++                        force=args.force,
++                        reset_stale_output=args.reset_stale,
++                        fail_fast=args.fail_fast,
++                        emphasis_policy=args.emphasis_policy,
++                        on_event=progress,
++                    )
++                finally:
++                    if progress is not None:
++                        progress.finish()
+             except (BookRenderError, OSError, ValueError, TypeError) as exc:
+                 error_code = getattr(exc, "code", "workspace.invalid")
+                 payload = {
+diff --git a/voicerender/estimates.py b/voicerender/estimates.py
+new file mode 100644
+index 0000000..fd7aa4e
+--- /dev/null
++++ b/voicerender/estimates.py
+@@ -0,0 +1,179 @@
++"""Side-effect-free workload estimates for VoiceRender workflows."""
++
++from __future__ import annotations
++
++from collections.abc import Collection
++from dataclasses import dataclass
++from pathlib import Path
++
++from renderplan import RenderPlan, SpeechItem, load_manifest, load_plan
++
++from .book import _resolve_request
++from .errors import ArtifactError, PlanError
++from .progress import EtaConfidence
++from .renderplan_input import EmphasisPolicy
++from .renderplan_render import (
++    RENDER_MANIFEST_FILENAME,
++    _select_speech_items,
++)
++from .storage import verified_wav
++
++
++@dataclass(frozen=True, slots=True)
++class RenderEstimate:
++    """Workload and verified-output reuse counts without a latency prediction."""
++
++    selected_count: int
++    known_output_reuse_count: int
++    pending_count: int
++    estimated_seconds: float | None = None
++    confidence: EtaConfidence = "unavailable"
++    source: str = "workload-only"
++
++
++def estimate_renderplan(
++    plan: RenderPlan | str | Path,
++    *,
++    output_dir: str | Path | None = None,
++    speech_numbers: Collection[int] | None = None,
++    force: bool = False,
++    reset_stale_output: bool = False,
++) -> RenderEstimate:
++    """Inspect selected workload and verified output reuse without synthesis.
++
++    ``output_dir`` is optional. Without it the estimate reports workload only;
++    with it, valid artifacts in a matching RenderManifest count as reusable.
++    No preflight capacity measurement is interpreted as latency evidence.
++    """
++
++    parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
++    if not isinstance(parsed_plan, RenderPlan):
++        raise PlanError("estimate input must be a RenderPlan")
++    selected = _select_speech_items(parsed_plan, speech_numbers)
++    reusable = 0
++    if output_dir is not None and not (force or reset_stale_output):
++        output = Path(output_dir).expanduser().resolve(strict=False)
++        reusable = _verified_output_reuse_count(
++            parsed_plan,
++            output,
++            selected,
++            output / RENDER_MANIFEST_FILENAME,
++        )
++    return _estimate(len(selected), reusable)
++
++
++def estimate_render_book(
++    workspace: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    reset_stale_output: bool = False,
++    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++) -> RenderEstimate:
++    """Inspect a selected book workload and verified chapter outputs only."""
++
++    try:
++        resolved_emphasis_policy = EmphasisPolicy(emphasis_policy)
++    except (TypeError, ValueError) as exc:
++        raise ValueError(
++            "emphasis_policy must be 'reject' or 'defer-to-compose'"
++        ) from exc
++    request = _resolve_request(
++        workspace,
++        variant=variant,
++        chapter_selector=chapters,
++        speech_selector=speech,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++        cache_dir=cache_dir,
++        force=force,
++        reset_stale_output=reset_stale_output,
++        fail_fast=False,
++        emphasis_policy=resolved_emphasis_policy,
++    )
++    selected_count = 0
++    reusable_count = 0
++    for chapter in request._loaded_chapters:
++        selected = (
++            chapter.plan.speech
++            if chapter.speech_numbers is None
++            else tuple(
++                item
++                for item in chapter.plan.speech
++                if item.number in chapter.speech_numbers
++            )
++        )
++        selected_count += len(selected)
++        if not (force or reset_stale_output):
++            reusable_count += _verified_output_reuse_count(
++                chapter.plan,
++                chapter.output_dir,
++                selected,
++                chapter.output_dir / RENDER_MANIFEST_FILENAME,
++            )
++    return _estimate(selected_count, reusable_count)
++
++
++def _verified_output_reuse_count(
++    plan: RenderPlan,
++    output_dir: Path,
++    selected: tuple[SpeechItem, ...],
++    manifest_path: Path,
++) -> int:
++    if manifest_path.is_symlink() or not manifest_path.is_file():
++        return 0
++    try:
++        manifest = load_manifest(manifest_path)
++        manifest.validate_against(plan)
++    except (ArtifactError, OSError, ValueError, TypeError, PlanError):
++        return 0
++    expected = {
++        (item.number, item.segment_id or item.computed_id()): item
++        for item in plan.speech
++    }
++    selected_keys = {
++        (item.number, item.segment_id or item.computed_id()) for item in selected
++    }
++    verified: set[tuple[int, str]] = set()
++    for artifact in manifest.speech:
++        key = (artifact.segment_number, artifact.segment_id)
++        item = expected.get(key)
++        if key not in selected_keys or key in verified or item is None:
++            continue
++        if artifact.wav != item.wav:
++            continue
++        try:
++            valid = verified_wav(
++                output_dir / artifact.wav,
++                {
++                    "sha256": artifact.sha256.removeprefix("sha256:"),
++                    "frames": artifact.frames,
++                    "sample_rate": artifact.sample_rate,
++                    "channels": artifact.channels,
++                },
++            )
++        except (OSError, ValueError, TypeError):
++            valid = False
++        if valid:
++            verified.add(key)
++    return len(verified)
++
++
++def _estimate(selected_count: int, reusable_count: int) -> RenderEstimate:
++    reusable = min(max(reusable_count, 0), selected_count)
++    return RenderEstimate(
++        selected_count=selected_count,
++        known_output_reuse_count=reusable,
++        pending_count=selected_count - reusable,
++        estimated_seconds=None,
++        confidence="unavailable",
++        source="workload-only",
++    )
++
++
++__all__ = ["RenderEstimate", "estimate_render_book", "estimate_renderplan"]
+diff --git a/voicerender/events.py b/voicerender/events.py
+index 199f412..7e19609 100644
+--- a/voicerender/events.py
++++ b/voicerender/events.py
+@@ -5,11 +5,26 @@ from __future__ import annotations
+ from collections.abc import Callable
+ from dataclasses import dataclass
+ from enum import Enum
++from typing import Literal
++
++from .errors import RenderEventCallbackError
++from .progress import EtaConfidence, RenderProgress
++
++RenderScope = Literal["preflight", "render", "book"]
+
+
+ class RenderEventKind(str, Enum):
+     PREFLIGHT_STARTED = "preflight_started"
++    PREFLIGHT_ITEM_STARTED = "preflight_item_started"
++    PREFLIGHT_ITEM_FINISHED = "preflight_item_finished"
+     PREFLIGHT_FINISHED = "preflight_finished"
++    RENDER_STARTED = "render_started"
++    BOOK_STARTED = "book_started"
++    BOOK_COMPLETED = "book_completed"
++    CHAPTER_STARTED = "chapter_started"
++    CHAPTER_FINISHED = "chapter_finished"
++    CHAPTER_REUSED = "chapter_reused"
++    CHAPTER_SKIPPED = "chapter_skipped"
+     ENGINE_OPEN_STARTED = "engine_open_started"
+     ENGINE_OPEN_FINISHED = "engine_open_finished"
+     SEGMENT_STARTED = "segment_started"
+@@ -35,9 +50,52 @@ class RenderEvent:
+     reused_count: int | None = None
+     failed_count: int | None = None
+     selected_count: int | None = None
++    scope: RenderScope | None = None
++    phase: str | None = None
++    phase_completed_count: int | None = None
++    phase_total_count: int | None = None
++    phase_progress: float | None = None
++    chapter_id: str | None = None
++    chapter_index: int | None = None
++    chapter_count: int | None = None
++    segment_number: int | None = None
++    segment_id: str | None = None
++    completed_count: int | None = None
++    total_count: int | None = None
++    progress: float | None = None
++    elapsed_seconds: float | None = None
++    phase_elapsed_seconds: float | None = None
++    synthesis_seconds: float | None = None
++    eta_seconds: float | None = None
++    eta_confidence: EtaConfidence = "unavailable"
++    progress_snapshot: RenderProgress | None = None
+
+
+ RenderEventCallback = Callable[[RenderEvent], None]
+
+
+-__all__ = ["RenderEvent", "RenderEventCallback", "RenderEventKind"]
++def emit_render_event(
++    callback: RenderEventCallback | None,
++    event: RenderEvent,
++) -> None:
++    """Synchronously dispatch one event and normalize callback failures."""
++
++    if callback is None:
++        return
++    try:
++        callback(event)
++    except RenderEventCallbackError:
++        raise
++    except Exception as exc:
++        raise RenderEventCallbackError(event.kind.value, exc) from exc
++
++
++__all__ = [
++    "EtaConfidence",
++    "RenderEvent",
++    "RenderEventCallback",
++    "RenderEventKind",
++    "RenderProgress",
++    "RenderScope",
++    "emit_render_event",
++]
+diff --git a/voicerender/preflight.py b/voicerender/preflight.py
+index 26ea8a2..379dbfd 100644
+--- a/voicerender/preflight.py
++++ b/voicerender/preflight.py
+@@ -22,6 +22,8 @@ from renderplan import (
+ from .engines.base import EngineSelection, EngineSession
+ from .engines.registry import get_adapter, open_session
+ from .errors import PlanError
++from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
++from .progress import ProgressTracker
+ from .renderplan_input import (
+     EmphasisPolicy,
+     MeasurementOutcome,
+@@ -38,11 +40,47 @@ class _OpenFailure:
+     detail: str
+
+
++def _preflight_progress_event(
++    kind: RenderEventKind,
++    tracker: ProgressTracker,
++    *,
++    plan_id: str,
++    segment_number: int | None = None,
++    segment_id: str | None = None,
++    status: str | None = None,
++) -> RenderEvent:
++    snapshot = tracker.snapshot()
++    return RenderEvent(
++        kind=kind,
++        plan_id=plan_id,
++        scope="preflight",
++        phase="preflight",
++        segment_number=segment_number,
++        segment_id=segment_id,
++        status=status,
++        completed_count=snapshot.completed_count,
++        total_count=snapshot.total_count,
++        progress=snapshot.progress,
++        rendered_count=snapshot.rendered_count,
++        reused_count=snapshot.reused_count,
++        failed_count=snapshot.failed_count,
++        selected_count=snapshot.total_count,
++        phase_completed_count=snapshot.completed_count,
++        phase_total_count=snapshot.total_count,
++        phase_progress=snapshot.progress,
++        elapsed_seconds=snapshot.elapsed_seconds,
++        eta_seconds=snapshot.eta_seconds,
++        eta_confidence=snapshot.eta_confidence,
++        progress_snapshot=snapshot,
++    )
++
++
+ def preflight_render_plan(
+     plan: RenderPlan,
+     output: str | Path,
+     *,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    on_event: RenderEventCallback | None = None,
+ ) -> PreflightReport:
+     """Measure each required speech occurrence, then validate and persist its report."""
+     if not isinstance(plan, RenderPlan):
+@@ -50,11 +88,32 @@ def preflight_render_plan(
+     checks: list[PreflightCheck] = []
+     sessions: dict[str, EngineSession | _OpenFailure] = {}
+
++    required_count = sum(item.preflight_required for item in plan.speech)
++    progress_tracker = ProgressTracker(required_count)
++    plan_id = plan.plan_id or plan.computed_id()
++    emit_render_event(
++        on_event,
++        _preflight_progress_event(
++            RenderEventKind.PREFLIGHT_STARTED,
++            progress_tracker,
++            plan_id=plan_id,
++        ),
++    )
+     with ExitStack() as stack:
+         for item in plan.speech:
+             if not item.preflight_required:
+                 continue
+             segment_id = item.segment_id or item.computed_id()
++            emit_render_event(
++                on_event,
++                _preflight_progress_event(
++                    RenderEventKind.PREFLIGHT_ITEM_STARTED,
++                    progress_tracker,
++                    plan_id=plan_id,
++                    segment_number=item.number,
++                    segment_id=segment_id,
++                ),
++            )
+             try:
+                 conversion = speech_request_conversion_from_renderplan(
+                     item, emphasis_policy=emphasis_policy
+@@ -66,7 +125,20 @@ def preflight_render_plan(
+                 adapter = get_adapter(selection.engine)
+                 session_key = _session_compatibility_key(adapter, selection)
+             except Exception as exc:  # noqa: BLE001 - Preflight must turn every binding failure into a reject check.
+-                checks.append(_error_check(item, segment_id, exc))
++                check = _error_check(item, segment_id, exc)
++                checks.append(check)
++                progress_tracker.advance()
++                emit_render_event(
++                    on_event,
++                    _preflight_progress_event(
++                        RenderEventKind.PREFLIGHT_ITEM_FINISHED,
++                        progress_tracker,
++                        plan_id=plan_id,
++                        segment_number=item.number,
++                        segment_id=segment_id,
++                        status=check.status,
++                    ),
++                )
+                 continue
+
+             cached = sessions.get(session_key)
+@@ -80,13 +152,24 @@ def preflight_render_plan(
+                     )
+                 sessions[session_key] = cached
+             if isinstance(cached, _OpenFailure):
+-                checks.append(
+-                    _error_check(
+-                        item,
+-                        segment_id,
+-                        RuntimeError(cached.detail),
+-                        source=cached.source,
+-                    )
++                check = _error_check(
++                    item,
++                    segment_id,
++                    RuntimeError(cached.detail),
++                    source=cached.source,
++                )
++                checks.append(check)
++                progress_tracker.advance()
++                emit_render_event(
++                    on_event,
++                    _preflight_progress_event(
++                        RenderEventKind.PREFLIGHT_ITEM_FINISHED,
++                        progress_tracker,
++                        plan_id=plan_id,
++                        segment_number=item.number,
++                        segment_id=segment_id,
++                        status=check.status,
++                    ),
+                 )
+                 continue
+
+@@ -96,14 +179,25 @@ def preflight_render_plan(
+                 outcome = classify_measurement(exc)
+             else:
+                 outcome = classify_measurement(measured)
+-            checks.append(
+-                _measurement_check(
+-                    item,
+-                    segment_id,
+-                    outcome,
+-                    deferred_capability=conversion.deferred_capability,
+-                    deferred_control_count=conversion.deferred_control_count,
+-                )
++            check = _measurement_check(
++                item,
++                segment_id,
++                outcome,
++                deferred_capability=conversion.deferred_capability,
++                deferred_control_count=conversion.deferred_control_count,
++            )
++            checks.append(check)
++            progress_tracker.advance()
++            emit_render_event(
++                on_event,
++                _preflight_progress_event(
++                    RenderEventKind.PREFLIGHT_ITEM_FINISHED,
++                    progress_tracker,
++                    plan_id=plan_id,
++                    segment_number=item.number,
++                    segment_id=segment_id,
++                    status=check.status,
++                ),
+             )
+
+         expected = {
+@@ -162,6 +256,15 @@ def preflight_render_plan(
+         ).with_identity()
+         report.validate_against(plan)
+         save_preflight(report, output)
++        emit_render_event(
++            on_event,
++            _preflight_progress_event(
++                RenderEventKind.PREFLIGHT_FINISHED,
++                progress_tracker,
++                plan_id=plan_id,
++                status=report.status,
++            ),
++        )
+     return report
+
+
+diff --git a/voicerender/progress.py b/voicerender/progress.py
+new file mode 100644
+index 0000000..9290890
+--- /dev/null
++++ b/voicerender/progress.py
+@@ -0,0 +1,177 @@
++"""Formatting-neutral progress accounting and live synthesis ETA estimation."""
++
++from __future__ import annotations
++
++from collections import deque
++from collections.abc import Callable
++from dataclasses import dataclass
++from math import isfinite
++from statistics import median
++from time import monotonic
++from typing import Literal
++
++EtaConfidence = Literal["unavailable", "low", "medium", "high"]
++TerminalOutcome = Literal["rendered", "reused", "failed"]
++
++
++@dataclass(frozen=True, slots=True)
++class RenderProgress:
++    """Immutable progress snapshot for one render invocation."""
++
++    completed_count: int
++    total_count: int
++    progress: float
++    rendered_count: int
++    reused_count: int
++    failed_count: int
++    elapsed_seconds: float
++    eta_seconds: float | None
++    eta_confidence: EtaConfidence
++
++
++class RollingEta:
++    """Estimate remaining time from a bounded window of successful syntheses."""
++
++    def __init__(self, *, window_size: int = 8) -> None:
++        if window_size < 1:
++            raise ValueError("window_size must be at least 1")
++        self._durations: deque[float] = deque(maxlen=window_size)
++
++    @property
++    def sample_count(self) -> int:
++        return len(self._durations)
++
++    @property
++    def confidence(self) -> EtaConfidence:
++        count = self.sample_count
++        if count == 0:
++            return "unavailable"
++        if count == 1:
++            return "low"
++        if count < 5:
++            return "medium"
++        return "high"
++
++    def add_sample(self, duration_seconds: float) -> None:
++        duration = float(duration_seconds)
++        if not isfinite(duration) or duration < 0:
++            raise ValueError("synthesis duration must be a finite non-negative number")
++        self._durations.append(duration)
++
++    def estimate(self, remaining_items: int) -> float | None:
++        if remaining_items < 0:
++            raise ValueError("remaining_items must be non-negative")
++        if remaining_items == 0:
++            return 0.0
++        if not self._durations:
++            return None
++        return float(median(self._durations)) * remaining_items
++
++
++class ProgressTracker:
++    """Track terminal speech-item outcomes and estimate remaining synthesis time.
++
++    Reuse and failure advance occurrence progress, but only successfully rendered
++    items contribute duration samples. The ETA applies the rolling median
++    synthesis duration to unresolved occurrences; it is intentionally unknown
++    until a successful synthesis sample exists.
++    """
++
++    def __init__(
++        self,
++        total_count: int,
++        *,
++        clock: Callable[[], float] = monotonic,
++        eta_window: int = 8,
++    ) -> None:
++        if total_count < 0:
++            raise ValueError("total_count must be non-negative")
++        self.total_count = total_count
++        self._clock = clock
++        self._started_at = float(clock())
++        if not isfinite(self._started_at):
++            raise ValueError("clock must return a finite value")
++        self._last_elapsed = 0.0
++        self._completed_count = 0
++        self._rendered_count = 0
++        self._reused_count = 0
++        self._failed_count = 0
++        self._eta = RollingEta(window_size=eta_window)
++
++    @property
++    def completed_count(self) -> int:
++        return self._completed_count
++
++    @property
++    def rendered_count(self) -> int:
++        return self._rendered_count
++
++    @property
++    def reused_count(self) -> int:
++        return self._reused_count
++
++    @property
++    def failed_count(self) -> int:
++        return self._failed_count
++
++    @property
++    def eta_confidence(self) -> EtaConfidence:
++        return self._eta.confidence
++
++    def advance(self) -> RenderProgress:
++        """Advance terminal work without assigning it to a synthesis result category."""
++
++        if self._completed_count >= self.total_count:
++            raise ValueError("cannot complete more items than total_count")
++        self._completed_count += 1
++        return self.snapshot()
++
++    def complete(
++        self,
++        outcome: TerminalOutcome,
++        *,
++        synthesis_seconds: float | None = None,
++    ) -> RenderProgress:
++        """Record one terminal item; pass duration only after artifact commit."""
++
++        if outcome not in ("rendered", "reused", "failed"):
++            raise ValueError(f"unknown terminal outcome: {outcome!r}")
++        if self._completed_count >= self.total_count:
++            raise ValueError("cannot complete more items than total_count")
++        if synthesis_seconds is not None:
++            if outcome != "rendered":
++                raise ValueError("only rendered items may contribute synthesis timing")
++            self._eta.add_sample(synthesis_seconds)
++
++        self._completed_count += 1
++        if outcome == "rendered":
++            self._rendered_count += 1
++        elif outcome == "reused":
++            self._reused_count += 1
++        else:
++            self._failed_count += 1
++        return self.snapshot()
++
++    def snapshot(self) -> RenderProgress:
++        """Return a current immutable snapshot without changing item counts."""
++
++        now = float(self._clock())
++        if not isfinite(now):
++            raise ValueError("clock must return a finite value")
++        self._last_elapsed = max(self._last_elapsed, now - self._started_at, 0.0)
++        remaining = self.total_count - self._completed_count
++        fraction = self._completed_count / self.total_count if self.total_count else 1.0
++        return RenderProgress(
++            completed_count=self._completed_count,
++            total_count=self.total_count,
++            progress=fraction,
++            rendered_count=self._rendered_count,
++            reused_count=self._reused_count,
++            failed_count=self._failed_count,
++            elapsed_seconds=self._last_elapsed,
++            eta_seconds=self._eta.estimate(remaining),
++            eta_confidence=self._eta.confidence,
++        )
++
++
++__all__ = ["EtaConfidence", "ProgressTracker", "RenderProgress", "RollingEta"]
+diff --git a/voicerender/render.py b/voicerender/render.py
+index 2185c11..4ab2418 100644
+--- a/voicerender/render.py
++++ b/voicerender/render.py
+@@ -8,10 +8,12 @@ import shutil
+ from collections.abc import Iterable, Iterator
+ from contextlib import ExitStack, contextmanager
+ from pathlib import Path
++from time import monotonic
+ from typing import Any
+
+ from .engines import get_engine
+-from .errors import ArtifactError, PlanError, ProfileError
++from .errors import ArtifactError, PlanError, ProfileError, RenderEventCallbackError
++from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .models import (
+     SCHEMA_MANIFEST,
+     RenderResult,
+@@ -20,6 +22,7 @@ from .models import (
+     VoicePlan,
+     VoiceProfile,
+ )
++from .progress import ProgressTracker
+ from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
+
+ RENDER_ALGORITHM = "voicerender.batch.v1"
+@@ -150,6 +153,7 @@ def render(
+     force: bool = False,
+     source_plan_id: str | None = None,
+     fail_fast: bool = True,
++    on_event: RenderEventCallback | None = None,
+ ) -> RenderResult:
+     """Render selected logical speech segments into a persisted WAV bundle.
+
+@@ -229,6 +233,56 @@ def render(
+     }
+     manifest_path = out / "manifest.json"
+     rendered = reused = failed = 0
++    progress_tracker = ProgressTracker(len(chosen))
++
++    def emit_progress(
++        kind: RenderEventKind,
++        *,
++        index: int | None = None,
++        segment: SpeechSegment | None = None,
++        engine: str | None = None,
++        status: str | None = None,
++        error: Exception | None = None,
++        synthesis_seconds: float | None = None,
++    ) -> None:
++        snapshot = progress_tracker.snapshot()
++        error_code = getattr(error, "code", None) if error is not None else None
++        emit_render_event(
++            on_event,
++            RenderEvent(
++                kind=kind,
++                plan_id=source_plan_id,
++                locator=(
++                    f"{segment.scope_id}:{segment.id}" if segment is not None else None
++                ),
++                role=segment.role if segment is not None else None,
++                engine=engine,
++                status=status,
++                error_type=type(error).__name__ if error is not None else None,
++                error_code=error_code if isinstance(error_code, str) else None,
++                selected_count=len(chosen),
++                scope="render",
++                phase="render",
++                segment_number=index + 1 if index is not None else None,
++                segment_id=segment.id if segment is not None else None,
++                completed_count=snapshot.completed_count,
++                total_count=snapshot.total_count,
++                progress=snapshot.progress,
++                rendered_count=snapshot.rendered_count,
++                reused_count=snapshot.reused_count,
++                failed_count=snapshot.failed_count,
++                phase_completed_count=snapshot.completed_count,
++                phase_total_count=snapshot.total_count,
++                phase_progress=snapshot.progress,
++                elapsed_seconds=snapshot.elapsed_seconds,
++                synthesis_seconds=synthesis_seconds,
++                eta_seconds=snapshot.eta_seconds,
++                eta_confidence=snapshot.eta_confidence,
++                progress_snapshot=snapshot,
++            ),
++        )
++
++    emit_progress(RenderEventKind.RENDER_STARTED)
+
+     with _exclusive_run(out):
+         prior: dict[tuple[str | None, str | None, str | None], Any] = {}
+@@ -255,6 +309,15 @@ def render(
+                 entry = entries[index]
+                 key = entry["synthesis_key"]
+                 target = out / entry["path"]
++                engine_name = str(entry["engine"])
++                emit_progress(
++                    RenderEventKind.SEGMENT_STARTED,
++                    index=index,
++                    segment=seg,
++                    engine=engine_name,
++                    status="started",
++                )
++                synthesis_seconds: float | None = None
+                 try:
+                     old = prior.get((seg.scope_id, seg.id, key)) if prior else None
+                     if (
+@@ -286,12 +349,44 @@ def render(
+                             binding = profile.roles[seg.role]
+                             role_key = digest(identity_by_role[seg.role])
+                             if role_key not in sessions:
+-                                sessions[role_key] = opened.enter_context(
+-                                    get_engine(binding.engine).open(binding)
++                                emit_progress(
++                                    RenderEventKind.ENGINE_OPEN_STARTED,
++                                    index=index,
++                                    segment=seg,
++                                    engine=binding.engine,
++                                    status="opening",
++                                )
++                                try:
++                                    session = opened.enter_context(
++                                        get_engine(binding.engine).open(binding)
++                                    )
++                                except RenderEventCallbackError:
++                                    raise
++                                except Exception as exc:
++                                    emit_progress(
++                                        RenderEventKind.ENGINE_OPEN_FINISHED,
++                                        index=index,
++                                        segment=seg,
++                                        engine=binding.engine,
++                                        status="failed",
++                                        error=exc,
++                                    )
++                                    raise
++                                sessions[role_key] = session
++                                emit_progress(
++                                    RenderEventKind.ENGINE_OPEN_FINISHED,
++                                    index=index,
++                                    segment=seg,
++                                    engine=binding.engine,
++                                    status="opened",
+                                 )
++                            synthesis_started = monotonic()
+                             result = sessions[role_key].synthesize(
+                                 request_id=seg.id, text=seg.text, language=seg.language
+                             )
++                            synthesis_seconds = max(
++                                0.0, monotonic() - synthesis_started
++                            )
+                             info = atomic_wav(
+                                 cache / f"{key}.wav",
+                                 result.audio,
+@@ -313,6 +408,8 @@ def render(
+                                 timing_source=sidecar["timing_source"],
+                             )
+                             rendered += 1
++                except RenderEventCallbackError:
++                    raise
+                 except Exception as exc:
+                     entry.update(
+                         status="failed",
+@@ -320,11 +417,46 @@ def render(
+                     )
+                     failed += 1
+                     atomic_json(manifest_path, document)
++                    progress_tracker.complete("failed")
++                    emit_progress(
++                        RenderEventKind.SEGMENT_FAILED,
++                        index=index,
++                        segment=seg,
++                        engine=engine_name,
++                        status="failed",
++                        error=exc,
++                    )
+                     if fail_fast:
+                         raise
+-                atomic_json(manifest_path, document)
++                else:
++                    atomic_json(manifest_path, document)
++                    if entry["status"] == "rendered":
++                        progress_tracker.complete(
++                            "rendered", synthesis_seconds=synthesis_seconds
++                        )
++                        emit_progress(
++                            RenderEventKind.SEGMENT_RENDERED,
++                            index=index,
++                            segment=seg,
++                            engine=engine_name,
++                            status="rendered",
++                            synthesis_seconds=synthesis_seconds,
++                        )
++                    else:
++                        progress_tracker.complete("reused")
++                        emit_progress(
++                            RenderEventKind.SEGMENT_REUSED,
++                            index=index,
++                            segment=seg,
++                            engine=engine_name,
++                            status="reused",
++                        )
+         document["complete"] = failed == 0
+         atomic_json(manifest_path, document)
++        emit_progress(
++            RenderEventKind.RENDER_COMPLETED,
++            status="failed" if failed else "completed",
++        )
+     return RenderResult(
+         manifest_path=manifest_path,
+         rendered_count=rendered,
+@@ -345,6 +477,7 @@ def render_plan(
+     resume: bool = True,
+     force: bool = False,
+     fail_fast: bool = True,
++    on_event: RenderEventCallback | None = None,
+ ) -> RenderResult:
+     """Load the neutral voiceplan TOML contract and execute its speech segments."""
+     parsed = VoicePlan.load(plan) if isinstance(plan, (str, Path)) else plan
+@@ -362,4 +495,5 @@ def render_plan(
+         force=force,
+         source_plan_id=parsed.source_plan_id,
+         fail_fast=fail_fast,
++        on_event=on_event,
+     )
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index ba2bcf8..a1b96ac 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -10,6 +10,7 @@ from collections.abc import Collection, Iterator
+ from contextlib import ExitStack, contextmanager
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
++from time import monotonic
+ from typing import Any, Literal
+
+ from renderplan import (
+@@ -30,8 +31,15 @@ from renderplan import (
+
+ from .engines.base import EngineSelection, EngineSession, SpeechRequest
+ from .engines.registry import get_adapter, open_session
+-from .errors import ArtifactError, PlanError, UnsupportedSynthesisFeatureError
++from .errors import (
++    ArtifactError,
++    PlanError,
++    RenderEventCallbackError,
++    UnsupportedSynthesisFeatureError,
++)
++from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .preflight import _session_compatibility_key
++from .progress import ProgressTracker, TerminalOutcome
+ from .renderplan_input import (
+     EMPHASIS_COMPOSITION_CAPABILITY,
+     EmphasisPolicy,
+@@ -65,6 +73,8 @@ class RenderPlanResult:
+     execution_fingerprint: tuple[dict[str, Any], ...] = ()
+     pending_composition: bool = False
+
++    elapsed_seconds: float = 0.0
++
+     @property
+     def failed(self) -> bool:
+         return self.error is not None or not self.selection_complete
+@@ -93,6 +103,34 @@ class _RenderFailure:
+     error_code: str = "render.failed"
+
+
++def _render_progress_event(
++    kind: RenderEventKind,
++    tracker: ProgressTracker,
++    **context: Any,
++) -> RenderEvent:
++    snapshot = tracker.snapshot()
++    fields: dict[str, Any] = {
++        "completed_count": snapshot.completed_count,
++        "total_count": snapshot.total_count,
++        "progress": snapshot.progress,
++        "rendered_count": snapshot.rendered_count,
++        "reused_count": snapshot.reused_count,
++        "failed_count": snapshot.failed_count,
++        "selected_count": snapshot.total_count,
++        "phase_completed_count": snapshot.completed_count,
++        "phase_total_count": snapshot.total_count,
++        "phase_progress": snapshot.progress,
++        "elapsed_seconds": snapshot.elapsed_seconds,
++        "eta_seconds": snapshot.eta_seconds,
++        "eta_confidence": snapshot.eta_confidence,
++        "progress_snapshot": snapshot,
++        "scope": "render",
++        "phase": "render",
++    }
++    fields.update(context)
++    return RenderEvent(kind=kind, **fields)
++
++
+ def render_renderplan(
+     plan: RenderPlan | str | Path,
+     *,
+@@ -104,6 +142,7 @@ def render_renderplan(
+     recheck_report_path: str | Path | None = None,
+     speech_numbers: Collection[int] | None = None,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    on_event: RenderEventCallback | None = None,
+ ) -> RenderPlanResult:
+     """Render selected speech items, retaining verified artifacts from prior runs."""
+     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
+@@ -206,6 +245,15 @@ def render_renderplan(
+     manifest_path = out / RENDER_MANIFEST_FILENAME
+     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
+     producer = Producer(name="voicerender", version=_voicerender_version())
++    progress_tracker = ProgressTracker(len(selected_items))
++    emit_render_event(
++        on_event,
++        _render_progress_event(
++            RenderEventKind.RENDER_STARTED,
++            progress_tracker,
++            plan_id=report_id,
++        ),
++    )
+
+     artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
+     rendered = reused = 0
+@@ -227,12 +275,23 @@ def render_renderplan(
+         if stale_output_reset and reset_stale_output and had_preflight:
+             save_preflight(report, out / "preflight.toml")
+         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
+-        selected_keys = {
+-            (item.number, item.segment_id or item.computed_id())
+-            for item in selected_items
+-        }
+-        if not force:
+-            reused = sum(key in artifact_map for key in selected_keys)
++        for item in selected_items:
++            key = (item.number, item.segment_id or item.computed_id())
++            if not force and key in artifact_map:
++                progress_tracker.complete("reused")
++                reused += 1
++                emit_render_event(
++                    on_event,
++                    _render_progress_event(
++                        RenderEventKind.SEGMENT_REUSED,
++                        progress_tracker,
++                        plan_id=report_id,
++                        segment_number=item.number,
++                        segment_id=key[1],
++                        role=item.role,
++                        status="output_reused",
++                    ),
++                )
+         pending_items = tuple(
+             item
+             for item in selected_items
+@@ -267,23 +326,79 @@ def render_renderplan(
+                 fingerprint = dict(current.execution_fingerprint)
+                 fingerprint["capacity"] = None
+                 fingerprint["execution_status"] = "not_measured"
++                item_context = {
++                    "plan_id": report_id,
++                    "segment_number": item.number,
++                    "segment_id": current.segment_id,
++                    "role": item.role,
++                    "engine": current.selection.engine,
++                }
++                emit_render_event(
++                    on_event,
++                    _render_progress_event(
++                        RenderEventKind.SEGMENT_STARTED,
++                        progress_tracker,
++                        **item_context,
++                    ),
++                )
++                terminal_outcome: TerminalOutcome | None = None
++                synthesis_seconds: float | None = None
+                 try:
+                     cached = None if force else _read_cache(cache, current.cache_key)
+                     if cached is not None:
+                         source, info = cached
+                         _copy_verified(source, target, info)
+                         reused += 1
++                        terminal_outcome = "reused"
+                         fingerprint["execution_status"] = "cache_reused"
+                     else:
+                         fingerprint["execution_status"] = "synthesized"
+                         session = sessions.get(current.session_key)
+                         if session is None:
++                            emit_render_event(
++                                on_event,
++                                _render_progress_event(
++                                    RenderEventKind.ENGINE_OPEN_STARTED,
++                                    progress_tracker,
++                                    **item_context,
++                                ),
++                            )
++                            open_started = monotonic()
+                             try:
+                                 session = opened.enter_context(
+                                     open_session(current.selection)
+                                 )
++                            except RenderEventCallbackError:
++                                raise
+                             except Exception as exc:  # noqa: BLE001 - Renderer setup becomes a partial-render result.
+                                 session = _OpenFailure(exc)
++                                emit_render_event(
++                                    on_event,
++                                    _render_progress_event(
++                                        RenderEventKind.ENGINE_OPEN_FINISHED,
++                                        progress_tracker,
++                                        **item_context,
++                                        status="failed",
++                                        error_type=type(exc).__name__,
++                                        error_code=getattr(exc, "code", None),
++                                        phase_elapsed_seconds=max(
++                                            0.0, monotonic() - open_started
++                                        ),
++                                    ),
++                                )
++                            else:
++                                emit_render_event(
++                                    on_event,
++                                    _render_progress_event(
++                                        RenderEventKind.ENGINE_OPEN_FINISHED,
++                                        progress_tracker,
++                                        **item_context,
++                                        status="opened",
++                                        phase_elapsed_seconds=max(
++                                            0.0, monotonic() - open_started
++                                        ),
++                                    ),
++                                )
+                             sessions[current.session_key] = session
+                         if isinstance(session, _OpenFailure):
+                             fingerprint["execution_status"] = "session_open_failed"
+@@ -308,6 +423,18 @@ def render_renderplan(
+                                     else "engine.session_failed"
+                                 ),
+                             )
++                            progress_tracker.complete("failed")
++                            emit_render_event(
++                                on_event,
++                                _render_progress_event(
++                                    RenderEventKind.SEGMENT_FAILED,
++                                    progress_tracker,
++                                    **item_context,
++                                    status="failed",
++                                    error_type=type(session.error).__name__,
++                                    error_code=getattr(session.error, "code", None),
++                                ),
++                            )
+                             break
+
+                         try:
+@@ -344,9 +471,23 @@ def render_renderplan(
+                                     else "engine.measurement_failed"
+                                 ),
+                             )
++                            progress_tracker.complete("failed")
++                            emit_render_event(
++                                on_event,
++                                _render_progress_event(
++                                    RenderEventKind.SEGMENT_FAILED,
++                                    progress_tracker,
++                                    **item_context,
++                                    status="failed",
++                                    error_type="MeasurementError",
++                                    error_code=failure.error_code,
++                                ),
++                            )
+                             break
+
++                        synthesis_started = monotonic()
+                         rendered_speech = session.synthesize(current.request)
++                        synthesis_seconds = max(0.0, monotonic() - synthesis_started)
+                         if rendered_speech.id != current.request.id:
+                             raise ArtifactError(
+                                 "Renderer returned an artifact for a different speech request"
+@@ -370,6 +511,7 @@ def render_renderplan(
+                             )
+                         _copy_verified(cache / f"{current.cache_key}.wav", target, info)
+                         rendered += 1
++                        terminal_outcome = "rendered"
+
+                     final_info = wav_info(target)
+                     if not verified_wav(target, final_info):
+@@ -397,6 +539,39 @@ def render_renderplan(
+                     execution_fingerprints[key] = _finalize_execution_fingerprint(
+                         fingerprint
+                     )
++                    if terminal_outcome is None:
++                        raise RuntimeError(
++                            "render item reached commit without a terminal outcome"
++                        )
++                    progress_tracker.complete(
++                        terminal_outcome,
++                        synthesis_seconds=(
++                            synthesis_seconds
++                            if terminal_outcome == "rendered"
++                            else None
++                        ),
++                    )
++                    terminal_kind = (
++                        RenderEventKind.SEGMENT_RENDERED
++                        if terminal_outcome == "rendered"
++                        else RenderEventKind.SEGMENT_REUSED
++                    )
++                    emit_render_event(
++                        on_event,
++                        _render_progress_event(
++                            terminal_kind,
++                            progress_tracker,
++                            **item_context,
++                            status=terminal_outcome,
++                            synthesis_seconds=(
++                                synthesis_seconds
++                                if terminal_outcome == "rendered"
++                                else None
++                            ),
++                        ),
++                    )
++                except RenderEventCallbackError:
++                    raise
+                 except Exception as exc:  # noqa: BLE001 - Persist a valid cumulative partial manifest.
+                     error_code = getattr(exc, "code", None)
+                     failure = _RenderFailure(
+@@ -411,6 +586,20 @@ def render_renderplan(
+                     execution_fingerprints[key] = _finalize_execution_fingerprint(
+                         fingerprint
+                     )
++                    progress_tracker.complete("failed")
++                    emit_render_event(
++                        on_event,
++                        _render_progress_event(
++                            RenderEventKind.SEGMENT_FAILED,
++                            progress_tracker,
++                            **item_context,
++                            status="failed",
++                            error_type=type(exc).__name__,
++                            error_code=(
++                                error_code if isinstance(error_code, str) else None
++                            ),
++                        ),
++                    )
+                     break
+
+         if (
+@@ -440,7 +629,8 @@ def render_renderplan(
+         (item.number, item.segment_id or item.computed_id()) in artifact_map
+         for item in selected_items
+     )
+-    return RenderPlanResult(
++    final_snapshot = progress_tracker.snapshot()
++    result = RenderPlanResult(
+         manifest=manifest,
+         manifest_path=manifest_path,
+         planned_count=len(parsed_plan.speech),
+@@ -454,7 +644,19 @@ def render_renderplan(
+         error_code=failure.error_code if failure is not None else None,
+         execution_fingerprint=tuple(execution_fingerprints.values()),
+         pending_composition=bool(deferred_controls),
++        elapsed_seconds=final_snapshot.elapsed_seconds,
++    )
++    emit_render_event(
++        on_event,
++        _render_progress_event(
++            RenderEventKind.RENDER_COMPLETED,
++            progress_tracker,
++            plan_id=report_id,
++            status="failed" if result.failed else "completed",
++            error_code=result.error_code,
++        ),
+     )
++    return result
+
+
+ def _select_speech_items(
