@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from renderplan import RenderProfile, RoleProfile
 
@@ -17,7 +17,8 @@ def list_profile_roles(
     profile: str | Path | RenderProfile,
 ) -> Mapping[str, RoleProfile]:
     """Return the profile's role bindings without changing their semantics."""
-    return cast(Mapping[str, RoleProfile], load_render_profile(profile).roles)
+    roles: Mapping[str, RoleProfile] = load_render_profile(profile).roles
+    return roles
 
 
 def set_profile_role(
