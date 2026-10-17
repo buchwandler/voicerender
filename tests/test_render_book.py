@@ -45,6 +45,13 @@ from voicerender import (
 )
 from voicerender.book_contract import load_renderplan_set
 from voicerender.errors import ArtifactError
+from voicerender.events import (
+    RenderEvent,
+    RenderEventKind,
+    RenderScope,
+    emit_render_event,
+)
+from voicerender.progress import ProgressTracker
 from voicerender.renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
     RENDER_MANIFEST_FILENAME,
@@ -178,6 +185,40 @@ def _preflight(plan: RenderPlan, path: Path) -> PreflightReport:
     return report
 
 
+def _emit_test_progress(
+    callback: Any,
+    kind: RenderEventKind,
+    tracker: ProgressTracker,
+    *,
+    scope: RenderScope,
+    **context: Any,
+) -> None:
+    snapshot = tracker.snapshot()
+    emit_render_event(
+        callback,
+        RenderEvent(
+            kind=kind,
+            scope=scope,  # type: ignore[arg-type]
+            phase=scope,
+            completed_count=snapshot.completed_count,
+            total_count=snapshot.total_count,
+            progress=snapshot.progress,
+            phase_completed_count=snapshot.completed_count,
+            phase_total_count=snapshot.total_count,
+            phase_progress=snapshot.progress,
+            rendered_count=snapshot.rendered_count,
+            reused_count=snapshot.reused_count,
+            failed_count=snapshot.failed_count,
+            selected_count=snapshot.total_count,
+            elapsed_seconds=snapshot.elapsed_seconds,
+            eta_seconds=snapshot.eta_seconds,
+            eta_confidence=snapshot.eta_confidence,
+            progress_snapshot=snapshot,
+            **context,
+        ),
+    )
+
+
 def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     preflight_calls: list[str] = []
     render_calls: list[tuple[str, frozenset[int] | None]] = []
@@ -189,10 +230,58 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         path: str | Path,
         *,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+        on_event: Any = None,
     ) -> PreflightReport:
         preflight_calls.append(plan.plan_id or plan.computed_id())
         policy_calls.append(f"preflight:{emphasis_policy.value}")
-        return _preflight(plan, Path(path))
+        report = _preflight(plan, Path(path))
+        if on_event is not None:
+            required = [item for item in plan.speech if item.preflight_required]
+            tracker = ProgressTracker(len(required))
+            plan_id = plan.plan_id or plan.computed_id()
+            _emit_test_progress(
+                on_event,
+                RenderEventKind.PREFLIGHT_STARTED,
+                tracker,
+                scope="preflight",
+                plan_id=plan_id,
+            )
+            checks = {
+                (check.segment_number, check.segment_id): check
+                for check in report.checks
+            }
+            for item in required:
+                segment_id = item.segment_id or item.computed_id()
+                _emit_test_progress(
+                    on_event,
+                    RenderEventKind.PREFLIGHT_ITEM_STARTED,
+                    tracker,
+                    scope="preflight",
+                    plan_id=plan_id,
+                    segment_number=item.number,
+                    segment_id=segment_id,
+                )
+                tracker.advance()
+                check = checks[(item.number, segment_id)]
+                _emit_test_progress(
+                    on_event,
+                    RenderEventKind.PREFLIGHT_ITEM_FINISHED,
+                    tracker,
+                    scope="preflight",
+                    plan_id=plan_id,
+                    segment_number=item.number,
+                    segment_id=segment_id,
+                    status=check.status,
+                )
+            _emit_test_progress(
+                on_event,
+                RenderEventKind.PREFLIGHT_FINISHED,
+                tracker,
+                scope="preflight",
+                plan_id=plan_id,
+                status=report.status,
+            )
+        return report
 
     def render(
         plan: RenderPlan,
@@ -205,6 +294,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+        on_event: Any = None,
     ) -> RenderPlanResult:
         del cache_dir, recheck_report_path, reset_stale_output
         policy_calls.append(f"render:{emphasis_policy.value}")
@@ -219,6 +309,14 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                 None if speech_numbers is None else frozenset(speech_numbers),
             )
         )
+        tracker = ProgressTracker(len(selected))
+        _emit_test_progress(
+            on_event,
+            RenderEventKind.RENDER_STARTED,
+            tracker,
+            scope="render",
+            plan_id=plan.plan_id or plan.computed_id(),
+        )
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
         manifest_path = output / RENDER_MANIFEST_FILENAME
@@ -232,10 +330,13 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                 (item.segment_number, item.segment_id): item for item in prior.speech
             }
         rendered = reused = 0
+        rendered_keys: set[tuple[int, str]] = set()
+        reused_keys: set[tuple[int, str]] = set()
         for item in selected:
             key = (item.number, item.segment_id or item.computed_id())
             if key in artifacts and not force:
                 reused += 1
+                reused_keys.add(key)
                 continue
             wav_path = output / item.wav
             info = atomic_wav(wav_path, [0.0, 0.1, -0.1], 24000)
@@ -249,6 +350,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                 channels=int(info["channels"]),
             )
             rendered += 1
+            rendered_keys.add(key)
         ordered = tuple(
             artifacts[(item.number, item.segment_id or item.computed_id())]
             for item in plan.speech
@@ -295,7 +397,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         selected_keys = {
             (item.number, item.segment_id or item.computed_id()) for item in selected
         }
-        return RenderPlanResult(
+        result = RenderPlanResult(
             manifest=manifest,
             manifest_path=manifest_path,
             planned_count=len(plan.speech),
@@ -306,6 +408,37 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             selection_complete=selected_keys.issubset(set(artifacts)),
             pending_composition=pending_composition,
         )
+        for item in selected:
+            key = (item.number, item.segment_id or item.computed_id())
+            if key in rendered_keys:
+                tracker.complete("rendered", synthesis_seconds=0.25)
+                kind = RenderEventKind.SEGMENT_RENDERED
+                synthesis_seconds = 0.25
+            else:
+                tracker.complete("reused")
+                kind = RenderEventKind.SEGMENT_REUSED
+                synthesis_seconds = None
+            _emit_test_progress(
+                on_event,
+                kind,
+                tracker,
+                scope="render",
+                plan_id=plan.plan_id or plan.computed_id(),
+                segment_number=item.number,
+                segment_id=key[1],
+                engine=str(item.binding.get("renderer", "test")),
+                status="rendered" if synthesis_seconds is not None else "reused",
+                synthesis_seconds=synthesis_seconds,
+            )
+        _emit_test_progress(
+            on_event,
+            RenderEventKind.RENDER_COMPLETED,
+            tracker,
+            scope="render",
+            plan_id=plan.plan_id or plan.computed_id(),
+            status="completed",
+        )
+        return result
 
     monkeypatch.setattr(book_module, "preflight_render_plan", preflight)
     monkeypatch.setattr(book_module, "render_renderplan", render)
@@ -744,10 +877,22 @@ def test_fail_fast_skips_remaining_chapters_but_default_continues(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(book_module, "render_renderplan", fail_first)
-    fast = book_module.render_book(workspace, variant=variant, fail_fast=True)
+    fast_events: list[RenderEvent] = []
+    fast = book_module.render_book(
+        workspace,
+        variant=variant,
+        fail_fast=True,
+        on_event=fast_events.append,
+    )
     assert [item.status for item in fast.outcomes] == ["failed", "skipped", "skipped"]
     assert fast.failed == 1 and fast.skipped == 2
     assert fast.outcomes[0].error_code == "artifact.invalid"
+    skipped_events = [
+        event for event in fast_events if event.kind is RenderEventKind.CHAPTER_SKIPPED
+    ]
+    assert len(skipped_events) == 2
+    assert fast_events[-1].kind is RenderEventKind.BOOK_COMPLETED
+    assert fast_events[-1].progress is not None and fast_events[-1].progress < 1.0
     assert tomllib.loads(fast.report_path.read_text(encoding="utf-8"))["skipped"] == 2
 
     # The default mode continues with each later selected chapter.
@@ -932,3 +1077,123 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
         assert api_result.written == expected_written
         assert api_result.reused == expected_reused
         assert_parity(api_result, cli_payload)
+
+
+def test_book_emits_global_speech_progress_and_preflight_phase_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path)
+    events: list[RenderEvent] = []
+
+    result = render_book(workspace, variant=variant, on_event=events.append)
+
+    assert result.elapsed_seconds >= 0
+    assert all(outcome.elapsed_seconds >= 0 for outcome in result.outcomes)
+    assert events[0].kind is RenderEventKind.BOOK_STARTED
+    assert events[0].total_count == 6
+    assert events[-1].kind is RenderEventKind.BOOK_COMPLETED
+    assert all(event.total_count == 6 for event in events)
+
+    preflight_items = [
+        event
+        for event in events
+        if event.kind is RenderEventKind.PREFLIGHT_ITEM_FINISHED
+    ]
+    assert preflight_items
+    assert preflight_items[0].scope == "book"
+    assert preflight_items[0].chapter_id is not None
+    assert preflight_items[0].phase_total_count == 2
+    assert preflight_items[0].phase_progress == 0.5
+    assert preflight_items[0].progress == 0.0
+
+    rendered = [
+        event for event in events if event.kind is RenderEventKind.SEGMENT_RENDERED
+    ]
+    assert len(rendered) == 6
+    assert [event.completed_count for event in rendered] == [1, 2, 3, 4, 5, 6]
+    assert [event.progress for event in rendered] == [
+        1 / 6,
+        2 / 6,
+        3 / 6,
+        4 / 6,
+        5 / 6,
+        1.0,
+    ]
+    assert rendered[0].eta_seconds is not None
+    assert rendered[0].eta_confidence == "low"
+
+    first_chapter_finish = next(
+        index
+        for index, event in enumerate(events)
+        if event.kind is RenderEventKind.CHAPTER_FINISHED
+    )
+    assert any(
+        event.kind is RenderEventKind.SEGMENT_RENDERED
+        for event in events[:first_chapter_finish]
+    )
+
+
+def test_reused_chapters_advance_book_progress_immediately(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path)
+    render_book(workspace, variant=variant)
+    events: list[RenderEvent] = []
+
+    result = render_book(workspace, variant=variant, on_event=events.append)
+
+    assert all(outcome.status == "reused" for outcome in result.outcomes)
+    reused_chapters = [
+        event for event in events if event.kind is RenderEventKind.CHAPTER_REUSED
+    ]
+    assert len(reused_chapters) == 3
+    assert [event.progress for event in reused_chapters] == [2 / 6, 5 / 6, 1.0]
+    assert [event.eta_seconds for event in reused_chapters] == [None, None, 0.0]
+    assert events[-1].kind is RenderEventKind.BOOK_COMPLETED
+    assert events[-1].progress == 1.0
+
+
+def test_estimate_render_book_is_workload_only_and_does_not_create_outputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from voicerender import estimate_render_book
+
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path)
+    output_root = tmp_path / "estimated-output"
+
+    initial = estimate_render_book(workspace, variant=variant, output_root=output_root)
+    assert initial.selected_count == 6
+    assert initial.known_output_reuse_count == 0
+    assert initial.pending_count == 6
+    assert initial.estimated_seconds is None
+    assert initial.confidence == "unavailable"
+    assert initial.source == "workload-only"
+    assert not output_root.exists()
+
+    render_book(workspace, variant=variant, output_root=output_root)
+    before_files = {
+        path.relative_to(output_root): path.read_bytes()
+        for path in output_root.rglob("*")
+        if path.is_file()
+    }
+    complete = estimate_render_book(workspace, variant=variant, output_root=output_root)
+    partial = estimate_render_book(
+        workspace,
+        variant=variant,
+        chapters="5",
+        speech="2-3",
+        output_root=output_root,
+    )
+
+    assert (complete.selected_count, complete.known_output_reuse_count) == (6, 6)
+    assert (complete.pending_count, complete.estimated_seconds) == (0, None)
+    assert (partial.selected_count, partial.known_output_reuse_count) == (2, 2)
+    after_files = {
+        path.relative_to(output_root): path.read_bytes()
+        for path in output_root.rglob("*")
+        if path.is_file()
+    }
+    assert after_files == before_files

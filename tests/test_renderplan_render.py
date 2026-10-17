@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -48,8 +49,10 @@ from voicerender.engines.selection import EngineRequest
 from voicerender.errors import (
     ArtifactError,
     PlanError,
+    RenderEventCallbackError,
     UnsupportedSynthesisFeatureError,
 )
+from voicerender.events import RenderEvent, RenderEventKind
 from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
@@ -1394,3 +1397,246 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
         "split child part one",
         "split child part two",
     ]
+
+
+def test_render_events_report_ordered_progress_and_final_timing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("one", "two")
+    report = _report(adapter, plan, tmp_path)
+    events: list[RenderEvent] = []
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "event-render",
+        cache_dir=tmp_path / "event-cache",
+        on_event=events.append,
+    )
+
+    kinds = [event.kind for event in events]
+    assert kinds[0] is RenderEventKind.RENDER_STARTED
+    assert kinds[-1] is RenderEventKind.RENDER_COMPLETED
+    assert kinds.count(RenderEventKind.SEGMENT_STARTED) == 2
+    assert kinds.count(RenderEventKind.SEGMENT_RENDERED) == 2
+    assert kinds.count(RenderEventKind.ENGINE_OPEN_STARTED) == 1
+    assert kinds.count(RenderEventKind.ENGINE_OPEN_FINISHED) == 1
+    terminal = [
+        event
+        for event in events
+        if event.kind
+        in {
+            RenderEventKind.SEGMENT_RENDERED,
+            RenderEventKind.SEGMENT_REUSED,
+            RenderEventKind.SEGMENT_FAILED,
+        }
+    ]
+    assert [event.completed_count for event in terminal] == [1, 2]
+    assert [event.progress for event in terminal] == [0.5, 1.0]
+    assert all(event.total_count == 2 for event in terminal)
+    assert all(
+        event.elapsed_seconds is not None and event.elapsed_seconds >= 0
+        for event in events
+    )
+    engine_opened = next(
+        event for event in events if event.kind is RenderEventKind.ENGINE_OPEN_FINISHED
+    )
+    assert engine_opened.phase_elapsed_seconds is not None
+    assert result.elapsed_seconds >= 0
+    assert events[-1].eta_seconds == 0.0
+
+
+def test_existing_output_reuse_advances_progress_without_opening_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("reuse me")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "existing-output"
+    cache = tmp_path / "existing-cache"
+    render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
+    adapter.open_count = 0
+    events: list[RenderEvent] = []
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        on_event=events.append,
+    )
+
+    assert result.reused_count == 1
+    assert adapter.open_count == 0
+    assert [event.kind for event in events] == [
+        RenderEventKind.RENDER_STARTED,
+        RenderEventKind.SEGMENT_REUSED,
+        RenderEventKind.RENDER_COMPLETED,
+    ]
+    assert events[1].completed_count == 1
+    assert events[1].progress == 1.0
+
+
+def test_cache_reuse_is_reported_after_materialization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("cache me")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "cached-output"
+    cache = tmp_path / "shared-cache"
+    render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
+    shutil.rmtree(output)
+    adapter.open_count = 0
+    events: list[RenderEvent] = []
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        on_event=events.append,
+    )
+
+    reused_events = [
+        event for event in events if event.kind is RenderEventKind.SEGMENT_REUSED
+    ]
+    assert result.reused_count == 1
+    assert adapter.open_count == 0
+    assert len(reused_events) == 1
+    assert reused_events[0].status == "reused"
+    assert (output / plan.speech[0].wav).is_file()
+
+
+def test_partial_selection_uses_selected_denominator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("one", "two", "three", "four")
+    report = _report(adapter, plan, tmp_path)
+    events: list[RenderEvent] = []
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "partial-output",
+        cache_dir=tmp_path / "partial-cache",
+        speech_numbers={2, 4},
+        on_event=events.append,
+    )
+
+    assert not result.failed
+    assert all(event.total_count == 2 for event in events)
+    assert [
+        event.progress
+        for event in events
+        if event.kind is RenderEventKind.SEGMENT_RENDERED
+    ] == [0.5, 1.0]
+
+
+def test_callback_failure_propagates_after_commit_and_output_is_resumable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("committed before callback")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "callback-output"
+    cache = tmp_path / "callback-cache"
+
+    def fail_after_commit(event: RenderEvent) -> None:
+        if event.kind is RenderEventKind.SEGMENT_RENDERED:
+            raise RuntimeError("consumer stopped")
+
+    with pytest.raises(RenderEventCallbackError):
+        render_renderplan(
+            plan,
+            preflight=report,
+            output_dir=output,
+            cache_dir=cache,
+            on_event=fail_after_commit,
+        )
+
+    adapter.open_count = 0
+    resumed_events: list[RenderEvent] = []
+    resumed = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        on_event=resumed_events.append,
+    )
+    assert not resumed.failed
+    assert resumed.reused_count == 1
+    assert adapter.open_count == 0
+    assert any(event.kind is RenderEventKind.SEGMENT_REUSED for event in resumed_events)
+
+
+def test_open_failure_emits_typed_terminal_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("will fail")
+    report = _report(adapter, plan, tmp_path)
+    adapter.open_error = RuntimeError("engine startup failed")
+    events: list[RenderEvent] = []
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "failed-output",
+        cache_dir=tmp_path / "failed-cache",
+        on_event=events.append,
+    )
+
+    assert result.failed
+    failed = [event for event in events if event.kind is RenderEventKind.SEGMENT_FAILED]
+    assert len(failed) == 1
+    assert failed[0].completed_count == 1
+    assert failed[0].progress == 1.0
+    assert failed[0].error_type == "RuntimeError"
+    assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
+    assert events[-1].status == "failed"
+
+
+def test_estimate_renderplan_reports_verified_reuse_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from voicerender import estimate_renderplan
+
+    adapter = _install(monkeypatch)
+    plan = _plan("estimate one", "estimate two")
+    output_dir = tmp_path / "render-output"
+
+    initial = estimate_renderplan(plan, output_dir=output_dir)
+    assert initial.selected_count == 2
+    assert initial.known_output_reuse_count == 0
+    assert initial.pending_count == 2
+    assert initial.estimated_seconds is None
+    assert initial.confidence == "unavailable"
+    assert initial.source == "workload-only"
+    assert not output_dir.exists()
+    assert adapter.open_count == 0 and adapter.synthesized_texts == []
+
+    report = _report(adapter, plan, tmp_path)
+    render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output_dir,
+        cache_dir=tmp_path / "cache",
+    )
+    before_manifest = (output_dir / "render-manifest.toml").read_bytes()
+    before_open_count = adapter.open_count
+    before_synthesized = list(adapter.synthesized_texts)
+
+    complete = estimate_renderplan(plan, output_dir=output_dir)
+    partial = estimate_renderplan(plan, output_dir=output_dir, speech_numbers=(1,))
+    forced = estimate_renderplan(plan, output_dir=output_dir, force=True)
+
+    assert (complete.selected_count, complete.known_output_reuse_count) == (2, 2)
+    assert (complete.pending_count, complete.estimated_seconds) == (0, None)
+    assert (partial.selected_count, partial.known_output_reuse_count) == (1, 1)
+    assert (forced.known_output_reuse_count, forced.pending_count) == (0, 2)
+    assert adapter.open_count == before_open_count
+    assert adapter.synthesized_texts == before_synthesized
+    assert (output_dir / "render-manifest.toml").read_bytes() == before_manifest

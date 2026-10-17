@@ -6,9 +6,11 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from time import monotonic
 from typing import Any, Literal
 
 from renderplan import (
@@ -49,7 +51,9 @@ from .book_layout import (
     resolve_workspace as _resolve_workspace,
 )
 from .errors import ArtifactError, PlanError
+from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .preflight import preflight_render_plan
+from .progress import EtaConfidence, ProgressTracker, RenderProgress, RollingEta
 from .renderplan_input import EMPHASIS_COMPOSITION_CAPABILITY, EmphasisPolicy
 from .renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
@@ -117,6 +121,7 @@ class ChapterRenderOutcome:
 
     preflight_report: Path | None = None
     replan_required: bool = False
+    elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,7 @@ class BookRenderResult:
     request: BookRenderRequest
     report_path: Path
     outcomes: tuple[ChapterRenderOutcome, ...]
+    elapsed_seconds: float = 0.0
 
     @property
     def workspace(self) -> Path:
@@ -218,6 +224,214 @@ class BookRenderResult:
         }
 
 
+class _BookProgress:
+    def __init__(
+        self,
+        chapters: Sequence[_LoadedChapter],
+        total_count: int,
+    ) -> None:
+        self.total_count = total_count
+        self.tracker = ProgressTracker(total_count)
+        self._engine_by_item: dict[tuple[str, int, str], str] = {}
+        self._remaining_by_engine: Counter[str] = Counter()
+        self._timings: dict[str, RollingEta] = {}
+        for chapter in chapters:
+            for item in self._selected_items(chapter):
+                segment_id = item.segment_id or item.computed_id()
+                engine = self._engine_name(item.binding)
+                self._engine_by_item[(chapter.entry.id, item.number, segment_id)] = (
+                    engine
+                )
+                self._remaining_by_engine[engine] += 1
+
+    @staticmethod
+    def _selected_items(chapter: _LoadedChapter) -> tuple[Any, ...]:
+        if chapter.speech_numbers is None:
+            return chapter.plan.speech
+        return tuple(
+            item
+            for item in chapter.plan.speech
+            if item.number in chapter.speech_numbers
+        )
+
+    @staticmethod
+    def _engine_name(binding: Mapping[str, Any]) -> str:
+        engine = binding.get("renderer", binding.get("engine"))
+        return engine if isinstance(engine, str) and engine else "unknown"
+
+    def _eta(self) -> tuple[float | None, EtaConfidence]:
+        active = {
+            engine: count
+            for engine, count in self._remaining_by_engine.items()
+            if count > 0
+        }
+        samples = [timing for timing in self._timings.values() if timing.sample_count]
+        if not active:
+            if not samples:
+                return 0.0, "unavailable"
+            return 0.0, min(
+                (timing.confidence for timing in samples),
+                key=("unavailable", "low", "medium", "high").index,
+            )
+
+        remaining_seconds = 0.0
+        confidence: list[EtaConfidence] = []
+        for engine, count in active.items():
+            timing = self._timings.get(engine)
+            if timing is None or timing.sample_count == 0:
+                return None, "unavailable"
+            estimate = timing.estimate(count)
+            if estimate is None:
+                return None, "unavailable"
+            remaining_seconds += estimate
+            confidence.append(timing.confidence)
+        return remaining_seconds, min(
+            confidence, key=("unavailable", "low", "medium", "high").index
+        )
+
+    def snapshot(self) -> RenderProgress:
+        snapshot = self.tracker.snapshot()
+        eta_seconds, confidence = self._eta()
+        return replace(
+            snapshot,
+            eta_seconds=eta_seconds,
+            eta_confidence=confidence,
+        )
+
+    def complete(
+        self,
+        chapter_id: str,
+        segment_number: int,
+        segment_id: str,
+        outcome: Literal["rendered", "reused", "failed"],
+        *,
+        engine: str | None = None,
+        synthesis_seconds: float | None = None,
+    ) -> None:
+        item_key = (chapter_id, segment_number, segment_id)
+        engine_name = self._engine_by_item.get(item_key, engine or "unknown")
+        if outcome == "rendered":
+            self.tracker.complete("rendered", synthesis_seconds=synthesis_seconds)
+        elif outcome == "reused":
+            self.tracker.complete("reused")
+        else:
+            self.tracker.complete("failed")
+        if self._remaining_by_engine[engine_name] > 0:
+            self._remaining_by_engine[engine_name] -= 1
+        if outcome == "rendered" and synthesis_seconds is not None:
+            self._timings.setdefault(engine_name, RollingEta()).add_sample(
+                synthesis_seconds
+            )
+
+    def complete_chapter(
+        self,
+        chapter: _LoadedChapter,
+        outcome: Literal["reused", "failed"],
+    ) -> None:
+        for item in self._selected_items(chapter):
+            self.complete(
+                chapter.entry.id,
+                item.number,
+                item.segment_id or item.computed_id(),
+                outcome,
+            )
+
+    def event(
+        self,
+        kind: RenderEventKind,
+        *,
+        chapter_id: str | None = None,
+        chapter_index: int | None = None,
+        chapter_count: int | None = None,
+        phase: str = "render",
+        status: str | None = None,
+    ) -> RenderEvent:
+        snapshot = self.snapshot()
+        return RenderEvent(
+            kind=kind,
+            scope="book",
+            phase=phase,
+            chapter_id=chapter_id,
+            chapter_index=chapter_index,
+            chapter_count=chapter_count,
+            status=status,
+            completed_count=snapshot.completed_count,
+            total_count=self.total_count,
+            progress=snapshot.progress,
+            rendered_count=snapshot.rendered_count,
+            reused_count=snapshot.reused_count,
+            failed_count=snapshot.failed_count,
+            selected_count=self.total_count,
+            elapsed_seconds=snapshot.elapsed_seconds,
+            eta_seconds=snapshot.eta_seconds,
+            eta_confidence=snapshot.eta_confidence,
+            progress_snapshot=snapshot,
+        )
+
+    def wrap_child(
+        self,
+        event: RenderEvent,
+        *,
+        chapter_id: str,
+        chapter_index: int,
+        chapter_count: int,
+    ) -> RenderEvent:
+        if event.kind in {
+            RenderEventKind.SEGMENT_RENDERED,
+            RenderEventKind.SEGMENT_REUSED,
+            RenderEventKind.SEGMENT_FAILED,
+        }:
+            if event.kind is RenderEventKind.SEGMENT_RENDERED:
+                outcome: Literal["rendered", "reused", "failed"] = "rendered"
+            elif event.kind is RenderEventKind.SEGMENT_REUSED:
+                outcome = "reused"
+            else:
+                outcome = "failed"
+            if event.segment_number is not None and event.segment_id is not None:
+                self.complete(
+                    chapter_id,
+                    event.segment_number,
+                    event.segment_id,
+                    outcome,
+                    engine=event.engine,
+                    synthesis_seconds=event.synthesis_seconds,
+                )
+        snapshot = self.snapshot()
+        return replace(
+            event,
+            scope="book",
+            chapter_id=chapter_id,
+            chapter_index=chapter_index,
+            chapter_count=chapter_count,
+            phase_completed_count=(
+                event.phase_completed_count
+                if event.phase_completed_count is not None
+                else event.completed_count
+            ),
+            phase_total_count=(
+                event.phase_total_count
+                if event.phase_total_count is not None
+                else event.total_count
+            ),
+            phase_progress=(
+                event.phase_progress
+                if event.phase_progress is not None
+                else event.progress
+            ),
+            completed_count=snapshot.completed_count,
+            total_count=self.total_count,
+            progress=snapshot.progress,
+            rendered_count=snapshot.rendered_count,
+            reused_count=snapshot.reused_count,
+            failed_count=snapshot.failed_count,
+            selected_count=self.total_count,
+            elapsed_seconds=snapshot.elapsed_seconds,
+            eta_seconds=snapshot.eta_seconds,
+            eta_confidence=snapshot.eta_confidence,
+            progress_snapshot=snapshot,
+        )
+
+
 def render_book(
     workspace: str | Path,
     *,
@@ -231,8 +445,10 @@ def render_book(
     reset_stale_output: bool = False,
     fail_fast: bool = False,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    on_event: RenderEventCallback | None = None,
 ) -> BookRenderResult:
     """Render selected chapters in a RenderPlan variant using shared preflight and render APIs."""
+    book_started = monotonic()
     try:
         resolved_emphasis_policy = EmphasisPolicy(emphasis_policy)
     except (TypeError, ValueError) as exc:
@@ -261,19 +477,121 @@ def render_book(
             code="workspace.invalid",
         )
 
+    book_total = sum(
+        len(chapter.plan.speech)
+        if chapter.speech_numbers is None
+        else len(chapter.speech_numbers)
+        for chapter in request._loaded_chapters
+    )
+    progress = _BookProgress(request._loaded_chapters, book_total)
+    chapter_count = len(request._loaded_chapters)
+    emit_render_event(
+        on_event,
+        progress.event(
+            RenderEventKind.BOOK_STARTED,
+            chapter_count=chapter_count,
+        ),
+    )
+
     outcomes: list[ChapterRenderOutcome] = []
     stopped = False
     for index, chapter in enumerate(request._loaded_chapters, start=1):
+        chapter_started = monotonic()
+        emit_render_event(
+            on_event,
+            progress.event(
+                RenderEventKind.CHAPTER_STARTED,
+                chapter_id=chapter.entry.id,
+                chapter_index=index,
+                chapter_count=chapter_count,
+            ),
+        )
+        completed_before_chapter = progress.tracker.completed_count
         if stopped:
             outcome = _skipped_outcome(chapter, index)
+            emit_render_event(
+                on_event,
+                progress.event(
+                    RenderEventKind.CHAPTER_SKIPPED,
+                    chapter_id=chapter.entry.id,
+                    chapter_index=index,
+                    chapter_count=chapter_count,
+                    status="skipped",
+                ),
+            )
         else:
-            outcome = _render_chapter(request, chapter, index)
+            if on_event is None:
+                outcome = _render_chapter(request, chapter, index)
+            else:
+
+                def forward_child_event(
+                    event: RenderEvent,
+                    chapter_id: str = chapter.entry.id,
+                    chapter_index: int = index,
+                ) -> None:
+                    emit_render_event(
+                        on_event,
+                        progress.wrap_child(
+                            event,
+                            chapter_id=chapter_id,
+                            chapter_index=chapter_index,
+                            chapter_count=chapter_count,
+                        ),
+                    )
+
+                outcome = _render_chapter(
+                    request,
+                    chapter,
+                    index,
+                    on_event=forward_child_event,
+                )
+            if outcome.status == "reused":
+                progress.complete_chapter(chapter, "reused")
+                event_kind = RenderEventKind.CHAPTER_REUSED
+            else:
+                if (
+                    outcome.status == "failed"
+                    and progress.tracker.completed_count == completed_before_chapter
+                ):
+                    progress.complete_chapter(chapter, "failed")
+                event_kind = RenderEventKind.CHAPTER_FINISHED
+            emit_render_event(
+                on_event,
+                progress.event(
+                    event_kind,
+                    chapter_id=chapter.entry.id,
+                    chapter_index=index,
+                    chapter_count=chapter_count,
+                    status=outcome.status,
+                ),
+            )
+        outcome = replace(
+            outcome,
+            elapsed_seconds=max(0.0, monotonic() - chapter_started),
+        )
         outcomes.append(outcome)
         if request.fail_fast and outcome.status == "failed":
             stopped = True
 
-    result = BookRenderResult(request, report_path, tuple(outcomes))
+    result = BookRenderResult(
+        request,
+        report_path,
+        tuple(outcomes),
+        elapsed_seconds=max(0.0, monotonic() - book_started),
+    )
     _write_book_report(result)
+    result = replace(
+        result,
+        elapsed_seconds=max(0.0, monotonic() - book_started),
+    )
+    emit_render_event(
+        on_event,
+        progress.event(
+            RenderEventKind.BOOK_COMPLETED,
+            chapter_count=chapter_count,
+            status="failed" if result.failed else "completed",
+        ),
+    )
     return result
 
 
@@ -473,7 +791,11 @@ def _resolve_request(
 
 
 def _render_chapter(
-    request: BookRenderRequest, chapter: _LoadedChapter, index: int
+    request: BookRenderRequest,
+    chapter: _LoadedChapter,
+    index: int,
+    *,
+    on_event: RenderEventCallback | None = None,
 ) -> ChapterRenderOutcome:
     entry = chapter.entry
     planned = len(chapter.plan.speech)
@@ -514,8 +836,14 @@ def _render_chapter(
         _assert_safe_output_metadata(preflight_path, chapter.output_dir)
         recheck_report_path = chapter.output_dir / RECHECK_PREFLIGHT_FILENAME
         _assert_safe_output_metadata(recheck_report_path, chapter.output_dir)
+        preflight_options: dict[str, Any] = {}
+        if on_event is not None:
+            preflight_options["on_event"] = on_event
         preflight = _get_preflight(
-            chapter.plan, preflight_path, emphasis_policy=request.emphasis_policy
+            chapter.plan,
+            preflight_path,
+            emphasis_policy=request.emphasis_policy,
+            **preflight_options,
         )
     except BookRenderError as exc:
         return _failure_outcome(chapter, index, planned, selected, exc.code, str(exc))
@@ -546,6 +874,9 @@ def _render_chapter(
 
     try:
         _assert_safe_output_metadata(manifest_path, chapter.output_dir)
+        render_options: dict[str, Any] = {}
+        if on_event is not None:
+            render_options["on_event"] = on_event
         result = render_renderplan(
             chapter.plan,
             preflight=preflight,
@@ -556,6 +887,7 @@ def _render_chapter(
             recheck_report_path=recheck_report_path,
             speech_numbers=chapter.speech_numbers,
             emphasis_policy=request.emphasis_policy,
+            **render_options,
         )
     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
         error_code = getattr(exc, "code", None)
@@ -609,6 +941,7 @@ def _get_preflight(
     path: Path,
     *,
     emphasis_policy: EmphasisPolicy,
+    on_event: RenderEventCallback | None = None,
 ) -> PreflightReport:
     if path.exists() or path.is_symlink():
         if path.is_symlink():
@@ -627,7 +960,14 @@ def _get_preflight(
                     return existing
             except (OSError, ValueError, TypeError):
                 pass
-    return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
+    if on_event is None:
+        return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
+    return preflight_render_plan(
+        plan,
+        path,
+        emphasis_policy=emphasis_policy,
+        on_event=on_event,
+    )
 
 
 def _preflight_is_reusable(

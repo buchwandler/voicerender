@@ -6,6 +6,7 @@
 
 - Added optional Qwen3Synth support for VoiceDesign references, prepared voice profiles, and Qwen Base rendering
 - Added KittenSynth model-token capacity metadata and preflight-aware request handling
+- Added typed progress, evidence-based ETA, and workload estimates
 
 ### Fixed
 

@@ -622,3 +622,326 @@ def test_cli_voice_design_preserves_recipe_text(
     assert captured["recipe"].reference_text == "  Exact reference text.  "
     assert captured["path"] == output
     assert "runtime_identity" in __import__("json").loads(capsys.readouterr().out)
+
+
+def test_cli_progress_printer_formats_tty_and_cleans_up_line() -> None:
+    import io
+
+    from voicerender.cli import _ProgressPrinter
+    from voicerender.events import RenderEvent, RenderEventKind
+
+    stream = io.StringIO()
+    printer = _ProgressPrinter(stream, is_tty=True, clock=lambda: 0.0)
+    printer(
+        RenderEvent(
+            kind=RenderEventKind.RENDER_STARTED,
+            scope="render",
+            phase="render",
+            completed_count=118,
+            total_count=319,
+            progress=0.37,
+            rendered_count=91,
+            reused_count=27,
+            elapsed_seconds=761,
+            eta_seconds=1295,
+        )
+    )
+    printer.finish()
+
+    output = stream.getvalue()
+    assert output.startswith("\r[ 37.0%] 118/319 speech")
+    assert "91 rendered, 27 reused" in output
+    assert "elapsed 12:41 | ETA 21:35" in output
+    assert output.endswith("\n")
+    assert "\x1b" not in output
+
+
+def test_cli_progress_printer_throttles_non_tty_with_injected_clock() -> None:
+    import io
+
+    from voicerender.cli import _ProgressPrinter
+    from voicerender.events import RenderEvent, RenderEventKind
+
+    now = [0.0]
+    stream = io.StringIO()
+    printer = _ProgressPrinter(stream, is_tty=False, clock=lambda: now[0])
+
+    def event(kind: RenderEventKind, progress: float) -> RenderEvent:
+        completed = int(progress * 100)
+        return RenderEvent(
+            kind=kind,
+            scope="render",
+            phase="render",
+            completed_count=completed,
+            total_count=100,
+            progress=progress,
+            elapsed_seconds=now[0],
+        )
+
+    printer(event(RenderEventKind.RENDER_STARTED, 0.0))
+    now[0] = 1.0
+    printer(event(RenderEventKind.SEGMENT_RENDERED, 0.02))
+    now[0] = 2.0
+    printer(event(RenderEventKind.SEGMENT_RENDERED, 0.05))
+    now[0] = 32.0
+    printer(event(RenderEventKind.SEGMENT_STARTED, 0.05))
+    now[0] = 33.0
+    printer(event(RenderEventKind.SEGMENT_FAILED, 0.05))
+
+    output = stream.getvalue()
+    assert len(output.splitlines()) == 4
+    assert "progress 5.0% 5/100" in output
+    assert "failed_speech_item" in output
+    assert "\r" not in output and "\x1b" not in output
+
+
+def test_cli_progress_auto_force_disable_and_json_modes() -> None:
+    import io
+    from types import SimpleNamespace
+
+    from voicerender.cli import _progress_callback, build_parser
+
+    class TestStream(io.StringIO):
+        def __init__(self, *, tty: bool) -> None:
+            super().__init__()
+            self.tty = tty
+
+        def isatty(self) -> bool:
+            return self.tty
+
+    parser = build_parser()
+    render_args = ["render", "plan", "--preflight", "report", "--out-dir", "out"]
+    assert parser.parse_args(render_args).progress is None
+    assert parser.parse_args([*render_args, "--no-progress"]).progress is False
+
+    tty = TestStream(tty=True)
+    assert _progress_callback(SimpleNamespace(progress=None, json=False), stream=tty)
+    assert (
+        _progress_callback(SimpleNamespace(progress=None, json=True), stream=tty)
+        is None
+    )
+    assert (
+        _progress_callback(SimpleNamespace(progress=False, json=False), stream=tty)
+        is None
+    )
+
+    non_tty = TestStream(tty=False)
+    assert _progress_callback(SimpleNamespace(progress=True, json=True), stream=non_tty)
+    assert (
+        _progress_callback(SimpleNamespace(progress=None, json=False), stream=non_tty)
+        is None
+    )
+
+
+def test_preflight_cli_forced_progress_stays_on_stderr_with_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    from types import SimpleNamespace
+
+    from voicerender import cli
+    from voicerender.events import RenderEvent, RenderEventKind
+
+    class NonTtyStream(io.StringIO):
+        def isatty(self) -> bool:
+            return False
+
+    stderr = NonTtyStream()
+    monkeypatch.setattr(cli.sys, "stderr", stderr)
+    monkeypatch.setattr(cli, "load_plan", lambda _path: object())
+
+    def fake_preflight(_plan, _output, *, on_event, **_kwargs):
+        assert on_event is not None
+        on_event(
+            RenderEvent(
+                kind=RenderEventKind.PREFLIGHT_STARTED,
+                scope="preflight",
+                phase="preflight",
+                completed_count=0,
+                total_count=2,
+                progress=0.0,
+                phase_completed_count=0,
+                phase_total_count=2,
+                phase_progress=0.0,
+                elapsed_seconds=0.0,
+            )
+        )
+        on_event(
+            RenderEvent(
+                kind=RenderEventKind.PREFLIGHT_ITEM_FINISHED,
+                scope="preflight",
+                phase="preflight",
+                completed_count=1,
+                total_count=2,
+                progress=0.5,
+                phase_completed_count=1,
+                phase_total_count=2,
+                phase_progress=0.5,
+                elapsed_seconds=2.0,
+            )
+        )
+        return SimpleNamespace(
+            checks=[],
+            replan=[],
+            status="ok",
+            render_plan_id="plan",
+            render_profile_id="profile",
+        )
+
+    monkeypatch.setattr(cli, "preflight_render_plan", fake_preflight)
+    output = tmp_path / "preflight.toml"
+    assert (
+        cli.main(
+            ["preflight", "plan.toml", "--output", str(output), "--json", "--progress"]
+        )
+        == 0
+    )
+    stdout = capsys.readouterr().out
+    payload = __import__("json").loads(stdout)
+    assert payload["status"] == "ok"
+    assert "preflight progress 0.0%" in stderr.getvalue()
+    assert "preflight progress 50.0%" in stderr.getvalue()
+    assert "\r" not in stderr.getvalue() and "\x1b" not in stderr.getvalue()
+
+
+def test_preflight_cli_json_auto_and_disabled_progress_are_silent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    from types import SimpleNamespace
+
+    from voicerender import cli
+    from voicerender.events import RenderEvent, RenderEventKind
+
+    class NonTtyStream(io.StringIO):
+        def isatty(self) -> bool:
+            return False
+
+    stderr = NonTtyStream()
+    monkeypatch.setattr(cli.sys, "stderr", stderr)
+    monkeypatch.setattr(cli, "load_plan", lambda _path: object())
+    callbacks: list[bool] = []
+
+    def fake_preflight(_plan, _output, *, on_event, **_kwargs):
+        callbacks.append(on_event is not None)
+        if on_event is not None:
+            on_event(
+                RenderEvent(
+                    kind=RenderEventKind.PREFLIGHT_STARTED,
+                    scope="preflight",
+                    phase="preflight",
+                    completed_count=0,
+                    total_count=1,
+                    progress=0.0,
+                    phase_completed_count=0,
+                    phase_total_count=1,
+                    phase_progress=0.0,
+                    elapsed_seconds=0.0,
+                )
+            )
+        return SimpleNamespace(
+            checks=[],
+            replan=[],
+            status="ok",
+            render_plan_id="plan",
+            render_profile_id="profile",
+        )
+
+    monkeypatch.setattr(cli, "preflight_render_plan", fake_preflight)
+    base = [
+        "preflight",
+        "plan.toml",
+        "--output",
+        str(tmp_path / "preflight.toml"),
+        "--json",
+    ]
+    assert cli.main(base) == 0
+    assert __import__("json").loads(capsys.readouterr().out)["status"] == "ok"
+    assert stderr.getvalue() == ""
+
+    assert cli.main([*base, "--no-progress"]) == 0
+    assert __import__("json").loads(capsys.readouterr().out)["status"] == "ok"
+    assert stderr.getvalue() == ""
+    assert callbacks == [False, False]
+
+
+@pytest.mark.parametrize("command", ["render", "render-book"])
+def test_render_command_progress_callbacks_keep_json_stdout_clean(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import io
+    from types import SimpleNamespace
+
+    from voicerender import cli
+    from voicerender.events import RenderEvent, RenderEventKind, RenderScope
+
+    class NonTtyStream(io.StringIO):
+        def isatty(self) -> bool:
+            return False
+
+    stderr = NonTtyStream()
+    monkeypatch.setattr(cli.sys, "stderr", stderr)
+
+    def event_callback(on_event, scope: RenderScope) -> None:
+        assert on_event is not None
+        on_event(
+            RenderEvent(
+                kind=RenderEventKind.SEGMENT_RENDERED,
+                scope=scope,
+                phase="render",
+                completed_count=1,
+                total_count=2,
+                progress=0.5,
+                rendered_count=1,
+                reused_count=0,
+                elapsed_seconds=1.0,
+            )
+        )
+
+    if command == "render":
+
+        def fake_render(*_args, on_event, **_kwargs):
+            event_callback(on_event, "render")
+            return SimpleNamespace(
+                failed=False,
+                pending_composition=False,
+                rendered_count=1,
+                reused_count=0,
+            )
+
+        monkeypatch.setattr(cli, "render_renderplan", fake_render)
+        monkeypatch.setattr(cli, "_render_payload", lambda _result: {"speech_count": 2})
+        args = [
+            "render",
+            "plan.toml",
+            "--preflight",
+            "preflight.toml",
+            "--out-dir",
+            str(tmp_path / "rendered"),
+            "--json",
+            "--progress",
+        ]
+    else:
+
+        def fake_render_book(*_args, on_event, **_kwargs):
+            event_callback(on_event, "book")
+            return SimpleNamespace(to_dict=lambda: {"items": []}, exit_code=0)
+
+        monkeypatch.setattr(cli, "render_book", fake_render_book)
+        args = [
+            "render-book",
+            str(tmp_path / "book"),
+            "--variant",
+            "narration",
+            "--json",
+            "--progress",
+        ]
+
+    assert cli.main(args) == 0
+    stdout = capsys.readouterr().out
+    assert isinstance(__import__("json").loads(stdout), dict)
+    assert "progress 50.0%" in stderr.getvalue()
+    assert "\r" not in stderr.getvalue() and "\x1b" not in stderr.getvalue()

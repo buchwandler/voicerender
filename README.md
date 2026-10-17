@@ -324,6 +324,37 @@ if report.status == "ok":
     print(result.manifest_path)
 ```
 
+### Live progress, ETA, and workload estimates
+
+`render`, `render-book`, and `preflight` accept `--progress` and `--no-progress`. By default progress is enabled only for interactive stderr and non-JSON output. `--progress` forces it (including with `--json`), but progress always stays on stderr; JSON stdout remains a single unchanged result. Forced redirected output uses throttled newline records without ANSI escapes or carriage returns. Use `--no-progress` to disable it.
+
+Python callers can subscribe to typed events during rendering and preflight. Events carry progress counts, phase/chapter context, elapsed time, and an ETA when synthesis timing evidence is available:
+
+```python
+from voicerender import RenderEvent, RenderEventKind, render_book
+
+
+def on_event(event: RenderEvent) -> None:
+    if event.kind is RenderEventKind.SEGMENT_RENDERED:
+        print(event.progress, event.eta_seconds, event.eta_confidence)
+
+
+result = render_book("Novel.ssmdbook", variant="narration--<profile-id>", on_event=on_event)
+```
+
+The keyword-only `on_event` callback is also available on `preflight_render_plan()`, `render_renderplan()`, and the legacy `render()`/`render_plan()` APIs. Preflight events report required-occurrence work, but its capacity measurements are not synthesis timing and do not produce an ETA.
+
+`estimate_renderplan()` and `estimate_render_book()` provide side-effect-free workload and verified existing-output reuse counts. Without a calibrated timing model, they return `estimated_seconds=None`, `confidence="unavailable"`, and `source="workload-only"`. Live ETA becomes available only after successful synthesis duration samples exist; it is approximate and can remain unknown for work whose engine has no timing evidence.
+
+```python
+from voicerender import estimate_renderplan
+
+estimate = estimate_renderplan(plan, output_dir="renders/narration")
+print(estimate.selected_count, estimate.known_output_reuse_count, estimate.pending_count)
+```
+
+Preflight capacity values describe whether a request fits the engine's limits; they are not wall-clock predictions and are never converted into duration estimates.
+
 For an emphasis-bearing plan, the Python API uses the same safe default (`reject`). A pipeline that declares the composition handler must pass the opt-in policy to both stages:
 
 ```python

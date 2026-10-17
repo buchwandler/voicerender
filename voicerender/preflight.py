@@ -22,6 +22,8 @@ from renderplan import (
 from .engines.base import EngineSelection, EngineSession
 from .engines.registry import get_adapter, open_session
 from .errors import PlanError
+from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+from .progress import ProgressTracker
 from .renderplan_input import (
     EmphasisPolicy,
     MeasurementOutcome,
@@ -38,11 +40,47 @@ class _OpenFailure:
     detail: str
 
 
+def _preflight_progress_event(
+    kind: RenderEventKind,
+    tracker: ProgressTracker,
+    *,
+    plan_id: str,
+    segment_number: int | None = None,
+    segment_id: str | None = None,
+    status: str | None = None,
+) -> RenderEvent:
+    snapshot = tracker.snapshot()
+    return RenderEvent(
+        kind=kind,
+        plan_id=plan_id,
+        scope="preflight",
+        phase="preflight",
+        segment_number=segment_number,
+        segment_id=segment_id,
+        status=status,
+        completed_count=snapshot.completed_count,
+        total_count=snapshot.total_count,
+        progress=snapshot.progress,
+        rendered_count=snapshot.rendered_count,
+        reused_count=snapshot.reused_count,
+        failed_count=snapshot.failed_count,
+        selected_count=snapshot.total_count,
+        phase_completed_count=snapshot.completed_count,
+        phase_total_count=snapshot.total_count,
+        phase_progress=snapshot.progress,
+        elapsed_seconds=snapshot.elapsed_seconds,
+        eta_seconds=snapshot.eta_seconds,
+        eta_confidence=snapshot.eta_confidence,
+        progress_snapshot=snapshot,
+    )
+
+
 def preflight_render_plan(
     plan: RenderPlan,
     output: str | Path,
     *,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    on_event: RenderEventCallback | None = None,
 ) -> PreflightReport:
     """Measure each required speech occurrence, then validate and persist its report."""
     if not isinstance(plan, RenderPlan):
@@ -50,11 +88,32 @@ def preflight_render_plan(
     checks: list[PreflightCheck] = []
     sessions: dict[str, EngineSession | _OpenFailure] = {}
 
+    required_count = sum(item.preflight_required for item in plan.speech)
+    progress_tracker = ProgressTracker(required_count)
+    plan_id = plan.plan_id or plan.computed_id()
+    emit_render_event(
+        on_event,
+        _preflight_progress_event(
+            RenderEventKind.PREFLIGHT_STARTED,
+            progress_tracker,
+            plan_id=plan_id,
+        ),
+    )
     with ExitStack() as stack:
         for item in plan.speech:
             if not item.preflight_required:
                 continue
             segment_id = item.segment_id or item.computed_id()
+            emit_render_event(
+                on_event,
+                _preflight_progress_event(
+                    RenderEventKind.PREFLIGHT_ITEM_STARTED,
+                    progress_tracker,
+                    plan_id=plan_id,
+                    segment_number=item.number,
+                    segment_id=segment_id,
+                ),
+            )
             try:
                 conversion = speech_request_conversion_from_renderplan(
                     item, emphasis_policy=emphasis_policy
@@ -66,7 +125,20 @@ def preflight_render_plan(
                 adapter = get_adapter(selection.engine)
                 session_key = _session_compatibility_key(adapter, selection)
             except Exception as exc:  # noqa: BLE001 - Preflight must turn every binding failure into a reject check.
-                checks.append(_error_check(item, segment_id, exc))
+                check = _error_check(item, segment_id, exc)
+                checks.append(check)
+                progress_tracker.advance()
+                emit_render_event(
+                    on_event,
+                    _preflight_progress_event(
+                        RenderEventKind.PREFLIGHT_ITEM_FINISHED,
+                        progress_tracker,
+                        plan_id=plan_id,
+                        segment_number=item.number,
+                        segment_id=segment_id,
+                        status=check.status,
+                    ),
+                )
                 continue
 
             cached = sessions.get(session_key)
@@ -80,13 +152,24 @@ def preflight_render_plan(
                     )
                 sessions[session_key] = cached
             if isinstance(cached, _OpenFailure):
-                checks.append(
-                    _error_check(
-                        item,
-                        segment_id,
-                        RuntimeError(cached.detail),
-                        source=cached.source,
-                    )
+                check = _error_check(
+                    item,
+                    segment_id,
+                    RuntimeError(cached.detail),
+                    source=cached.source,
+                )
+                checks.append(check)
+                progress_tracker.advance()
+                emit_render_event(
+                    on_event,
+                    _preflight_progress_event(
+                        RenderEventKind.PREFLIGHT_ITEM_FINISHED,
+                        progress_tracker,
+                        plan_id=plan_id,
+                        segment_number=item.number,
+                        segment_id=segment_id,
+                        status=check.status,
+                    ),
                 )
                 continue
 
@@ -96,14 +179,25 @@ def preflight_render_plan(
                 outcome = classify_measurement(exc)
             else:
                 outcome = classify_measurement(measured)
-            checks.append(
-                _measurement_check(
-                    item,
-                    segment_id,
-                    outcome,
-                    deferred_capability=conversion.deferred_capability,
-                    deferred_control_count=conversion.deferred_control_count,
-                )
+            check = _measurement_check(
+                item,
+                segment_id,
+                outcome,
+                deferred_capability=conversion.deferred_capability,
+                deferred_control_count=conversion.deferred_control_count,
+            )
+            checks.append(check)
+            progress_tracker.advance()
+            emit_render_event(
+                on_event,
+                _preflight_progress_event(
+                    RenderEventKind.PREFLIGHT_ITEM_FINISHED,
+                    progress_tracker,
+                    plan_id=plan_id,
+                    segment_number=item.number,
+                    segment_id=segment_id,
+                    status=check.status,
+                ),
             )
 
         expected = {
@@ -162,6 +256,15 @@ def preflight_render_plan(
         ).with_identity()
         report.validate_against(plan)
         save_preflight(report, output)
+        emit_render_event(
+            on_event,
+            _preflight_progress_event(
+                RenderEventKind.PREFLIGHT_FINISHED,
+                progress_tracker,
+                plan_id=plan_id,
+                status=report.status,
+            ),
+        )
     return report
 
 

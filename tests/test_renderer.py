@@ -234,8 +234,14 @@ def test_plan_load_and_legacy_render(tmp_path, mock_engine):
     )
     plan = VoicePlan.load(plan_path)
     out = tmp_path / "o"
-    render_plan(plan, profile=profile(), output_dir=out)
+    events = []
+    render_plan(plan, profile=profile(), output_dir=out, on_event=events.append)
     assert read_manifest(out)["source_plan_id"] == "plan123"
+    from voicerender.events import RenderEventKind
+
+    assert events[0].kind is RenderEventKind.RENDER_STARTED
+    assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
+    assert any(event.kind is RenderEventKind.SEGMENT_RENDERED for event in events)
     text = plan_path.read_text() + 'engine_options = "unsupported"\n'
     plan_path.write_text(text)
     with pytest.raises(PlanError, match="Unsupported speech metadata"):
@@ -262,3 +268,64 @@ def test_missing_role_rejected_before_manifest(tmp_path, mock_engine):
             output_dir=out,
         )
     assert not (out / "manifest.json").exists()
+
+
+def test_legacy_render_progress_counts_rendered_then_reused_items(
+    tmp_path: Path, mock_engine: FakeEngine
+) -> None:
+    from voicerender.events import RenderEventKind
+
+    output_dir = tmp_path / "legacy-progress"
+    events = []
+    result = render(
+        segments(), profile=profile(), output_dir=output_dir, on_event=events.append
+    )
+
+    assert result.rendered_count == 3
+    rendered = [
+        event for event in events if event.kind is RenderEventKind.SEGMENT_RENDERED
+    ]
+    assert [event.completed_count for event in rendered] == [1, 2, 3]
+    assert rendered[0].eta_seconds is not None
+    assert events[0].kind is RenderEventKind.RENDER_STARTED
+    assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
+
+    reused_events = []
+    reused = render(
+        segments(),
+        profile=profile(),
+        output_dir=output_dir,
+        on_event=reused_events.append,
+    )
+    assert (reused.rendered_count, reused.reused_count) == (0, 3)
+    assert (
+        sum(event.kind is RenderEventKind.SEGMENT_REUSED for event in reused_events)
+        == 3
+    )
+    assert reused_events[-1].progress == 1.0
+    assert len(mock_engine.calls) == 3
+
+
+def test_legacy_render_callback_failure_is_not_recorded_as_synthesis_failure(
+    tmp_path: Path, mock_engine: FakeEngine
+) -> None:
+    from voicerender import RenderEventCallbackError
+    from voicerender.events import RenderEventKind
+
+    output_dir = tmp_path / "callback-failure"
+
+    def callback(event) -> None:
+        if event.kind is RenderEventKind.SEGMENT_RENDERED:
+            raise RuntimeError("consumer failed")
+
+    with pytest.raises(RenderEventCallbackError):
+        render(
+            segments(),
+            profile=profile(),
+            output_dir=output_dir,
+            fail_fast=False,
+            on_event=callback,
+        )
+    statuses = [item["status"] for item in read_manifest(output_dir)["segments"]]
+    assert statuses == ["rendered", "pending", "pending"]
+    assert len(mock_engine.calls) == 1

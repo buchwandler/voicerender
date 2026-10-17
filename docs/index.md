@@ -69,3 +69,11 @@ A speech window can succeed (exit 0) while the whole-chapter manifest remains pa
 Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
 
 Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
+
+## Progress, ETA, and estimates
+
+The `render`, `render-book`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
+
+Python render and preflight APIs accept an optional keyword-only `on_event` callback with typed `RenderEvent` snapshots. Book events aggregate speech occurrences across chapters and preserve chapter and preflight phase context. ETA uses successful synthesis timing evidence only, so it may be unavailable at startup or for engines without samples. `estimate_renderplan()` and `estimate_render_book()` expose selected work and verified output reuse without synthesizing or creating outputs; estimated seconds remain unknown unless a calibrated timing model is available.
+
+Capacity measurements in preflight describe request fit, not synthesis latency. They are never used as a wall-clock prediction. See [Live progress and ETA in the README](../README.md#live-progress-eta-and-workload-estimates) for usage examples.

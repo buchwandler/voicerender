@@ -8,10 +8,12 @@ import shutil
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from .engines import get_engine
-from .errors import ArtifactError, PlanError, ProfileError
+from .errors import ArtifactError, PlanError, ProfileError, RenderEventCallbackError
+from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .models import (
     SCHEMA_MANIFEST,
     RenderResult,
@@ -20,6 +22,7 @@ from .models import (
     VoicePlan,
     VoiceProfile,
 )
+from .progress import ProgressTracker
 from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
 
 RENDER_ALGORITHM = "voicerender.batch.v1"
@@ -150,6 +153,7 @@ def render(
     force: bool = False,
     source_plan_id: str | None = None,
     fail_fast: bool = True,
+    on_event: RenderEventCallback | None = None,
 ) -> RenderResult:
     """Render selected logical speech segments into a persisted WAV bundle.
 
@@ -229,6 +233,56 @@ def render(
     }
     manifest_path = out / "manifest.json"
     rendered = reused = failed = 0
+    progress_tracker = ProgressTracker(len(chosen))
+
+    def emit_progress(
+        kind: RenderEventKind,
+        *,
+        index: int | None = None,
+        segment: SpeechSegment | None = None,
+        engine: str | None = None,
+        status: str | None = None,
+        error: Exception | None = None,
+        synthesis_seconds: float | None = None,
+    ) -> None:
+        snapshot = progress_tracker.snapshot()
+        error_code = getattr(error, "code", None) if error is not None else None
+        emit_render_event(
+            on_event,
+            RenderEvent(
+                kind=kind,
+                plan_id=source_plan_id,
+                locator=(
+                    f"{segment.scope_id}:{segment.id}" if segment is not None else None
+                ),
+                role=segment.role if segment is not None else None,
+                engine=engine,
+                status=status,
+                error_type=type(error).__name__ if error is not None else None,
+                error_code=error_code if isinstance(error_code, str) else None,
+                selected_count=len(chosen),
+                scope="render",
+                phase="render",
+                segment_number=index + 1 if index is not None else None,
+                segment_id=segment.id if segment is not None else None,
+                completed_count=snapshot.completed_count,
+                total_count=snapshot.total_count,
+                progress=snapshot.progress,
+                rendered_count=snapshot.rendered_count,
+                reused_count=snapshot.reused_count,
+                failed_count=snapshot.failed_count,
+                phase_completed_count=snapshot.completed_count,
+                phase_total_count=snapshot.total_count,
+                phase_progress=snapshot.progress,
+                elapsed_seconds=snapshot.elapsed_seconds,
+                synthesis_seconds=synthesis_seconds,
+                eta_seconds=snapshot.eta_seconds,
+                eta_confidence=snapshot.eta_confidence,
+                progress_snapshot=snapshot,
+            ),
+        )
+
+    emit_progress(RenderEventKind.RENDER_STARTED)
 
     with _exclusive_run(out):
         prior: dict[tuple[str | None, str | None, str | None], Any] = {}
@@ -255,6 +309,15 @@ def render(
                 entry = entries[index]
                 key = entry["synthesis_key"]
                 target = out / entry["path"]
+                engine_name = str(entry["engine"])
+                emit_progress(
+                    RenderEventKind.SEGMENT_STARTED,
+                    index=index,
+                    segment=seg,
+                    engine=engine_name,
+                    status="started",
+                )
+                synthesis_seconds: float | None = None
                 try:
                     old = prior.get((seg.scope_id, seg.id, key)) if prior else None
                     if (
@@ -286,11 +349,43 @@ def render(
                             binding = profile.roles[seg.role]
                             role_key = digest(identity_by_role[seg.role])
                             if role_key not in sessions:
-                                sessions[role_key] = opened.enter_context(
-                                    get_engine(binding.engine).open(binding)
+                                emit_progress(
+                                    RenderEventKind.ENGINE_OPEN_STARTED,
+                                    index=index,
+                                    segment=seg,
+                                    engine=binding.engine,
+                                    status="opening",
                                 )
+                                try:
+                                    session = opened.enter_context(
+                                        get_engine(binding.engine).open(binding)
+                                    )
+                                except RenderEventCallbackError:
+                                    raise
+                                except Exception as exc:
+                                    emit_progress(
+                                        RenderEventKind.ENGINE_OPEN_FINISHED,
+                                        index=index,
+                                        segment=seg,
+                                        engine=binding.engine,
+                                        status="failed",
+                                        error=exc,
+                                    )
+                                    raise
+                                sessions[role_key] = session
+                                emit_progress(
+                                    RenderEventKind.ENGINE_OPEN_FINISHED,
+                                    index=index,
+                                    segment=seg,
+                                    engine=binding.engine,
+                                    status="opened",
+                                )
+                            synthesis_started = monotonic()
                             result = sessions[role_key].synthesize(
                                 request_id=seg.id, text=seg.text, language=seg.language
+                            )
+                            synthesis_seconds = max(
+                                0.0, monotonic() - synthesis_started
                             )
                             info = atomic_wav(
                                 cache / f"{key}.wav",
@@ -313,6 +408,8 @@ def render(
                                 timing_source=sidecar["timing_source"],
                             )
                             rendered += 1
+                except RenderEventCallbackError:
+                    raise
                 except Exception as exc:
                     entry.update(
                         status="failed",
@@ -320,11 +417,46 @@ def render(
                     )
                     failed += 1
                     atomic_json(manifest_path, document)
+                    progress_tracker.complete("failed")
+                    emit_progress(
+                        RenderEventKind.SEGMENT_FAILED,
+                        index=index,
+                        segment=seg,
+                        engine=engine_name,
+                        status="failed",
+                        error=exc,
+                    )
                     if fail_fast:
                         raise
-                atomic_json(manifest_path, document)
+                else:
+                    atomic_json(manifest_path, document)
+                    if entry["status"] == "rendered":
+                        progress_tracker.complete(
+                            "rendered", synthesis_seconds=synthesis_seconds
+                        )
+                        emit_progress(
+                            RenderEventKind.SEGMENT_RENDERED,
+                            index=index,
+                            segment=seg,
+                            engine=engine_name,
+                            status="rendered",
+                            synthesis_seconds=synthesis_seconds,
+                        )
+                    else:
+                        progress_tracker.complete("reused")
+                        emit_progress(
+                            RenderEventKind.SEGMENT_REUSED,
+                            index=index,
+                            segment=seg,
+                            engine=engine_name,
+                            status="reused",
+                        )
         document["complete"] = failed == 0
         atomic_json(manifest_path, document)
+        emit_progress(
+            RenderEventKind.RENDER_COMPLETED,
+            status="failed" if failed else "completed",
+        )
     return RenderResult(
         manifest_path=manifest_path,
         rendered_count=rendered,
@@ -345,6 +477,7 @@ def render_plan(
     resume: bool = True,
     force: bool = False,
     fail_fast: bool = True,
+    on_event: RenderEventCallback | None = None,
 ) -> RenderResult:
     """Load the neutral voiceplan TOML contract and execute its speech segments."""
     parsed = VoicePlan.load(plan) if isinstance(plan, (str, Path)) else plan
@@ -362,4 +495,5 @@ def render_plan(
         force=force,
         source_plan_id=parsed.source_plan_id,
         fail_fast=fail_fast,
+        on_event=on_event,
     )

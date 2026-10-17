@@ -38,6 +38,7 @@ from voicerender.engines.pipersynth import PiperSynthEngineAdapter
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineUnavailableError, SpeechRequestTooLongError
+from voicerender.events import RenderEvent, RenderEventKind
 from voicerender.preflight import (
     preflight_exit_code,
     preflight_render_plan,
@@ -873,3 +874,48 @@ def test_preflight_cli_refuses_to_overwrite_input_plan(
     assert exit_code == 1
     assert "must not overwrite" in capsys.readouterr().err
     assert plan_path.read_bytes() == original
+
+
+def test_preflight_events_count_required_items_including_terminal_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan(
+        ("not required", False, "sentence"),
+        ("too long", True, "sentence"),
+        ("measurement error", True, "sentence"),
+    )
+    adapter.measurements["too long"] = RequestMeasure(
+        fits=False,
+        amount=101,
+        maximum=100,
+        unit="model_tokens",
+        source="fake.frontend_measure",
+    )
+    adapter.measurements["measurement error"] = RuntimeError("measurement failed")
+    events: list[RenderEvent] = []
+
+    report = preflight_render_plan(
+        plan,
+        tmp_path / "events-preflight.toml",
+        on_event=events.append,
+    )
+
+    assert report.status == "reject"
+    assert events[0].kind is RenderEventKind.PREFLIGHT_STARTED
+    assert events[0].total_count == 2
+    assert events[0].completed_count == 0
+    finished = [
+        event
+        for event in events
+        if event.kind is RenderEventKind.PREFLIGHT_ITEM_FINISHED
+    ]
+    assert [event.status for event in finished] == ["too_long", "error"]
+    assert [event.completed_count for event in finished] == [1, 2]
+    assert [event.progress for event in finished] == [0.5, 1.0]
+    assert all(event.total_count == 2 for event in finished)
+    assert all(event.eta_confidence == "unavailable" for event in finished)
+    assert events[-1].kind is RenderEventKind.PREFLIGHT_FINISHED
+    assert events[-1].status == "reject"
+    assert events[-1].progress == 1.0
+    assert adapter.synthesized_texts == []

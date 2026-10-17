@@ -10,6 +10,7 @@ from collections.abc import Collection, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 from renderplan import (
@@ -30,8 +31,15 @@ from renderplan import (
 
 from .engines.base import EngineSelection, EngineSession, SpeechRequest
 from .engines.registry import get_adapter, open_session
-from .errors import ArtifactError, PlanError, UnsupportedSynthesisFeatureError
+from .errors import (
+    ArtifactError,
+    PlanError,
+    RenderEventCallbackError,
+    UnsupportedSynthesisFeatureError,
+)
+from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .preflight import _session_compatibility_key
+from .progress import ProgressTracker, TerminalOutcome
 from .renderplan_input import (
     EMPHASIS_COMPOSITION_CAPABILITY,
     EmphasisPolicy,
@@ -65,6 +73,8 @@ class RenderPlanResult:
     execution_fingerprint: tuple[dict[str, Any], ...] = ()
     pending_composition: bool = False
 
+    elapsed_seconds: float = 0.0
+
     @property
     def failed(self) -> bool:
         return self.error is not None or not self.selection_complete
@@ -93,6 +103,34 @@ class _RenderFailure:
     error_code: str = "render.failed"
 
 
+def _render_progress_event(
+    kind: RenderEventKind,
+    tracker: ProgressTracker,
+    **context: Any,
+) -> RenderEvent:
+    snapshot = tracker.snapshot()
+    fields: dict[str, Any] = {
+        "completed_count": snapshot.completed_count,
+        "total_count": snapshot.total_count,
+        "progress": snapshot.progress,
+        "rendered_count": snapshot.rendered_count,
+        "reused_count": snapshot.reused_count,
+        "failed_count": snapshot.failed_count,
+        "selected_count": snapshot.total_count,
+        "phase_completed_count": snapshot.completed_count,
+        "phase_total_count": snapshot.total_count,
+        "phase_progress": snapshot.progress,
+        "elapsed_seconds": snapshot.elapsed_seconds,
+        "eta_seconds": snapshot.eta_seconds,
+        "eta_confidence": snapshot.eta_confidence,
+        "progress_snapshot": snapshot,
+        "scope": "render",
+        "phase": "render",
+    }
+    fields.update(context)
+    return RenderEvent(kind=kind, **fields)
+
+
 def render_renderplan(
     plan: RenderPlan | str | Path,
     *,
@@ -104,6 +142,7 @@ def render_renderplan(
     recheck_report_path: str | Path | None = None,
     speech_numbers: Collection[int] | None = None,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    on_event: RenderEventCallback | None = None,
 ) -> RenderPlanResult:
     """Render selected speech items, retaining verified artifacts from prior runs."""
     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
@@ -206,6 +245,15 @@ def render_renderplan(
     manifest_path = out / RENDER_MANIFEST_FILENAME
     report_id = parsed_plan.plan_id or parsed_plan.computed_id()
     producer = Producer(name="voicerender", version=_voicerender_version())
+    progress_tracker = ProgressTracker(len(selected_items))
+    emit_render_event(
+        on_event,
+        _render_progress_event(
+            RenderEventKind.RENDER_STARTED,
+            progress_tracker,
+            plan_id=report_id,
+        ),
+    )
 
     artifact_map: dict[tuple[int, str], SpeechArtifact] = {}
     rendered = reused = 0
@@ -227,12 +275,23 @@ def render_renderplan(
         if stale_output_reset and reset_stale_output and had_preflight:
             save_preflight(report, out / "preflight.toml")
         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
-        selected_keys = {
-            (item.number, item.segment_id or item.computed_id())
-            for item in selected_items
-        }
-        if not force:
-            reused = sum(key in artifact_map for key in selected_keys)
+        for item in selected_items:
+            key = (item.number, item.segment_id or item.computed_id())
+            if not force and key in artifact_map:
+                progress_tracker.complete("reused")
+                reused += 1
+                emit_render_event(
+                    on_event,
+                    _render_progress_event(
+                        RenderEventKind.SEGMENT_REUSED,
+                        progress_tracker,
+                        plan_id=report_id,
+                        segment_number=item.number,
+                        segment_id=key[1],
+                        role=item.role,
+                        status="output_reused",
+                    ),
+                )
         pending_items = tuple(
             item
             for item in selected_items
@@ -267,23 +326,79 @@ def render_renderplan(
                 fingerprint = dict(current.execution_fingerprint)
                 fingerprint["capacity"] = None
                 fingerprint["execution_status"] = "not_measured"
+                item_context = {
+                    "plan_id": report_id,
+                    "segment_number": item.number,
+                    "segment_id": current.segment_id,
+                    "role": item.role,
+                    "engine": current.selection.engine,
+                }
+                emit_render_event(
+                    on_event,
+                    _render_progress_event(
+                        RenderEventKind.SEGMENT_STARTED,
+                        progress_tracker,
+                        **item_context,
+                    ),
+                )
+                terminal_outcome: TerminalOutcome | None = None
+                synthesis_seconds: float | None = None
                 try:
                     cached = None if force else _read_cache(cache, current.cache_key)
                     if cached is not None:
                         source, info = cached
                         _copy_verified(source, target, info)
                         reused += 1
+                        terminal_outcome = "reused"
                         fingerprint["execution_status"] = "cache_reused"
                     else:
                         fingerprint["execution_status"] = "synthesized"
                         session = sessions.get(current.session_key)
                         if session is None:
+                            emit_render_event(
+                                on_event,
+                                _render_progress_event(
+                                    RenderEventKind.ENGINE_OPEN_STARTED,
+                                    progress_tracker,
+                                    **item_context,
+                                ),
+                            )
+                            open_started = monotonic()
                             try:
                                 session = opened.enter_context(
                                     open_session(current.selection)
                                 )
+                            except RenderEventCallbackError:
+                                raise
                             except Exception as exc:  # noqa: BLE001 - Renderer setup becomes a partial-render result.
                                 session = _OpenFailure(exc)
+                                emit_render_event(
+                                    on_event,
+                                    _render_progress_event(
+                                        RenderEventKind.ENGINE_OPEN_FINISHED,
+                                        progress_tracker,
+                                        **item_context,
+                                        status="failed",
+                                        error_type=type(exc).__name__,
+                                        error_code=getattr(exc, "code", None),
+                                        phase_elapsed_seconds=max(
+                                            0.0, monotonic() - open_started
+                                        ),
+                                    ),
+                                )
+                            else:
+                                emit_render_event(
+                                    on_event,
+                                    _render_progress_event(
+                                        RenderEventKind.ENGINE_OPEN_FINISHED,
+                                        progress_tracker,
+                                        **item_context,
+                                        status="opened",
+                                        phase_elapsed_seconds=max(
+                                            0.0, monotonic() - open_started
+                                        ),
+                                    ),
+                                )
                             sessions[current.session_key] = session
                         if isinstance(session, _OpenFailure):
                             fingerprint["execution_status"] = "session_open_failed"
@@ -306,6 +421,18 @@ def render_renderplan(
                                     "preflight.reject"
                                     if item.preflight_required
                                     else "engine.session_failed"
+                                ),
+                            )
+                            progress_tracker.complete("failed")
+                            emit_render_event(
+                                on_event,
+                                _render_progress_event(
+                                    RenderEventKind.SEGMENT_FAILED,
+                                    progress_tracker,
+                                    **item_context,
+                                    status="failed",
+                                    error_type=type(session.error).__name__,
+                                    error_code=getattr(session.error, "code", None),
                                 ),
                             )
                             break
@@ -344,9 +471,23 @@ def render_renderplan(
                                     else "engine.measurement_failed"
                                 ),
                             )
+                            progress_tracker.complete("failed")
+                            emit_render_event(
+                                on_event,
+                                _render_progress_event(
+                                    RenderEventKind.SEGMENT_FAILED,
+                                    progress_tracker,
+                                    **item_context,
+                                    status="failed",
+                                    error_type="MeasurementError",
+                                    error_code=failure.error_code,
+                                ),
+                            )
                             break
 
+                        synthesis_started = monotonic()
                         rendered_speech = session.synthesize(current.request)
+                        synthesis_seconds = max(0.0, monotonic() - synthesis_started)
                         if rendered_speech.id != current.request.id:
                             raise ArtifactError(
                                 "Renderer returned an artifact for a different speech request"
@@ -370,6 +511,7 @@ def render_renderplan(
                             )
                         _copy_verified(cache / f"{current.cache_key}.wav", target, info)
                         rendered += 1
+                        terminal_outcome = "rendered"
 
                     final_info = wav_info(target)
                     if not verified_wav(target, final_info):
@@ -397,6 +539,39 @@ def render_renderplan(
                     execution_fingerprints[key] = _finalize_execution_fingerprint(
                         fingerprint
                     )
+                    if terminal_outcome is None:
+                        raise RuntimeError(
+                            "render item reached commit without a terminal outcome"
+                        )
+                    progress_tracker.complete(
+                        terminal_outcome,
+                        synthesis_seconds=(
+                            synthesis_seconds
+                            if terminal_outcome == "rendered"
+                            else None
+                        ),
+                    )
+                    terminal_kind = (
+                        RenderEventKind.SEGMENT_RENDERED
+                        if terminal_outcome == "rendered"
+                        else RenderEventKind.SEGMENT_REUSED
+                    )
+                    emit_render_event(
+                        on_event,
+                        _render_progress_event(
+                            terminal_kind,
+                            progress_tracker,
+                            **item_context,
+                            status=terminal_outcome,
+                            synthesis_seconds=(
+                                synthesis_seconds
+                                if terminal_outcome == "rendered"
+                                else None
+                            ),
+                        ),
+                    )
+                except RenderEventCallbackError:
+                    raise
                 except Exception as exc:  # noqa: BLE001 - Persist a valid cumulative partial manifest.
                     error_code = getattr(exc, "code", None)
                     failure = _RenderFailure(
@@ -410,6 +585,20 @@ def render_renderplan(
                     fingerprint["execution_status"] = "render_failed"
                     execution_fingerprints[key] = _finalize_execution_fingerprint(
                         fingerprint
+                    )
+                    progress_tracker.complete("failed")
+                    emit_render_event(
+                        on_event,
+                        _render_progress_event(
+                            RenderEventKind.SEGMENT_FAILED,
+                            progress_tracker,
+                            **item_context,
+                            status="failed",
+                            error_type=type(exc).__name__,
+                            error_code=(
+                                error_code if isinstance(error_code, str) else None
+                            ),
+                        ),
                     )
                     break
 
@@ -440,7 +629,8 @@ def render_renderplan(
         (item.number, item.segment_id or item.computed_id()) in artifact_map
         for item in selected_items
     )
-    return RenderPlanResult(
+    final_snapshot = progress_tracker.snapshot()
+    result = RenderPlanResult(
         manifest=manifest,
         manifest_path=manifest_path,
         planned_count=len(parsed_plan.speech),
@@ -454,7 +644,19 @@ def render_renderplan(
         error_code=failure.error_code if failure is not None else None,
         execution_fingerprint=tuple(execution_fingerprints.values()),
         pending_composition=bool(deferred_controls),
+        elapsed_seconds=final_snapshot.elapsed_seconds,
     )
+    emit_render_event(
+        on_event,
+        _render_progress_event(
+            RenderEventKind.RENDER_COMPLETED,
+            progress_tracker,
+            plan_id=report_id,
+            status="failed" if result.failed else "completed",
+            error_code=result.error_code,
+        ),
+    )
+    return result
 
 
 def _select_speech_items(

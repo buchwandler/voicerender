@@ -9,8 +9,10 @@ import json
 import os
 import sys
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from renderplan import load_manifest, load_plan
 
@@ -38,6 +40,7 @@ from .errors import (
     UnsupportedSynthesisFeatureError,
     VoiceRenderError,
 )
+from .events import RenderEvent, RenderEventKind
 from .models_api import (
     ModelInstallRequest,
     ModelRemoveRequest,
@@ -88,6 +91,15 @@ from .voices_api import (
     list_voices,
     voice_descriptor_to_dict,
 )
+
+
+def _add_progress_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show live progress on stderr (default: auto for interactive human output)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -383,6 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("plan", type=Path)
     preflight.add_argument("-o", "--output", required=True, type=Path)
     preflight.add_argument("--json", action="store_true")
+    _add_progress_option(preflight)
 
     preflight.add_argument(
         "--emphasis-policy",
@@ -405,6 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reset output owned by a different RenderPlan while reusing cache entries",
     )
     render.add_argument("--json", action="store_true")
+    _add_progress_option(render)
     render.add_argument(
         "--emphasis-policy",
         choices=("reject", "defer-to-compose"),
@@ -440,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     book_render.add_argument("--fail-fast", action="store_true")
     book_render.add_argument("--json", action="store_true")
+    _add_progress_option(book_render)
 
     inspect = commands.add_parser(
         "inspect-manifest", help="Verify a render manifest and its WAVs"
@@ -448,6 +463,214 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--json", action="store_true")
 
     return parser
+
+
+_PROGRESS_TRANSITIONS = frozenset(
+    {
+        RenderEventKind.PREFLIGHT_STARTED,
+        RenderEventKind.PREFLIGHT_FINISHED,
+        RenderEventKind.RENDER_STARTED,
+        RenderEventKind.RENDER_COMPLETED,
+        RenderEventKind.BOOK_STARTED,
+        RenderEventKind.BOOK_COMPLETED,
+        RenderEventKind.CHAPTER_STARTED,
+        RenderEventKind.CHAPTER_FINISHED,
+        RenderEventKind.CHAPTER_REUSED,
+        RenderEventKind.CHAPTER_SKIPPED,
+        RenderEventKind.ENGINE_OPEN_STARTED,
+        RenderEventKind.ENGINE_OPEN_FINISHED,
+        RenderEventKind.SEGMENT_FAILED,
+    }
+)
+
+
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "--:--"
+    whole_seconds = max(0, int(seconds))
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+class _ProgressPrinter:
+    """Render typed progress events to stderr without touching stdout."""
+
+    def __init__(
+        self,
+        stream: TextIO,
+        *,
+        is_tty: bool,
+        clock: Callable[[], float] = time.monotonic,
+        min_progress_delta: float = 0.05,
+        min_interval_seconds: float = 30.0,
+    ) -> None:
+        self.stream = stream
+        self.is_tty = is_tty
+        self._clock = clock
+        self._min_progress_delta = min_progress_delta
+        self._min_interval_seconds = min_interval_seconds
+        self._last_output_at: float | None = None
+        self._last_output_progress: float | None = None
+        self._last_phase: str | None = None
+        self._last_chapter: tuple[str | None, int | None] | None = None
+        self._line_open = False
+
+    def __call__(self, event: RenderEvent) -> None:
+        now = self._clock()
+        phase = event.phase or event.scope
+        chapter = (event.chapter_id, event.chapter_index)
+        phase_changed = self._last_phase is not None and phase != self._last_phase
+        chapter_changed = (
+            chapter[1] is not None
+            and self._last_chapter is not None
+            and chapter != self._last_chapter
+        )
+        self._last_phase = phase or self._last_phase
+        if chapter[1] is not None:
+            self._last_chapter = chapter
+
+        progress = (
+            event.phase_progress
+            if phase == "preflight" and event.phase_progress is not None
+            else event.progress
+        )
+        if self.is_tty:
+            self.stream.write("\r" + self._format_event(event, progress))
+            self.stream.flush()
+            self._line_open = True
+            return
+
+        advanced = (
+            progress is not None
+            and self._last_output_progress is not None
+            and progress - self._last_output_progress >= self._min_progress_delta
+        )
+        timed_out = (
+            self._last_output_at is not None
+            and now - self._last_output_at >= self._min_interval_seconds
+        )
+        if not (
+            self._last_output_at is None
+            or event.kind in _PROGRESS_TRANSITIONS
+            or phase_changed
+            or chapter_changed
+            or advanced
+            or timed_out
+        ):
+            return
+        self.stream.write(self._format_event(event, progress, non_tty=True) + "\n")
+        self.stream.flush()
+        self._last_output_at = now
+        if progress is not None:
+            self._last_output_progress = progress
+
+    def _format_event(
+        self,
+        event: RenderEvent,
+        progress: float | None,
+        *,
+        non_tty: bool = False,
+    ) -> str:
+        is_preflight = event.phase == "preflight" or event.scope == "preflight"
+        percent = "--.-%" if progress is None else f"{progress * 100:.1f}%"
+        completed = (
+            event.phase_completed_count
+            if is_preflight and event.phase_completed_count is not None
+            else event.completed_count
+        )
+        total = (
+            event.phase_total_count
+            if is_preflight and event.phase_total_count is not None
+            else event.total_count
+        )
+        count = f"{completed if completed is not None else '?'}"
+        count += f"/{total if total is not None else '?'}"
+        elapsed = (
+            event.phase_elapsed_seconds
+            if is_preflight and event.phase_elapsed_seconds is not None
+            else event.elapsed_seconds
+        )
+        chapter = (
+            f"chapter {event.chapter_index}/{event.chapter_count}"
+            if event.chapter_index is not None and event.chapter_count is not None
+            else None
+        )
+        if is_preflight:
+            prefix = "preflight "
+            details = [
+                f"{prefix}[{progress * 100:5.1f}%] {count} speech"
+                if progress is not None
+                else f"{prefix}[--.-%] {count} speech"
+            ]
+        else:
+            details = [
+                f"[{progress * 100:5.1f}%] {count} speech"
+                if progress is not None
+                else f"[--.-%] {count} speech"
+            ]
+            if event.rendered_count is not None or event.reused_count is not None:
+                details.append(
+                    f"{event.rendered_count or 0} rendered, {event.reused_count or 0} reused"
+                )
+        status = self._event_status(event)
+        if status is not None:
+            details.append(status)
+        details.append(f"elapsed {_format_duration(elapsed)}")
+        if not is_preflight:
+            details.append(f"ETA {_format_duration(event.eta_seconds)}")
+        if chapter is not None:
+            details.append(chapter)
+        if non_tty:
+            label = "preflight progress" if is_preflight else "progress"
+            fields = [label, percent, count]
+            if event.rendered_count is not None:
+                fields.append(f"rendered={event.rendered_count}")
+            if event.reused_count is not None:
+                fields.append(f"reused={event.reused_count}")
+            fields.append(f"elapsed={_format_duration(elapsed)}")
+            if not is_preflight:
+                fields.append(f"eta={_format_duration(event.eta_seconds)}")
+            if status is not None:
+                fields.append(status.replace(" ", "_"))
+            if chapter is not None:
+                fields.append(chapter.replace(" ", "_"))
+            return " ".join(fields)
+        return " | ".join(details)
+
+    @staticmethod
+    def _event_status(event: RenderEvent) -> str | None:
+        if event.kind is RenderEventKind.ENGINE_OPEN_STARTED:
+            return f"opening {event.engine or 'engine'}"
+        if event.kind is RenderEventKind.ENGINE_OPEN_FINISHED:
+            return f"opened {event.engine or 'engine'}"
+        if event.kind is RenderEventKind.SEGMENT_STARTED and event.engine:
+            return f"synthesizing {event.engine}"
+        if event.kind is RenderEventKind.SEGMENT_FAILED:
+            return f"failed {event.error_code or event.status or 'speech item'}"
+        return None
+
+    def finish(self) -> None:
+        if self.is_tty and self._line_open:
+            self.stream.write("\n")
+            self.stream.flush()
+            self._line_open = False
+
+
+def _progress_callback(
+    args: Any,
+    *,
+    stream: TextIO | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> _ProgressPrinter | None:
+    output = sys.stderr if stream is None else stream
+    is_tty = output.isatty()
+    enabled = args.progress if args.progress is not None else is_tty and not args.json
+    if not enabled:
+        return None
+    return _ProgressPrinter(output, is_tty=is_tty, clock=clock)
 
 
 def _json_options(entries: list[str], *, label: str = "--option") -> dict[str, Any]:
@@ -1485,9 +1708,17 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "preflight report path must not overwrite its RenderPlan"
                 )
-            report = preflight_render_plan(
-                load_plan(args.plan), args.output, emphasis_policy=args.emphasis_policy
-            )
+            progress = _progress_callback(args)
+            try:
+                report = preflight_render_plan(
+                    load_plan(args.plan),
+                    args.output,
+                    emphasis_policy=args.emphasis_policy,
+                    on_event=progress,
+                )
+            finally:
+                if progress is not None:
+                    progress.finish()
             payload = _preflight_payload(report)
             payload["output"] = str(args.output)
             if args.json:
@@ -1508,16 +1739,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "fresh preflight report must not overwrite the RenderPlan or supplied report"
                 )
-            result = render_renderplan(
-                args.plan,
-                preflight=args.preflight,
-                output_dir=args.out_dir,
-                cache_dir=args.cache_dir,
-                recheck_report_path=args.recheck_report,
-                force=args.force,
-                reset_stale_output=args.reset_stale,
-                emphasis_policy=args.emphasis_policy,
-            )
+            progress = _progress_callback(args)
+            try:
+                result = render_renderplan(
+                    args.plan,
+                    preflight=args.preflight,
+                    output_dir=args.out_dir,
+                    cache_dir=args.cache_dir,
+                    recheck_report_path=args.recheck_report,
+                    force=args.force,
+                    reset_stale_output=args.reset_stale,
+                    emphasis_policy=args.emphasis_policy,
+                    on_event=progress,
+                )
+            finally:
+                if progress is not None:
+                    progress.finish()
             payload = _render_payload(result)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1543,20 +1780,26 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "render-book":
+            progress = _progress_callback(args)
             try:
-                book_result = render_book(
-                    args.book,
-                    variant=args.variant,
-                    chapters=args.chapters,
-                    speech=args.speech,
-                    renderplan_root=args.renderplan_root,
-                    output_root=args.output_root,
-                    cache_dir=args.cache_dir,
-                    force=args.force,
-                    reset_stale_output=args.reset_stale,
-                    fail_fast=args.fail_fast,
-                    emphasis_policy=args.emphasis_policy,
-                )
+                try:
+                    book_result = render_book(
+                        args.book,
+                        variant=args.variant,
+                        chapters=args.chapters,
+                        speech=args.speech,
+                        renderplan_root=args.renderplan_root,
+                        output_root=args.output_root,
+                        cache_dir=args.cache_dir,
+                        force=args.force,
+                        reset_stale_output=args.reset_stale,
+                        fail_fast=args.fail_fast,
+                        emphasis_policy=args.emphasis_policy,
+                        on_event=progress,
+                    )
+                finally:
+                    if progress is not None:
+                        progress.finish()
             except (BookRenderError, OSError, ValueError, TypeError) as exc:
                 error_code = getattr(exc, "code", "workspace.invalid")
                 payload = {

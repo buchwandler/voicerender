@@ -70,7 +70,13 @@ from .errors import (
     UnsupportedSynthesisFeatureError,
     VoiceRenderError,
 )
-from .events import RenderEvent, RenderEventCallback, RenderEventKind
+from .estimates import RenderEstimate, estimate_render_book, estimate_renderplan
+from .events import (
+    RenderEvent,
+    RenderEventCallback,
+    RenderEventKind,
+    RenderScope,
+)
 from .models import (
     RenderResult,
     SpeechSegment,
@@ -93,6 +99,7 @@ from .profile_roles import (
     set_default_profile_role,
     set_profile_role,
 )
+from .progress import EtaConfidence, RenderProgress
 from .render import render, render_plan
 from .renderplan_render import RenderPlanResult, render_renderplan
 from .renderprofile import (
@@ -156,6 +163,7 @@ __all__ = [
     "EngineSession",
     "EngineSynthesisError",
     "EngineUnavailableError",
+    "EtaConfidence",
     "ModelArtifact",
     "ModelInstallRequest",
     "ModelInstallResult",
@@ -168,6 +176,7 @@ __all__ = [
     "PreflightReport",
     "ProfileError",
     "PronunciationSpan",
+    "RenderEstimate",
     "RenderEvent",
     "RenderEventCallback",
     "RenderEventCallbackError",
@@ -177,7 +186,9 @@ __all__ = [
     "RenderPlanResult",
     "RenderProfile",
     "RenderProfileFragment",
+    "RenderProgress",
     "RenderResult",
+    "RenderScope",
     "RenderedSpeech",
     "RequestMeasure",
     "ResolvedPreparedVoice",
@@ -209,6 +220,8 @@ __all__ = [
     "discover_targets",
     "engine_options",
     "engine_status",
+    "estimate_render_book",
+    "estimate_renderplan",
     "inspect_voice",
     "install_model",
     "list_engines",
