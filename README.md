@@ -339,7 +339,9 @@ def on_event(event: RenderEvent) -> None:
         print(event.progress, event.eta_seconds, event.eta_confidence)
 
 
-result = render_book("Novel.ssmdbook", variant="narration--<profile-id>", on_event=on_event)
+result = render_book(
+    "Novel.ssmdbook", variant="narration--<profile-id>", on_event=on_event
+)
 ```
 
 The keyword-only `on_event` callback is also available on `preflight_render_plan()`, `render_renderplan()`, and the legacy `render()`/`render_plan()` APIs. Preflight events report required-occurrence work, but its capacity measurements are not synthesis timing and do not produce an ETA.
@@ -350,7 +352,9 @@ The keyword-only `on_event` callback is also available on `preflight_render_plan
 from voicerender import estimate_renderplan
 
 estimate = estimate_renderplan(plan, output_dir="renders/narration")
-print(estimate.selected_count, estimate.known_output_reuse_count, estimate.pending_count)
+print(
+    estimate.selected_count, estimate.known_output_reuse_count, estimate.pending_count
+)
 ```
 
 Preflight capacity values describe whether a request fits the engine's limits; they are not wall-clock predictions and are never converted into duration estimates.
