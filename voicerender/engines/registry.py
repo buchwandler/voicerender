@@ -14,6 +14,7 @@ from ..errors import (
     EngineUnavailableError,
     ProfileError,
 )
+from .assets import EngineAssetManager
 from .base import (
     EngineAdapter,
     EngineSelection,
@@ -71,6 +72,8 @@ _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
 }
 _ADAPTERS: dict[str, EngineAdapter] = {}
 
+_ASSET_MANAGERS: dict[str, EngineAssetManager] = {}
+
 
 def normalize_engine_id(engine: str) -> str:
     """Normalize a public engine identifier without importing its SDK."""
@@ -99,6 +102,34 @@ def register_adapter(adapter: EngineAdapter) -> None:
             f"Engine adapter {adapter.id!r} is missing required methods: {', '.join(missing)}"
         )
     _ADAPTERS[engine_id] = adapter
+
+
+def register_asset_manager(engine: str, manager: EngineAssetManager) -> None:
+    """Register optional model management independently of synthesis adapters."""
+    engine_id = normalize_engine_id(engine)
+    if engine_id not in _ENGINE_MODULES and engine_id not in _ADAPTERS:
+        raise ProfileError(
+            f"Cannot register asset manager for unknown engine {engine!r}"
+        )
+    required = (
+        "capabilities",
+        "list_models",
+        "inspect_model",
+        "install_model",
+        "remove_model",
+        "verify_model",
+    )
+    missing = [name for name in required if not callable(getattr(manager, name, None))]
+    if missing:
+        raise ProfileError(
+            f"Asset manager for engine {engine_id!r} is missing methods: {', '.join(missing)}"
+        )
+    _ASSET_MANAGERS[engine_id] = manager
+
+
+def get_asset_manager(engine: str) -> EngineAssetManager | None:
+    """Return an engine's optional asset manager without loading its SDK."""
+    return _ASSET_MANAGERS.get(normalize_engine_id(engine))
 
 
 def get_adapter(engine: str) -> EngineAdapter:
@@ -332,10 +363,12 @@ __all__ = [
     "discover_targets",
     "engine_status",
     "get_adapter",
+    "get_asset_manager",
     "list_engines",
     "normalize_engine_id",
     "open_session",
     "register_adapter",
+    "register_asset_manager",
     "resolve_voice",
     "synthesize",
 ]

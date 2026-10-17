@@ -164,6 +164,22 @@ class EngineCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class EngineOption:
+    """Normalized metadata for one engine-accepted setting."""
+
+    name: str
+    value_type: str
+    required: bool = False
+    default: Any = None
+    choices: tuple[Any, ...] = ()
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    description: str = ""
+    identity_affecting: bool = True
+    runtime_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class EngineDiagnostic:
     """Stable, machine-readable adapter selection or capability diagnostic."""
 
@@ -444,6 +460,7 @@ __all__ = [
     "EngineAdapter",
     "EngineCapabilities",
     "EngineDiagnostic",
+    "EngineOption",
     "EngineSelection",
     "EngineSession",
     "PronunciationSpan",

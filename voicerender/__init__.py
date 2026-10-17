@@ -7,6 +7,7 @@ from renderplan import (
     RenderManifest,
     RenderPlan,
     RenderProfile,
+    RoleProfile,
     SpeechItem,
 )
 
@@ -18,10 +19,21 @@ from .book import (
     render_book,
 )
 from .engines.api_probe import EngineApiProbe
+from .engines.assets import (
+    EngineAssetManager,
+    ModelArtifact,
+    ModelInstallRequest,
+    ModelInstallResult,
+    ModelManagementCapabilities,
+    ModelRemoveRequest,
+    ModelRemoveResult,
+    ModelVerifyResult,
+)
 from .engines.base import (
     EngineAdapter,
     EngineCapabilities,
     EngineDiagnostic,
+    EngineOption,
     EngineSelection,
     EngineSession,
     PronunciationSpan,
@@ -33,6 +45,7 @@ from .engines.base import (
     SpeechWordTiming,
 )
 from .engines.catalog import CatalogRequest, CatalogResult, SynthesisTarget, TargetVoice
+from .engines.options import engine_options
 from .engines.registry import (
     discover_targets,
     engine_status,
@@ -66,7 +79,20 @@ from .models import (
     VoicePlan,
     VoiceProfile,
 )
+from .models_api import (
+    install_model,
+    list_models,
+    model_status,
+    remove_model,
+    verify_model,
+)
 from .preflight import preflight_render_plan
+from .profile_roles import (
+    list_profile_roles,
+    remove_profile_role,
+    set_default_profile_role,
+    set_profile_role,
+)
 from .render import render, render_plan
 from .renderplan_render import RenderPlanResult, render_renderplan
 from .renderprofile import (
@@ -76,12 +102,14 @@ from .renderprofile import (
     save_render_profile,
     validate_render_profile,
 )
+from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_source_codec import load_voice_source, save_voice_source
 from .voice_sources import (
     ResolvedPreparedVoice,
     ResolvedReferenceAudio,
     VoiceSource,
     VoiceSourceKind,
+    create_voice_source,
     local_prepared_voice_source,
     local_reference_source,
     managed_reference_source,
@@ -90,6 +118,14 @@ from .voice_sources import (
     resolve_reference_audio,
     validate_voice_source,
     voice_source_identity,
+)
+from .voices_api import (
+    ParsedVoiceSelector,
+    VoiceDescriptor,
+    VoiceKind,
+    inspect_voice,
+    list_voices,
+    parse_voice_selector,
 )
 
 try:
@@ -108,16 +144,26 @@ __all__ = [
     "EngineAdapter",
     "EngineApiIncompatibleError",
     "EngineApiProbe",
+    "EngineAssetManager",
     "EngineCapabilities",
     "EngineCapacityError",
     "EngineDiagnostic",
     "EngineError",
+    "EngineOption",
     "EngineRequest",
     "EngineSelection",
     "EngineSelectionError",
     "EngineSession",
     "EngineSynthesisError",
     "EngineUnavailableError",
+    "ModelArtifact",
+    "ModelInstallRequest",
+    "ModelInstallResult",
+    "ModelManagementCapabilities",
+    "ModelRemoveRequest",
+    "ModelRemoveResult",
+    "ModelVerifyResult",
+    "ParsedVoiceSelector",
     "PlanError",
     "PreflightReport",
     "ProfileError",
@@ -136,6 +182,7 @@ __all__ = [
     "RequestMeasure",
     "ResolvedPreparedVoice",
     "ResolvedReferenceAudio",
+    "RoleProfile",
     "SpeechItem",
     "SpeechRequest",
     "SpeechSegment",
@@ -146,26 +193,41 @@ __all__ = [
     "UnsupportedPlanSemanticsError",
     "UnsupportedSynthesisFeatureError",
     "VoiceBinding",
+    "VoiceCloneRequest",
     "VoiceConfig",
+    "VoiceDescriptor",
+    "VoiceKind",
     "VoicePlan",
     "VoiceProfile",
     "VoiceRenderError",
     "VoiceSource",
     "VoiceSourceKind",
     "__version__",
+    "clone_voice_profile",
     "create_render_profile",
+    "create_voice_source",
     "discover_targets",
+    "engine_options",
     "engine_status",
+    "inspect_voice",
+    "install_model",
     "list_engines",
+    "list_models",
+    "list_profile_roles",
+    "list_voices",
     "load_render_profile",
     "load_voice_source",
     "local_prepared_voice_source",
     "local_reference_source",
     "managed_reference_source",
+    "model_status",
     "normalize_voice_source",
     "open_session",
+    "parse_voice_selector",
     "preflight_render_plan",
     "refresh_render_profile",
+    "remove_model",
+    "remove_profile_role",
     "render",
     "render_book",
     "render_plan",
@@ -175,8 +237,11 @@ __all__ = [
     "resolve_voice",
     "save_render_profile",
     "save_voice_source",
+    "set_default_profile_role",
+    "set_profile_role",
     "synthesize",
     "validate_render_profile",
     "validate_voice_source",
+    "verify_model",
     "voice_source_identity",
 ]

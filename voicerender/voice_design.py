@@ -22,7 +22,7 @@ from .errors import (
     InvalidEngineOptionError,
     UnsupportedSynthesisFeatureError,
 )
-from .storage import atomic_wav, file_hash
+from .storage import atomic_wav, file_hash, install_file_no_replace
 from .voice_source_codec import save_voice_source
 from .voice_sources import local_reference_source, normalize_voice_source
 
@@ -299,7 +299,7 @@ def design_qwen3_reference(
             os.replace(temporary_path, target)
         else:
             try:
-                os.link(temporary_path, target)
+                install_file_no_replace(temporary_path, target)
             except FileExistsError as exc:
                 raise ArtifactError(
                     f"VoiceDesign output appeared during generation: {target}",

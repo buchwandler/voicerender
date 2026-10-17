@@ -48,9 +48,9 @@ def _validated_source(source: Mapping[str, Any]) -> dict[str, Any]:
             code=getattr(exc, "code", "voice_source.sidecar_invalid"),
             details=getattr(exc, "details", {}),
         ) from exc
-    if normalized.kind not in {"reference", "prepared"}:
+    if normalized.kind not in {"reference", "managed_reference", "prepared"}:
         raise InvalidEngineVoiceError(
-            "Voice-source sidecars require a local reference or prepared voice",
+            "Voice-source sidecars require a local, managed, or prepared voice source",
             code="voice_source.sidecar_invalid",
         )
     diagnostics = validate_voice_source(normalized)
@@ -65,13 +65,12 @@ def _validated_source(source: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _toml_value(value: Any) -> str:
-    if isinstance(value, (list, tuple)) and all(
-        isinstance(item, str) for item in value
-    ):
-        return (
-            "["
-            + ", ".join(json.dumps(item, ensure_ascii=False) for item in value)
-            + "]"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, Mapping):
+        raise InvalidEngineVoiceError(
+            "Nested voice-source metadata must be encoded as a TOML table",
+            code="voice_source.sidecar_invalid",
         )
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
@@ -85,6 +84,31 @@ def _toml_value(value: Any) -> str:
         f"Voice-source sidecar cannot encode value of type {type(value).__name__}",
         code="voice_source.sidecar_invalid",
     )
+
+
+def _toml_key(name: str) -> str:
+    if name and all(char.isalnum() or char in "_-" for char in name):
+        return name
+    return json.dumps(name, ensure_ascii=False)
+
+
+def _serialize_metadata_table(
+    lines: list[str], table: tuple[str, ...], metadata: Mapping[str, Any]
+) -> None:
+    lines.extend(("", "[" + ".".join(_toml_key(item) for item in table) + "]"))
+    nested: list[tuple[str, Mapping[str, Any]]] = []
+    for name, value in sorted(metadata.items()):
+        if not isinstance(name, str):
+            raise InvalidEngineVoiceError(
+                "Voice-source metadata keys must be strings",
+                code="voice_source.sidecar_invalid",
+            )
+        if isinstance(value, Mapping):
+            nested.append((name, value))
+        else:
+            lines.append(f"{_toml_key(name)} = {_toml_value(value)}")
+    for name, value in nested:
+        _serialize_metadata_table(lines, (*table, name), value)
 
 
 def _serialize(source: Mapping[str, Any]) -> str:
@@ -118,6 +142,14 @@ def _serialize(source: Mapping[str, Any]) -> str:
             lines.extend(("", "[voice_source.origin.runtime_identity]"))
             for name, value in runtime_identity.items():
                 lines.append(f"{name} = {_toml_value(value)}")
+    metadata = source.get("metadata")
+    if metadata:
+        if not isinstance(metadata, Mapping):
+            raise InvalidEngineVoiceError(
+                "voice_source.metadata must be a table",
+                code="voice_source.sidecar_invalid",
+            )
+        _serialize_metadata_table(lines, ("voice_source", "metadata"), metadata)
     return "\n".join(lines) + "\n"
 
 

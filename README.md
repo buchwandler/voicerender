@@ -98,6 +98,51 @@ voicerender profile refresh narration.renderprofile.toml \
   -o narration.refreshed.renderprofile.toml
 ```
 
+## Engine, voice, and profile control surface
+
+VoiceRender exposes engine-facing discovery and lifecycle operations through its public Python API and CLI. Discovery does not open synthesis sessions; model installation/removal is delegated only to an engine's supported public asset API. Unsupported asset operations report the engine and operation rather than falling back to private modules or backend CLIs.
+
+```bash
+# Inspect normalized options and available model/voice descriptors.
+voicerender engines options kokoro --target v1.0 --json
+voicerender models list --engine kokoro --offline --json
+voicerender voices list --engine kokoro --lang en-US --json
+voicerender voices inspect 'kokoro:v1.0/af_heart' --json
+
+# Asset support is engine-specific; supported removals require explicit confirmation.
+voicerender models inspect TARGET --engine ENGINE --json
+voicerender models verify TARGET --engine ENGINE --json
+voicerender models remove TARGET --engine ENGINE --yes --json
+
+# Pin a reference without copying or modifying its WAV; inspect and verify it later.
+voicerender voice source create \
+  --reference-wav ./speaker.wav --transcript "Exact spoken words." \
+  --language en-US -o speaker.voice-source.toml
+voicerender voice source inspect speaker.voice-source.toml --json
+voicerender voice source verify speaker.voice-source.toml --json
+
+# Bind a pinned source to a reference-capable target; this does not synthesize.
+voicerender voice clone --engine ENGINE --target TARGET \
+  --language en-US --voice-source speaker.voice-source.toml \
+  --transcript "Exact spoken words." -o clone.renderprofile.toml --json
+```
+
+RenderProfiles can hold multiple independent role bindings. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves the other roles and user-authored planning/pause policy, and computes a new `profile_id`.
+
+```bash
+voicerender profile inspect narration.renderprofile.toml --json
+voicerender profile role list narration.renderprofile.toml --json
+voicerender profile role set narration.renderprofile.toml guest \
+  --engine piper --target en_US-amy-medium --language en-US \
+  -o narration.with-guest.renderprofile.toml --json
+voicerender profile default-role narration.with-guest.renderprofile.toml guest \
+  --in-place --json
+voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
+  --new-default-role guest --in-place --json
+```
+
+Role mutations require exactly one explicit `--output PATH` or `--in-place`; the input profile is otherwise left untouched. Removing the final role is rejected, and removing the current default requires `--new-default-role`. The package root exports the model-management, option/voice discovery, source/clone, and multi-role profile APIs for automation. See [RenderProfile lifecycle](docs/renderprofile.md) for API examples and policy details.
+
 ## Reference voices
 
 Kokoro, PocketSynth, and SoproSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.

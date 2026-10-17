@@ -20,9 +20,9 @@ from . import (
     __version__,
     render_book,
 )
+from .engines.options import engine_option_to_dict, engine_options
 from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
 from .engines.registry import (
-    discover_targets,
     engine_status,
     get_adapter,
     list_engines,
@@ -38,7 +38,25 @@ from .errors import (
     UnsupportedSynthesisFeatureError,
     VoiceRenderError,
 )
+from .models_api import (
+    ModelInstallRequest,
+    ModelRemoveRequest,
+    ModelVerifyResult,
+    install_model,
+    list_models,
+    model_artifact_to_dict,
+    model_result_to_dict,
+    model_status,
+    remove_model,
+    verify_model,
+)
 from .preflight import preflight_render_plan
+from .profile_roles import (
+    list_profile_roles,
+    remove_profile_role,
+    set_default_profile_role,
+    set_profile_role,
+)
 from .renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
     RenderPlanResult,
@@ -51,16 +69,24 @@ from .renderprofile import (
     save_render_profile,
     validate_render_profile,
 )
-from .storage import wav_info
+from .storage import install_file_no_replace, wav_info
+from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_design import Qwen3VoiceDesignRecipe, design_qwen3_reference
-from .voice_source_codec import load_voice_source
+from .voice_source_codec import load_voice_source, save_voice_source
 from .voice_sources import (
+    create_voice_source,
     local_prepared_voice_source,
     local_reference_source,
     managed_reference_source,
     normalize_voice_source,
     resolve_reference_audio,
+    validate_voice_source,
     voice_source_identity,
+)
+from .voices_api import (
+    inspect_voice,
+    list_voices,
+    voice_descriptor_to_dict,
 )
 
 
@@ -82,13 +108,70 @@ def build_parser() -> argparse.ArgumentParser:
     engine_inspect.add_argument("engine")
     engine_inspect.add_argument("--json", action="store_true")
 
+    engine_options = engine_commands.add_parser(
+        "options", help="List normalized engine option descriptors"
+    )
+    engine_options.add_argument("engine")
+    engine_options.add_argument("--target")
+    engine_options.add_argument("--json", action="store_true")
+
+    models = commands.add_parser("models", help="Manage engine model artifacts")
+    model_commands = models.add_subparsers(dest="models_command", required=True)
+    model_list = model_commands.add_parser("list", help="List engine models")
+    model_list.add_argument("--engine", required=True)
+    model_list.add_argument("--lang")
+    model_filter = model_list.add_mutually_exclusive_group()
+    model_filter.add_argument("--installed", action="store_true")
+    model_filter.add_argument("--available", action="store_true")
+    model_list.add_argument("--offline", action="store_true")
+    model_list.add_argument("--refresh", action="store_true")
+    model_list.add_argument("--json", action="store_true")
+    model_inspect = model_commands.add_parser("inspect", help="Inspect an engine model")
+    model_inspect.add_argument("target")
+    model_inspect.add_argument("--engine", required=True)
+    model_inspect.add_argument("--quality")
+    model_inspect.add_argument("--json", action="store_true")
+    model_install = model_commands.add_parser("install", help="Install an engine model")
+    model_install.add_argument("target")
+    model_install.add_argument("--engine", required=True)
+    model_install.add_argument("--quality")
+    model_install.add_argument("--source")
+    model_install.add_argument("--cache-dir", type=Path)
+    model_install.add_argument("--force", action="store_true")
+    model_install.add_argument("--json", action="store_true")
+    model_remove = model_commands.add_parser("remove", help="Remove an engine model")
+    model_remove.add_argument("target")
+    model_remove.add_argument("--engine", required=True)
+    model_remove.add_argument("--quality")
+    model_remove.add_argument("--cache-dir", type=Path)
+    model_remove.add_argument("--yes", action="store_true")
+    model_remove.add_argument("--json", action="store_true")
+    model_verify = model_commands.add_parser("verify", help="Verify an installed model")
+    model_verify.add_argument("target")
+    model_verify.add_argument("--engine", required=True)
+    model_verify.add_argument("--quality")
+    model_verify.add_argument("--cache-dir", type=Path)
+    model_verify.add_argument("--json", action="store_true")
+
     voices = commands.add_parser("voices", help="Discover engine targets")
     voice_commands = voices.add_subparsers(dest="voices_command", required=True)
     voice_list = voice_commands.add_parser("list", help="List targets for an engine")
-    voice_list.add_argument("--engine", required=True)
+    voice_list.add_argument("--engine")
     voice_list.add_argument("--lang")
     voice_list.add_argument("--offline", action="store_true")
     voice_list.add_argument("--json", action="store_true")
+    voice_list.add_argument("--target")
+    voice_list.add_argument(
+        "--kind",
+        choices=("builtin", "speaker", "managed-reference", "reference-capable"),
+    )
+    voice_list.add_argument("--refresh", action="store_true")
+    voice_inspect = voice_commands.add_parser(
+        "inspect", help="Inspect a canonical voice selector"
+    )
+    voice_inspect.add_argument("selector")
+    voice_inspect.add_argument("--lang")
+    voice_inspect.add_argument("--json", action="store_true")
 
     profiles = commands.add_parser("profile", help="Create and validate RenderProfiles")
     profile_commands = profiles.add_subparsers(dest="profile_command", required=True)
@@ -131,6 +214,70 @@ def build_parser() -> argparse.ArgumentParser:
     profile_refresh.add_argument("-o", "--output", required=True, type=Path)
     profile_refresh.add_argument("--json", action="store_true")
 
+    profile_inspect = profile_commands.add_parser(
+        "inspect", help="Inspect RenderProfile roles and policy"
+    )
+    profile_inspect.add_argument("profile", type=Path)
+    profile_inspect.add_argument("--json", action="store_true")
+
+    profile_roles = profile_commands.add_parser(
+        "role", help="Inspect or mutate RenderProfile roles"
+    )
+    role_commands = profile_roles.add_subparsers(
+        dest="profile_role_command", required=True
+    )
+    role_list = role_commands.add_parser("list", help="List configured roles")
+    role_list.add_argument("profile", type=Path)
+    role_list.add_argument("--json", action="store_true")
+
+    role_set = role_commands.add_parser("set", help="Add or replace a role binding")
+    role_set.add_argument("profile", type=Path)
+    role_set.add_argument("role")
+    role_set.add_argument("--engine", required=True)
+    role_set.add_argument("--target", required=True)
+    role_set.add_argument("--language", required=True)
+    role_source = role_set.add_mutually_exclusive_group()
+    role_source.add_argument("--voice")
+    role_source.add_argument("--voicefolio-ref")
+    role_source.add_argument("--reference-wav", type=Path)
+    role_source.add_argument("--prepared-voice", type=Path)
+    role_source.add_argument("--voice-source", type=Path)
+    role_set.add_argument("--speaker")
+    role_set.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
+    )
+    role_set.add_argument("--offline", action="store_true")
+    role_set.add_argument("--refresh", action="store_true")
+    role_set.add_argument("--make-default", action="store_true")
+    role_set_output = role_set.add_mutually_exclusive_group(required=True)
+    role_set_output.add_argument("-o", "--output", type=Path)
+    role_set_output.add_argument("--in-place", action="store_true")
+    role_set.add_argument("--json", action="store_true")
+
+    role_remove = role_commands.add_parser("remove", help="Remove a configured role")
+    role_remove.add_argument("profile", type=Path)
+    role_remove.add_argument("role")
+    role_remove.add_argument("--new-default-role")
+    role_remove_output = role_remove.add_mutually_exclusive_group(required=True)
+    role_remove_output.add_argument("-o", "--output", type=Path)
+    role_remove_output.add_argument("--in-place", action="store_true")
+    role_remove.add_argument("--json", action="store_true")
+
+    profile_default_role = profile_commands.add_parser(
+        "default-role", help="Select the default profile role"
+    )
+    profile_default_role.add_argument("profile", type=Path)
+    profile_default_role.add_argument("role")
+    default_role_output = profile_default_role.add_mutually_exclusive_group(
+        required=True
+    )
+    default_role_output.add_argument("-o", "--output", type=Path)
+    default_role_output.add_argument("--in-place", action="store_true")
+    profile_default_role.add_argument("--json", action="store_true")
     voice = commands.add_parser("voice", help="Generate or inspect voice assets")
     voice_commands = voice.add_subparsers(dest="voice_command", required=True)
 
@@ -173,6 +320,56 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_qwen.add_argument("--output", required=True, type=Path)
     prepare_qwen.add_argument("--force", action="store_true")
     prepare_qwen.add_argument("--json", action="store_true")
+
+    source_command = voice_commands.add_parser(
+        "source", help="Create or inspect reusable voice sources"
+    )
+    source_subcommands = source_command.add_subparsers(
+        dest="voice_source_command", required=True
+    )
+    source_create = source_subcommands.add_parser(
+        "create", help="Create a pinned voice-source sidecar"
+    )
+    source_input = source_create.add_mutually_exclusive_group(required=True)
+    source_input.add_argument("--reference-wav", type=Path)
+    source_input.add_argument("--voicefolio-ref")
+    source_create.add_argument("--transcript")
+    source_create.add_argument("--language")
+    source_create.add_argument("--name")
+    source_create.add_argument(
+        "--metadata", action="append", default=[], metavar="KEY=VALUE"
+    )
+    source_create.add_argument("-o", "--output", required=True, type=Path)
+    source_create.add_argument("--force", action="store_true")
+    source_create.add_argument("--json", action="store_true")
+    for action in ("inspect", "verify"):
+        source_action = source_subcommands.add_parser(
+            action, help=f"{action.title()} a voice-source sidecar"
+        )
+        source_action.add_argument("path", type=Path)
+        source_action.add_argument("--json", action="store_true")
+
+    voice_clone = voice_commands.add_parser(
+        "clone", help="Bind a reference source to an engine profile"
+    )
+    voice_clone.add_argument("--engine", required=True)
+    voice_clone.add_argument("--target", required=True)
+    voice_clone.add_argument("--language", required=True)
+    voice_clone.add_argument("--role", default="narrator")
+    clone_source = voice_clone.add_mutually_exclusive_group(required=True)
+    clone_source.add_argument("--reference-wav", type=Path)
+    clone_source.add_argument("--voice-source", type=Path)
+    clone_source.add_argument("--voicefolio-ref")
+    voice_clone.add_argument("--transcript")
+    voice_clone.add_argument("--speaker")
+    voice_clone.add_argument(
+        "--option", action="append", default=[], metavar="KEY=VALUE"
+    )
+    voice_clone.add_argument("--offline", action="store_true")
+    voice_clone.add_argument("--refresh", action="store_true")
+    voice_clone.add_argument("-o", "--output", required=True, type=Path)
+    voice_clone.add_argument("--force", action="store_true")
+    voice_clone.add_argument("--json", action="store_true")
 
     voice_inspect = voice_commands.add_parser(
         "inspect", help="Inspect a voice-source sidecar or Qwen .qvoice profile"
@@ -253,18 +450,77 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _json_options(entries: list[str]) -> dict[str, Any]:
+def _json_options(entries: list[str], *, label: str = "--option") -> dict[str, Any]:
     result: dict[str, Any] = {}
     for entry in entries:
         key, separator, value = entry.partition("=")
         if not separator or not key.strip():
-            raise ValueError(f"invalid --option {entry!r}; expected KEY=VALUE")
+            raise ValueError(f"invalid {label} {entry!r}; expected KEY=VALUE")
         key = key.strip()
         try:
             result[key] = json.loads(value)
         except json.JSONDecodeError:
             result[key] = value
     return result
+
+
+def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": role_name,
+            "default": role_name == profile.default_role,
+            "language": role.language,
+            "binding": dict(role.binding),
+        }
+        for role_name, role in sorted(list_profile_roles(profile).items())
+    ]
+
+
+def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+    for item in roles:
+        marker = "*" if item["default"] else " "
+        binding = item["binding"]
+        renderer = _display_cli_value(binding.get("renderer", "unknown"))
+        target = _display_cli_value(binding.get("target_id", "unknown"))
+        print(f"{marker} {item['role']}  {item['language']}  {renderer}/{target}")
+
+
+def _display_cli_value(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _profile_role_voice_source(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.voicefolio_ref:
+        return managed_reference_source(args.voicefolio_ref)
+    if args.reference_wav is not None:
+        return local_reference_source(args.reference_wav)
+    if args.prepared_voice is not None:
+        if get_adapter(args.engine).id != "qwen3":
+            raise InvalidEngineOptionError(
+                "--prepared-voice is only supported for Qwen3 profiles",
+                code="qwen3.prepared_voice_engine_invalid",
+            )
+        source, _ = _prepared_voice_source(args.prepared_voice)
+        return source
+    if args.voice_source is not None:
+        return dict(load_voice_source(args.voice_source))
+    return None
+
+
+def _profile_mutation_destination(args: argparse.Namespace) -> Path:
+    if args.in_place:
+        return args.profile
+    if args.output.resolve() == args.profile.resolve():
+        raise ValueError("profile output must not overwrite its source; use --in-place")
+    return args.output
 
 
 def _target_payload(target: Any) -> dict[str, Any]:
@@ -644,7 +900,7 @@ def _prepare_qwen_voice(args: argparse.Namespace) -> dict[str, Any]:
             os.replace(temporary_path, output)
         else:
             try:
-                os.link(temporary_path, output)
+                install_file_no_replace(temporary_path, output)
             except FileExistsError as exc:
                 raise ArtifactError(
                     f"Qwen prepared voice output appeared during generation: {output}",
@@ -675,6 +931,103 @@ def _prepare_qwen_voice(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _voice_source_command(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.voice_source_command == "create":
+        output = args.output.expanduser().absolute()
+        if (output.exists() or output.is_symlink()) and not args.force:
+            raise ArtifactError(
+                f"Voice-source output already exists; pass --force to replace it: {output}",
+                code="voice_source.output_exists",
+            )
+        if (
+            args.reference_wav is not None
+            and output.resolve() == args.reference_wav.expanduser().resolve()
+        ):
+            raise ValueError("Voice-source output must not overwrite the reference WAV")
+        source = create_voice_source(
+            reference_wav=args.reference_wav,
+            voicefolio_ref=args.voicefolio_ref,
+            transcript=args.transcript,
+            language=args.language,
+            name=args.name,
+            metadata=_json_options(args.metadata, label="--metadata"),
+        )
+        saved = save_voice_source(source.as_mapping(), output)
+        return {"path": str(saved), "voice_source": source.as_mapping()}, 0
+
+    if args.voice_source_command == "inspect":
+        source = load_voice_source(args.path)
+        return {
+            "path": str(args.path),
+            "kind": source["kind"],
+            "voice_source": dict(source),
+            "metadata": dict(source.get("metadata", {})),
+        }, 0
+
+    try:
+        source = load_voice_source(args.path)
+        diagnostics = validate_voice_source(source)
+    except (VoiceRenderError, OSError, ValueError) as exc:
+        diagnostic = {
+            "code": getattr(exc, "code", "voice_source.invalid"),
+            "severity": "error",
+            "message": str(exc),
+            "details": dict(getattr(exc, "details", {})),
+        }
+        return {"path": str(args.path), "valid": False, "diagnostics": [diagnostic]}, 1
+    values = [diagnostic.as_dict() for diagnostic in diagnostics]
+    valid = not any(item["severity"] == "error" for item in values)
+    return {
+        "path": str(args.path),
+        "valid": valid,
+        "diagnostics": values,
+    }, 0 if valid else 1
+
+
+def _voice_clone_command(args: argparse.Namespace) -> dict[str, Any]:
+    output = args.output.expanduser().absolute()
+    if (output.exists() or output.is_symlink()) and not args.force:
+        raise ArtifactError(
+            f"RenderProfile output already exists; pass --force to replace it: {output}",
+            code="voice_clone.output_exists",
+        )
+    source_path = args.voice_source or args.reference_wav
+    if (
+        source_path is not None
+        and output.resolve() == source_path.expanduser().resolve()
+    ):
+        raise ValueError(
+            "RenderProfile output must not overwrite its voice-source input"
+        )
+    speaker: str | int | None = args.speaker
+    if isinstance(speaker, str):
+        try:
+            numeric_speaker = int(speaker)
+        except ValueError:
+            pass
+        else:
+            if str(numeric_speaker) == speaker:
+                speaker = numeric_speaker
+    profile = clone_voice_profile(
+        VoiceCloneRequest(
+            engine=args.engine,
+            target_id=args.target,
+            language=args.language,
+            reference_wav=args.reference_wav,
+            voice_source=args.voice_source,
+            voicefolio_ref=args.voicefolio_ref,
+            transcript=args.transcript,
+            speaker=speaker,
+            options=_json_options(args.option),
+            offline=args.offline,
+            refresh=args.refresh,
+        ),
+        role=args.role,
+    )
+    saved = save_render_profile(profile, output)
+    return {"profile_id": profile.profile_id, "path": str(saved), "role": args.role}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -702,24 +1055,202 @@ def main(argv: list[str] | None = None) -> int:
                     else engine_payload
                 )
                 return 0
+            if args.engines_command == "options":
+                options = engine_options(args.engine, target_id=args.target)
+                rows = [engine_option_to_dict(option) for option in options]
+                if args.json:
+                    print(
+                        json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True)
+                    )
+                else:
+                    print("NAME\tTYPE\tREQUIRED\tDEFAULT\tCHOICES\tDESCRIPTION")
+                    for option in options:
+                        default = (
+                            "-"
+                            if option.default is None
+                            else _display_cli_value(option.default)
+                        )
+                        choices = (
+                            ", ".join(
+                                _display_cli_value(choice) for choice in option.choices
+                            )
+                            or "-"
+                        )
+                        print(
+                            f"{option.name}\t{option.value_type}\t"
+                            f"{str(option.required).lower()}\t{default}\t"
+                            f"{choices}\t{option.description}"
+                        )
+                return 0
+
+        if args.command == "models":
+            if args.models_command == "list":
+                models = list_models(
+                    args.engine,
+                    language=args.lang,
+                    installed=True
+                    if args.installed
+                    else False
+                    if args.available
+                    else None,
+                    offline=args.offline,
+                    refresh=args.refresh,
+                )
+                rows = [model_artifact_to_dict(model) for model in models]
+                if args.json:
+                    print(
+                        json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True)
+                    )
+                else:
+                    print("ENGINE\tTARGET\tSTATUS\tINSTALLED\tLANGUAGES\tQUALITIES")
+                    for model in models:
+                        print(
+                            f"{model.engine}\t{model.target_id}\t{model.status}\t"
+                            f"{str(model.installed).lower()}\t{', '.join(model.languages) or '-'}\t"
+                            f"{', '.join(model.qualities) or '-'}"
+                        )
+                return 0
+            if args.models_command == "inspect":
+                artifact = model_status(args.engine, args.target, quality=args.quality)
+                payload = model_artifact_to_dict(artifact)
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    print(
+                        f"{artifact.engine}\t{artifact.target_id}\t{artifact.status}\t"
+                        f"installed={str(artifact.installed).lower()}\t"
+                        f"languages={','.join(artifact.languages) or '-'}\t"
+                        f"qualities={','.join(artifact.qualities) or '-'}"
+                    )
+                return 0
+            if args.models_command == "install":
+                result = install_model(
+                    ModelInstallRequest(
+                        args.engine,
+                        args.target,
+                        args.quality,
+                        args.source,
+                        args.cache_dir,
+                        args.force,
+                    )
+                )
+            elif args.models_command == "remove":
+                if not args.yes:
+                    raise ValueError("model removal requires --yes")
+                result = remove_model(
+                    ModelRemoveRequest(
+                        args.engine, args.target, args.quality, args.cache_dir
+                    )
+                )
+            else:
+                result = verify_model(
+                    args.engine,
+                    args.target,
+                    quality=args.quality,
+                    cache_dir=args.cache_dir,
+                )
+            payload = model_result_to_dict(result)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                operation = args.models_command
+                outcome = result.status
+                if hasattr(result, "changed"):
+                    outcome += f" changed={str(result.changed).lower()}"
+                elif isinstance(result, ModelVerifyResult):
+                    outcome += f" verified={str(result.verified).lower()}"
+                print(
+                    f"Model {operation} {result.engine}:{result.target_id}: {outcome}"
+                )
+                for diagnostic in result.diagnostics:
+                    print(f"diagnostic: {diagnostic}", file=sys.stderr)
+            if result.status == "unsupported":
+                return 2
+            if result.status in {"failed", "error"}:
+                return 1
+            if isinstance(result, ModelVerifyResult) and not result.verified:
+                return 1
+            return 0
 
         if args.command == "voices":
-            adapter = get_adapter(args.engine)
-            targets = discover_targets(
-                adapter.id, language=args.lang, offline=args.offline
-            )
-            target_payloads = [_target_payload(target) for target in targets]
-            if args.json:
-                print(json.dumps(target_payloads, ensure_ascii=False, indent=2))
-            else:
-                for target in target_payloads:
+            if args.voices_command == "inspect":
+                descriptor = inspect_voice(args.selector, language=args.lang)
+                payload = voice_descriptor_to_dict(descriptor)
+                if args.json:
                     print(
-                        f"{target['target_id']}\t{', '.join(target['languages']) or '-'}\t"
-                        f"{target['name']}\t{', '.join(target['voices'])}"
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    print(
+                        f"{descriptor.selector}\t{descriptor.kind}\t"
+                        f"{','.join(descriptor.languages) or '-'}"
+                    )
+                return 0
+            descriptors = list_voices(
+                engine=args.engine,
+                target_id=args.target,
+                language=args.lang,
+                offline=args.offline,
+                refresh=args.refresh,
+            )
+            if args.kind is not None:
+                descriptors = tuple(
+                    item for item in descriptors if item.kind == args.kind
+                )
+            rows = [voice_descriptor_to_dict(item) for item in descriptors]
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print("SELECTOR\tKIND\tLANGUAGES\tGENDER\tLOCALE\tINSTALLED")
+                for item in descriptors:
+                    print(
+                        f"{item.selector}\t{item.kind}\t{','.join(item.languages) or '-'}\t"
+                        f"{item.gender}\t{item.locale}\t{item.installed}"
                     )
             return 0
 
         if args.command == "voice":
+            if args.voice_command == "source":
+                payload, exit_code = _voice_source_command(args)
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                elif args.voice_source_command == "create":
+                    source = payload["voice_source"]
+                    digest = source.get("sha256")
+                    print(
+                        f"Voice source {source['kind']} -> {payload['path']} sha256={digest or '-'}"
+                    )
+                elif args.voice_source_command == "inspect":
+                    print(f"Voice source {payload['kind']} {payload['path']}")
+                else:
+                    print(
+                        f"Voice source {payload['path']}: {'valid' if payload['valid'] else 'invalid'}"
+                    )
+                    for item in payload["diagnostics"]:
+                        if item["severity"] == "error":
+                            print(f"diagnostic: {item['message']}", file=sys.stderr)
+                return exit_code
+            if args.voice_command == "clone":
+                payload = _voice_clone_command(args)
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    print(f"RenderProfile {payload['profile_id']} -> {payload['path']}")
+                return 0
             if args.voice_command == "design":
                 recipe = Qwen3VoiceDesignRecipe(
                     prompt=args.prompt,
@@ -835,7 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
                     "path": str(args.profile),
                     "valid": True,
                 }
-            else:
+            elif args.profile_command == "refresh":
                 if args.output.resolve() == args.profile.resolve():
                     raise ValueError(
                         "profile refresh output must not overwrite its source"
@@ -843,12 +1374,112 @@ def main(argv: list[str] | None = None) -> int:
                 profile = refresh_render_profile(load_render_profile(args.profile))
                 output = save_render_profile(profile, args.output)
                 payload = {"profile_id": profile.profile_id, "path": str(output)}
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif args.profile_command == "inspect":
+                profile = load_render_profile(args.profile)
+                payload = {
+                    "profile_id": profile.profile_id or profile.computed_id(),
+                    "default_role": profile.default_role,
+                    "roles": _profile_role_items(profile),
+                    "planning": profile.planning.to_dict(),
+                    "pauses": profile.pauses.to_dict(),
+                }
+            elif args.profile_command == "role":
+                if args.profile_role_command == "list":
+                    profile = load_render_profile(args.profile)
+                    payload = {
+                        "profile_id": profile.profile_id or profile.computed_id(),
+                        "default_role": profile.default_role,
+                        "roles": _profile_role_items(profile),
+                    }
+                else:
+                    destination = _profile_mutation_destination(args)
+                    if args.profile_role_command == "set":
+                        source_paths = (
+                            args.reference_wav,
+                            args.prepared_voice,
+                            args.voice_source,
+                        )
+                        if any(
+                            path is not None and destination.resolve() == path.resolve()
+                            for path in source_paths
+                        ):
+                            raise ValueError(
+                                "profile output must not overwrite a voice-source input"
+                            )
+                        voice_source = _profile_role_voice_source(args)
+                        profile = set_profile_role(
+                            args.profile,
+                            args.role,
+                            engine=args.engine,
+                            target_id=args.target,
+                            language=args.language,
+                            voice=args.voice,
+                            speaker=args.speaker,
+                            voice_source=voice_source,
+                            options=_json_options(args.option),
+                            offline=args.offline,
+                            refresh=args.refresh,
+                            make_default=args.make_default,
+                        )
+                    else:
+                        profile = remove_profile_role(
+                            args.profile,
+                            args.role,
+                            new_default_role=args.new_default_role,
+                        )
+                    output = save_render_profile(profile, destination)
+                    payload = {
+                        "profile_id": profile.profile_id,
+                        "default_role": profile.default_role,
+                        "roles": _profile_role_items(profile),
+                        "path": str(output),
+                    }
             else:
-                print(f"RenderProfile {payload['profile_id']} -> {payload.get('path')}")
+                destination = _profile_mutation_destination(args)
+                profile = set_default_profile_role(args.profile, args.role)
+                output = save_render_profile(profile, destination)
+                payload = {
+                    "profile_id": profile.profile_id,
+                    "default_role": profile.default_role,
+                    "path": str(output),
+                }
+            if args.json:
+                print(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            elif args.profile_command in {"inspect", "role"} and (
+                args.profile_command == "inspect" or args.profile_role_command == "list"
+            ):
+                print(
+                    f"RenderProfile {payload['profile_id']} "
+                    f"(default role: {payload['default_role']})"
+                )
+                _print_profile_role_items(payload["roles"])
+                if args.profile_command == "inspect":
+                    planning = payload["planning"]
+                    fallbacks = ", ".join(planning["capacity_fallback"]) or "none"
+                    print(
+                        f"Planning: split={planning['split']}; capacity fallback={fallbacks}"
+                    )
+                    pauses = payload["pauses"]
+                    durations = ", ".join(
+                        f"{key}={value}"
+                        for key, value in sorted(pauses.items())
+                        if key != "mode"
+                    )
+                    print(
+                        f"Pauses: mode={pauses['mode']}; durations={durations or 'none'}"
+                    )
+            elif "path" in payload:
+                print(f"RenderProfile {payload['profile_id']} -> {payload['path']}")
+            else:
+                print(f"RenderProfile {payload['profile_id']} is valid")
             return 0
-
         if args.command == "preflight":
             if args.output.resolve() == args.plan.resolve():
                 raise ValueError(
@@ -970,6 +1601,21 @@ def main(argv: list[str] | None = None) -> int:
                 "exit_code": 1,
             }
             print(json.dumps(payload, ensure_ascii=False, indent=2))
+        elif getattr(args, "json", False) and (
+            args.command in {"engines", "models", "voices"}
+            or (
+                args.command == "profile"
+                and args.profile_command in {"inspect", "role", "default-role"}
+            )
+            or (args.command == "voice" and args.voice_command in {"source", "clone"})
+        ):
+            payload = {
+                "status": "error",
+                "error": str(exc),
+                "error_code": getattr(exc, "code", "input.invalid"),
+                "details": dict(getattr(exc, "details", {})),
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 1

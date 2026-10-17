@@ -9,6 +9,10 @@ renderprofile
 changelog
 ```
 
+## Engine and voice control
+
+VoiceRender owns its public engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice clone workflow, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and clone/profile preparation do not synthesize audio. See the repository README for command examples and [RenderProfile lifecycle](renderprofile.md#inspecting-and-mutating-profile-roles) for role APIs and write safety.
+
 ## Workflow
 
 1. Create or update a RenderProfile and review engine-derived binding metadata (see the [RenderProfile lifecycle](renderprofile.md)).

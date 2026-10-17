@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,33 @@ def file_hash(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def install_file_no_replace(source: Path, destination: Path) -> None:
+    """Install without replacement, using hard links when available.
+
+    Platforms without ``os.link`` use an exclusive destination and byte copy. This
+    preserves no-overwrite behavior, though readers may observe the in-progress copy.
+    """
+    link = getattr(os, "link", None)
+    if callable(link):
+        link(source, destination)
+        return
+
+    mode = stat.S_IMODE(source.stat().st_mode)
+    descriptor = os.open(
+        destination,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        mode,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_stream:
+            shutil.copyfileobj(input_stream, output)
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def atomic_json(path: Path, value: Any) -> None:

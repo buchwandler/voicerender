@@ -30,6 +30,57 @@ Review refreshed bindings and policy before using the proposal. If identity-bear
 profile semantics change, regenerate the associated RenderPlan using the refreshed
 profile. Keep the original profile with its plans for provenance and inspection.
 
+## Inspecting and mutating profile roles
+
+A RenderProfile can bind several logical roles (for example, `narrator` and `guest`). Inspect the profile or list its role items without loading an engine:
+
+```bash
+voicerender profile inspect narration.renderprofile.toml --json
+voicerender profile role list narration.renderprofile.toml --json
+```
+
+Use VoiceRender's public role helpers when building or editing profiles programmatically:
+
+```python
+from voicerender import (
+    list_profile_roles,
+    load_render_profile,
+    remove_profile_role,
+    set_default_profile_role,
+    set_profile_role,
+)
+
+profile = load_render_profile("narration.renderprofile.toml")
+roles = list_profile_roles(profile)
+updated = set_profile_role(
+    profile,
+    "guest",
+    engine="piper",
+    target_id="en_US-amy-medium",
+    language="en-US",
+    options={"length_scale": 1.0},
+)
+updated = set_default_profile_role(updated, "guest")
+# If removing the current default, choose a remaining role explicitly.
+updated = remove_profile_role(updated, "narrator", new_default_role="guest")
+```
+
+`set_profile_role` resolves the engine binding and regenerates its derived requirements and capacity. Existing role bindings and the profile's planning/pause policy are preserved; each successful mutation recomputes `profile_id`. Invalid selections/options, a missing role, removal of the last role, or removal of the default without a replacement are rejected. The helpers return a new profile and never write the input file.
+
+For the CLI, each mutation requires exactly one of `--output PATH` and `--in-place`. Use `--output` to review a proposal before replacing the original; `--in-place` is an explicit request to write over the selected profile:
+
+```bash
+voicerender profile role set narration.renderprofile.toml guest \
+  --engine piper --target en_US-amy-medium --language en-US \
+  -o narration.with-guest.renderprofile.toml
+voicerender profile default-role narration.with-guest.renderprofile.toml guest \
+  --in-place
+voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
+  --new-default-role guest --in-place
+```
+
+The RenderPlan schema is unchanged: plans continue to carry the same profile identity and resolved per-role bindings.
+
 ## UtterPlan book variants
 
 [UtterPlan](https://pypi.org/project/utterplan/) can compile an SSMDBook into one

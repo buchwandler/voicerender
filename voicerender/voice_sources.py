@@ -7,7 +7,7 @@ import math
 import re
 import warnings
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -75,6 +75,7 @@ class VoiceSource:
     model_revision: str | None = None
     layout: str | None = None
     origin: Mapping[str, Any] | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def as_mapping(self) -> dict[str, Any]:
         result: dict[str, Any] = {"kind": self.kind, "value": self.value}
@@ -97,6 +98,8 @@ class VoiceSource:
                 result[name] = value
         if self.origin is not None:
             result["origin"] = dict(self.origin)
+        if self.metadata:
+            result["metadata"] = dict(self.metadata)
         return result
 
 
@@ -338,6 +341,14 @@ def normalize_voice_source(
             "voice_source.invalid", "voice_source field names must be strings"
         )
 
+    raw_metadata = source.get("metadata", {})
+    if not isinstance(raw_metadata, Mapping) or any(
+        not isinstance(key, str) for key in raw_metadata
+    ):
+        raise _voice_error(
+            "voice_source.invalid", "voice_source.metadata must be a string-keyed table"
+        )
+    source_metadata = dict(raw_metadata)
     kind = source.get("kind")
     value = source.get("value", source.get("path"))
     if not isinstance(value, str) or not value.strip():
@@ -360,7 +371,7 @@ def normalize_voice_source(
                 "voice_source.invalid",
                 "This engine does not accept named voice sources",
             )
-        return VoiceSource(kind="named", value=value)
+        return VoiceSource(kind="named", value=value, metadata=source_metadata)
 
     sha256 = source.get("sha256")
     if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
@@ -371,7 +382,7 @@ def normalize_voice_source(
         )
 
     if kind == "reference":
-        allowed = {"kind", "value", "path", "sha256", "origin"}
+        allowed = {"kind", "value", "path", "sha256", "origin", "metadata"}
         unknown = sorted(set(source) - allowed - set(_MANAGED_FIELDS))
         if unknown:
             raise _voice_error(
@@ -400,7 +411,13 @@ def normalize_voice_source(
             )
         raw_origin = source.get("origin")
         origin = _normalize_qwen_origin(raw_origin) if raw_origin is not None else None
-        return VoiceSource(kind="reference", value=value, sha256=sha256, origin=origin)
+        return VoiceSource(
+            kind="reference",
+            value=value,
+            sha256=sha256,
+            origin=origin,
+            metadata=source_metadata,
+        )
 
     if kind == "prepared":
         allowed = {
@@ -412,6 +429,7 @@ def normalize_voice_source(
             "model_id",
             "model_revision",
             "layout",
+            "metadata",
         }
         unknown = sorted(set(source) - allowed)
         if unknown:
@@ -452,9 +470,10 @@ def normalize_voice_source(
             model_id=metadata["model_id"],
             model_revision=metadata["model_revision"],
             layout=metadata["layout"],
+            metadata=source_metadata,
         )
 
-    allowed = {"kind", "value", "path", "sha256", *_MANAGED_FIELDS}
+    allowed = {"kind", "value", "path", "sha256", *_MANAGED_FIELDS, "metadata"}
     unknown = sorted(set(source) - allowed)
     if unknown:
         raise _voice_error(
@@ -515,6 +534,7 @@ def normalize_voice_source(
         license=fields["license"],
         dataset=fields["dataset"],
         variant=fields["variant"],
+        metadata=source_metadata,
     )
 
 
@@ -620,6 +640,54 @@ def managed_reference_source(
             f"Cannot create Voicefolio managed reference {ref!r}: {exc}",
             details={"resolver": "voicefolio", "ref": ref},
         ) from exc
+
+
+def create_voice_source(
+    *,
+    reference_wav: str | Path | None = None,
+    voicefolio_ref: str | None = None,
+    transcript: str | None = None,
+    language: str | None = None,
+    name: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> VoiceSource:
+    """Create a pinned local or Voicefolio source with descriptive metadata."""
+    if (reference_wav is None) == (voicefolio_ref is None):
+        raise _voice_error(
+            "voice_source.selection_invalid",
+            "Exactly one of reference_wav or voicefolio_ref must be provided",
+        )
+    source: dict[str, Any]
+    if reference_wav is not None:
+        source = dict(local_reference_source(reference_wav))
+    else:
+        source = dict(managed_reference_source(str(voicefolio_ref)))
+    source_metadata = dict(metadata or {})
+    if any(not isinstance(key, str) or not key for key in source_metadata):
+        raise _voice_error(
+            "voice_source.metadata_invalid", "Metadata keys must be non-empty strings"
+        )
+    for key, value in (
+        ("name", name),
+        ("language", language),
+        ("transcript", transcript),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise _voice_error(
+                "voice_source.metadata_invalid",
+                f"Voice-source {key} must be a non-empty string when provided",
+            )
+        if key in source_metadata and source_metadata[key] != value:
+            raise _voice_error(
+                "voice_source.metadata_invalid",
+                f"Voice-source {key} was provided twice with different values",
+            )
+        source_metadata[key] = value
+    if source_metadata:
+        source["metadata"] = source_metadata
+    return normalize_voice_source(source)
 
 
 def validate_voice_source(
@@ -876,6 +944,7 @@ __all__ = [
     "ResolvedReferenceAudio",
     "VoiceSource",
     "VoiceSourceKind",
+    "create_voice_source",
     "local_prepared_voice_source",
     "local_reference_source",
     "managed_reference_source",
