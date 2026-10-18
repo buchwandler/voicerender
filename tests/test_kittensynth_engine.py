@@ -301,6 +301,36 @@ def test_synthesis_too_long_error_translates_with_replan_details(
     assert outcome.measurement.maximum == 512
 
 
+def test_managed_dependency_error_is_a_non_replanable_runtime_reject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    native_error_type = type("ManagedModelDependencyError", (Exception,), {})
+    module.ManagedModelDependencyError = native_error_type  # type: ignore[attr-defined]
+    native_error = native_error_type("managed download transport unavailable")
+
+    class FailingKittenVoice:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            raise native_error
+
+    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    selection = EngineSelection(
+        engine="kitten",
+        target_id="nano-0.8-int8",
+        language="en-US",
+        voice="Jasper",
+    )
+
+    with pytest.raises(EngineBackendError) as caught:
+        KittenSynthEngineAdapter().open(selection)
+
+    assert caught.value.code == "kitten.runtime_dependency_error"
+    assert caught.value.native_error_type == "ManagedModelDependencyError"
+    assert classify_measurement(caught.value).disposition is PreflightDisposition.REJECT
+
+
 def _synthesis_result(audio: Any) -> SimpleNamespace:
     return SimpleNamespace(
         audio=audio,

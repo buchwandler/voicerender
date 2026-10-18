@@ -281,6 +281,7 @@ def _install_fake_kittensynth(
     amount: int,
     maximum: int | None,
     fits: bool | None,
+    open_error: Exception | None = None,
 ) -> list[tuple[str, Any]]:
     events: list[tuple[str, Any]] = []
     model = SimpleNamespace(
@@ -310,6 +311,9 @@ def _install_fake_kittensynth(
         @classmethod
         def from_pretrained(cls, target_id: str, **kwargs: Any) -> FakeVoice:
             assert target_id == "kitten-test-model"
+            if open_error is not None:
+                events.append(("open", target_id))
+                raise open_error
             return cls()
 
         def measure_prepared(self, text: str) -> Any:
@@ -341,6 +345,8 @@ def _install_fake_kittensynth(
         "measurement_metric": "model_tokens",
     }
     module.KittenVoice = FakeVoice
+    if open_error is not None:
+        module.ManagedModelDependencyError = type(open_error)  # type: ignore[attr-defined]
     module.SynthesisMeasure = object
     module.SynthesisConfig = object
     module.SynthesisResult = object
@@ -519,6 +525,37 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     assert check.source == "kittensynth.measure_prepared"
     assert [event[0] for event in events] == ["measure", "close"]
     assert events[0][1] == "Kitten preflight"
+
+
+def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native_error_type = type("ManagedModelDependencyError", (Exception,), {})
+    native_error = native_error_type("managed download transport unavailable")
+    events = _install_fake_kittensynth(
+        monkeypatch,
+        amount=180,
+        maximum=256,
+        fits=True,
+        open_error=native_error,
+    )
+    binding = {
+        "renderer": "kitten",
+        "target_id": "kitten-test-model",
+        "voice": "Jasper",
+    }
+    plan = _plan(
+        ("Kitten preflight dependency failure", True, "sentence"), binding=binding
+    )
+
+    report = preflight_render_plan(plan, tmp_path / "kitten-dependency-error.toml")
+
+    check = report.checks[0]
+    assert report.status == "reject"
+    assert check.status == "error"
+    assert check.source == "kitten.runtime_dependency_error"
+    assert report.replan == ()
+    assert [event[0] for event in events] == ["open"]
 
 
 def test_kitten_preflight_defers_emphasis_to_composition(

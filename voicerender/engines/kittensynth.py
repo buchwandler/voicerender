@@ -171,6 +171,11 @@ def _translate_kitten_error(
         ("InvalidSpeedError", InvalidEngineOptionError, "kitten.invalid_speed"),
         ("InvalidVoiceError", InvalidEngineVoiceError, "kitten.voice_unavailable"),
         ("UnsupportedModelError", InvalidEngineModelError, "kitten.model_unsupported"),
+        (
+            "ManagedModelDependencyError",
+            EngineBackendError,
+            "kitten.runtime_dependency_error",
+        ),
         ("OnnxVoiceContractError", EngineBackendError, "kitten.runtime_contract_error"),
     )
     error_type: type[EngineError] = EngineBackendError

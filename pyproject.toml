@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
-kitten = ["kittensynth[cpu]>=0.1.4,<0.2"]
+kitten = ["kittensynth[cpu]>=0.1.6,<0.2"]
 kokoro = ["pykokoro>=0.10.5,<0.11"]
 piper = ["pipersynth>=0.2.5,<0.3"]
 pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
