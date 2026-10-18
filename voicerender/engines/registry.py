@@ -40,6 +40,12 @@ class BuiltinEngineSpec:
 
 
 _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
+    "chatterbox": BuiltinEngineSpec(
+        "chatterboxsynth",
+        "voicerender.engines.chatterboxsynth",
+        "ChatterboxSynthEngineAdapter",
+        True,
+    ),
     "inflect": BuiltinEngineSpec(
         "inflectsynth", "voicerender.engines.inflectsynth", "InflectSynthEngineAdapter"
     ),
@@ -79,6 +85,7 @@ def normalize_engine_id(engine: str) -> str:
     """Normalize a public engine identifier without importing its SDK."""
     normalized = engine.strip().casefold()
     aliases = {
+        "chatterboxsynth": "chatterbox",
         "pykokoro": "kokoro",
         "pipersynth": "piper",
         "pocketsynth": "pocket",

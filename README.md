@@ -145,7 +145,7 @@ Role mutations require exactly one explicit `--output PATH` or `--in-place`; the
 
 ## Reference voices
 
-Kokoro, PocketSynth, and SoproSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
+Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
 
 Create a local Inno voice or a portable AkinVox voice with the CLI. AkinVox requires the exact spoken transcript; Inno does not use a transcript and may accept an `fmax` option:
 
@@ -166,6 +166,26 @@ voicerender profile create \
 `engine="auto"` selects Inno for a static target advertising the `inno-v0.2` enroller, or AkinVox for a reference-only target. AkinVox is English-only. Install `.[kokoro]` for Kokoro or `.[sopro]` for SoproSynth and make model assets available using the engine's supported process; VoiceRender does not download models implicitly.
 
 Preflight validates local content pins and managed catalog metadata, and measures text without fetching managed audio, enrolling a voice, or conditioning a reference. Rendering resolves the verified reference and enrolls it lazily; the enrolled voice is reused within that synthesis session. Canonical identity retains content/provenance pins and the exact AkinVox transcript digest, but excludes local/cache paths and raw transcript text. See the [RenderProfile lifecycle](docs/renderprofile.md) and [examples](examples/README.md) for details.
+
+### ChatterboxSynth
+
+ChatterboxSynth is an optional English-only engine. Install the integration with `python -m pip install "voicerender[chatterbox]"`; VoiceRender discovers supported bundles (currently Nano v2 and Turbo) through ChatterboxSynth and opens only profiles already installed with the ChatterboxSynth/OnnxVoice tooling. Rendering and preflight never download or install a model.
+
+Every profile requires a pinned reference voice. Both a local WAV and a managed Voicefolio reference are supported; named voices and speaker IDs are not. For example:
+
+```bash
+voicerender profile create \
+  --engine chatterbox --target nano-v2 --language en-US \
+  --reference-wav ./speaker.wav \
+  --output chatterbox.renderprofile.toml
+
+voicerender profile create \
+  --engine chatterbox --target turbo --language en-US \
+  --voicefolio-ref <voicefolio-ref> \
+  --output chatterbox-turbo.renderprofile.toml
+```
+
+Preflight performs exact Chatterbox tokenizer measurement without resolving or preparing the reference. Current bundles publish no finite text-input token maximum, so VoiceRender does not invent a capacity limit or split text; `max_new_tokens` controls generated output, not input size. Rendering resolves and verifies the pinned reference lazily, prepares it once per session, and uses the common artifact and manifest path.
 
 ### Qwen3Synth Base and VoiceDesign
 

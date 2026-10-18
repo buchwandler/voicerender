@@ -18,6 +18,7 @@ from voicerender.engines.registry import (
 )
 
 ENGINE_IDS = {
+    "chatterbox",
     "inflect",
     "kitten",
     "kokoro",
@@ -28,6 +29,7 @@ ENGINE_IDS = {
     "qwen3",
 }
 PACKAGES = {
+    "chatterbox": "chatterboxsynth",
     "inflect": "inflectsynth",
     "kitten": "kittensynth",
     "kokoro": "pykokoro",
@@ -39,6 +41,7 @@ PACKAGES = {
 }
 
 ADAPTER_MODULES = {
+    "chatterbox": "voicerender.engines.chatterboxsynth",
     "inflect": "voicerender.engines.inflectsynth",
     "kitten": "voicerender.engines.kittensynth",
     "kokoro": "voicerender.engines.kokoro",
@@ -53,7 +56,7 @@ ADAPTER_MODULES = {
 def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
     script = r"""
 import builtins
-blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
+blocked = {"chatterboxsynth", "inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
 seen = []
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -70,7 +73,7 @@ assert not seen
     # Keep the subprocess isolated from SDKs that may already be imported by pytest.
     script = script.replace(
         "blocked_to_ids",
-        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
+        "{'chatterbox', 'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
     )
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -90,6 +93,14 @@ def _fake_package(package: str) -> ModuleType:
 
     owner_methods = {
         "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
+        "ChatterboxRuntime": (
+            "from_installed",
+            "from_pretrained",
+            "prepare_voice",
+            "measure_request",
+            "synthesize",
+            "close",
+        ),
         "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
         "KokoroSynthesizer": (
             "prepare",
@@ -145,6 +156,8 @@ def _fake_package(package: str) -> ModuleType:
     }
     symbols = {
         "PiperVoice",
+        "ChatterboxRuntime",
+        "ChatterboxSynthError",
         "VoiceAssetManager",
         "SynthesisRequest",
         "SynthesisResult",
@@ -218,13 +231,14 @@ def _fake_package(package: str) -> ModuleType:
     return module
 
 
-def test_registry_lists_nine_engines_without_probing() -> None:
+def test_registry_lists_ten_engines_without_probing() -> None:
     listed = list_engines()
     assert {item["id"] for item in listed} == ENGINE_IDS
     assert {item["package"] for item in listed} == set(PACKAGES.values())
     assert all("installed_version" in item for item in listed)
     by_id = {item["id"]: item for item in listed}
     assert by_id["sopro"]["supports_reference_voice"] is True
+    assert by_id["chatterbox"]["supports_reference_voice"] is True
     assert by_id["pocket"]["supports_reference_voice"] is True
     assert by_id["kokoro"]["supports_reference_voice"] is True
     assert by_id["piper"]["supports_reference_voice"] is False
@@ -232,6 +246,8 @@ def test_registry_lists_nine_engines_without_probing() -> None:
 
 def test_soprosynth_alias_normalizes_without_loading_sdk() -> None:
     assert normalize_engine_id("SoproSynth") == "sopro"
+    assert normalize_engine_id("ChatterboxSynth") == "chatterbox"
+    assert normalize_engine_id("chatterboxsynth") == "chatterbox"
 
 
 @pytest.mark.parametrize(("engine", "package"), sorted(PACKAGES.items()))
@@ -262,7 +278,7 @@ def test_all_engine_probes_use_public_api_without_loading_models(
             supports_request_measurement=True,
             supports_voice_design=True,
         )
-    elif engine == "sopro":
+    elif engine in {"chatterbox", "sopro"}:
         fake.request_api_contract = lambda: SimpleNamespace(
             supports_reference_voice=True,
             supports_request_measurement=True,
@@ -556,6 +572,23 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
             ),
         )
         monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    elif engine == "chatterbox":
+        fake = _fake_package(PACKAGES[engine])
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="chatterbox-demo",
+                ref="chatterbox:nano-v2",
+                display_name="Chatterbox Nano v2",
+                aliases=("nano",),
+                profiles=("cpu", "fp32"),
+                default_profile="cpu",
+                installed_profiles=("cpu",),
+                sample_rate=24000,
+                source_revision="revision-1",
+                runtime_available=True,
+            ),
+        )
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     elif engine == "qwen3":
         fake = _fake_package(PACKAGES[engine])
         fake.discover_bundles = lambda **kwargs: (
@@ -599,6 +632,7 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
         "piper-demo",
         "pocket-demo",
         "sopro-demo",
+        "chatterbox-demo",
         "demo-model",
     }
 
@@ -673,6 +707,34 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
         fake.SoproOutputConfig = FakeOutputConfig
         fake.VoiceLevelConfig = FakeVoiceLevelConfig
         monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    if engine == "chatterbox":
+        fake = _fake_package(PACKAGES[engine])
+        fake.request_api_contract = lambda: SimpleNamespace(
+            supports_reference_voice=True,
+            supports_request_measurement=True,
+            supports_named_voices=False,
+        )
+        fake.discover_bundles = lambda **kwargs: (
+            SimpleNamespace(
+                id="demo-model",
+                ref="chatterbox:demo-model",
+                display_name="Chatterbox demo",
+                aliases=(),
+                profiles=("cpu", "fp32"),
+                default_profile="cpu",
+                installed_profiles=("cpu",),
+                sample_rate=24000,
+                source_revision="revision-1",
+                runtime_available=True,
+            ),
+        )
+
+        class FakeGenerationConfig:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        fake.GenerationConfig = FakeGenerationConfig
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     if engine in {"inflect", "supertonic"}:
         fake = _fake_package(PACKAGES[engine])
 
@@ -704,7 +766,7 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
         engine=engine,
         target_id="demo-model",
         language="en-US",
-        voice=None if engine in {"sopro", "qwen3"} else "demo-voice",
+        voice=None if engine in {"sopro", "qwen3", "chatterbox"} else "demo-voice",
         options=(
             {
                 "voice_source": {
@@ -714,7 +776,7 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
                 },
                 **({"reference_text": "A reference."} if engine == "qwen3" else {}),
             }
-            if engine in {"sopro", "qwen3"}
+            if engine in {"sopro", "qwen3", "chatterbox"}
             else {"speed": 2.0}
             if engine == "piper"
             else {}

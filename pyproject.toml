@@ -20,6 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
 inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
 kitten = ["kittensynth[cpu]>=0.1.6,<0.2"]
 kokoro = ["pykokoro>=0.10.5,<0.11"]
@@ -69,6 +70,7 @@ exclude = ["build/"]
 
 [[tool.mypy.overrides]]
 module = [
+  "chatterboxsynth",
   "inflectsynth",
   "kittensynth",
   "pipersynth",
