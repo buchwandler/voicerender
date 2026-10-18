@@ -1,0 +1,45 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.3
+git_base_ref: aecc0461fdecf55f60f20991e796efd1c240679a
+git_base_sha: aecc0461fdecf55f60f20991e796efd1c240679a
+git_head_ref: b17f1a9010849b0e6aec846f222e12a86f04ad79
+git_head_sha: b17f1a9010849b0e6aec846f222e12a86f04ad79
+include_merges: nontrivial
+entries:
+  - kind: changed
+    summary: Changed preflight handling so unavailable managed KittenSynth dependencies reject without scheduling a replan
+    status: accepted
+    source_refs:
+      - git:67e4d8ec44e04f96d7041afa8c87c762bec87b6f
+    paths:
+      - pyproject.toml
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - voicerender/engines/kittensynth.py
+    sources:
+      - git:67e4d8ec44e04f96d7041afa8c87c762bec87b6f
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added optional ChatterboxSynth rendering with pinned reference voices and installed-model discovery
+    status: accepted
+    source_refs:
+      - git:b17f1a9010849b0e6aec846f222e12a86f04ad79
+    paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_chatterboxsynth_engine.py
+      - tests/test_engine_registry.py
+      - voicerender/engines/chatterboxsynth.py
+      - voicerender/engines/registry.py
+    sources:
+      - git:b17f1a9010849b0e6aec846f222e12a86f04ad79
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

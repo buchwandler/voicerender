@@ -150,6 +150,7 @@ def main() -> None:
     assert not installed_package.is_relative_to(checkout), installed_package
     assert resources.files("voicerender").joinpath("py.typed").is_file()
     expected_engine_ids = {
+        "chatterbox",
         "inflect",
         "kitten",
         "kokoro",
@@ -159,12 +160,14 @@ def main() -> None:
         "sopro",
         "supertonic",
     }
+    assert find_spec("chatterboxsynth") is None
     assert find_spec("qwen3synth") is None
     listed_engines = list_engines()
     assert {item["id"] for item in listed_engines} == expected_engine_ids
     by_id = {item["id"]: item for item in listed_engines}
     assert by_id["qwen3"]["installed"] is False
     engine_sdks = {
+        "chatterboxsynth",
         "inflectsynth",
         "kittensynth",
         "pykokoro",

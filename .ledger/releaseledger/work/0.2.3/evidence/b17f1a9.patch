@@ -1,0 +1,1868 @@
+ README.md                              |  22 +-
+ pyproject.toml                         |   2 +
+ tests/test_chatterboxsynth_engine.py   | 668 ++++++++++++++++++++++++
+ tests/test_engine_registry.py          |  74 ++-
+ voicerender/engines/chatterboxsynth.py | 906 +++++++++++++++++++++++++++++++++
+ voicerender/engines/registry.py        |   7 +
+ 6 files changed, 1672 insertions(+), 7 deletions(-)
+
+diff --git a/README.md b/README.md
+index 188cd8a..e46dbc5 100644
+--- a/README.md
++++ b/README.md
+@@ -145,7 +145,7 @@ Role mutations require exactly one explicit `--output PATH` or `--in-place`; the
+
+ ## Reference voices
+
+-Kokoro, PocketSynth, and SoproSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
++Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
+
+ Create a local Inno voice or a portable AkinVox voice with the CLI. AkinVox requires the exact spoken transcript; Inno does not use a transcript and may accept an `fmax` option:
+
+@@ -167,6 +167,26 @@ voicerender profile create \
+
+ Preflight validates local content pins and managed catalog metadata, and measures text without fetching managed audio, enrolling a voice, or conditioning a reference. Rendering resolves the verified reference and enrolls it lazily; the enrolled voice is reused within that synthesis session. Canonical identity retains content/provenance pins and the exact AkinVox transcript digest, but excludes local/cache paths and raw transcript text. See the [RenderProfile lifecycle](docs/renderprofile.md) and [examples](examples/README.md) for details.
+
++### ChatterboxSynth
++
++ChatterboxSynth is an optional English-only engine. Install the integration with `python -m pip install "voicerender[chatterbox]"`; VoiceRender discovers supported bundles (currently Nano v2 and Turbo) through ChatterboxSynth and opens only profiles already installed with the ChatterboxSynth/OnnxVoice tooling. Rendering and preflight never download or install a model.
++
++Every profile requires a pinned reference voice. Both a local WAV and a managed Voicefolio reference are supported; named voices and speaker IDs are not. For example:
++
++```bash
++voicerender profile create \
++  --engine chatterbox --target nano-v2 --language en-US \
++  --reference-wav ./speaker.wav \
++  --output chatterbox.renderprofile.toml
++
++voicerender profile create \
++  --engine chatterbox --target turbo --language en-US \
++  --voicefolio-ref <voicefolio-ref> \
++  --output chatterbox-turbo.renderprofile.toml
++```
++
++Preflight performs exact Chatterbox tokenizer measurement without resolving or preparing the reference. Current bundles publish no finite text-input token maximum, so VoiceRender does not invent a capacity limit or split text; `max_new_tokens` controls generated output, not input size. Rendering resolves and verifies the pinned reference lazily, prepares it once per session, and uses the common artifact and manifest path.
++
+ ### Qwen3Synth Base and VoiceDesign
+
+ Qwen3Synth is optional. Install its extra and the model bundles you intend to use. VoiceRender opens installed models only, and does not download them during profile creation, preflight, or rendering:
+diff --git a/pyproject.toml b/pyproject.toml
+index 17b50ff..a6dda8c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -20,6 +20,7 @@ dependencies = [
+ ]
+
+ [project.optional-dependencies]
++chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.6,<0.2"]
+ kokoro = ["pykokoro>=0.10.5,<0.11"]
+@@ -69,6 +70,7 @@ exclude = ["build/"]
+
+ [[tool.mypy.overrides]]
+ module = [
++  "chatterboxsynth",
+   "inflectsynth",
+   "kittensynth",
+   "pipersynth",
+diff --git a/tests/test_chatterboxsynth_engine.py b/tests/test_chatterboxsynth_engine.py
+new file mode 100644
+index 0000000..232e976
+--- /dev/null
++++ b/tests/test_chatterboxsynth_engine.py
+@@ -0,0 +1,668 @@
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from typing import Any
++
++import numpy as np
++import pytest
++from renderplan import (
++    RenderPlan,
++    SourceSpan,
++    SpeechItem,
++    load_manifest,
++)
++
++from voicerender.engines import chatterboxsynth as chatterbox_adapter_module
++from voicerender.engines.base import EngineSelection, SpeechRequest
++from voicerender.engines.catalog import CatalogRequest
++from voicerender.engines.registry import _ADAPTERS, normalize_engine_id
++from voicerender.engines.selection import EngineRequest
++from voicerender.errors import (
++    EngineSelectionError,
++    EngineUnavailableError,
++    InvalidEngineVoiceError,
++)
++from voicerender.preflight import preflight_render_plan
++from voicerender.renderplan_input import PreflightDisposition, classify_measurement
++from voicerender.renderplan_render import render_renderplan
++from voicerender.voice_sources import (
++    ResolvedReferenceAudio,
++    local_reference_source,
++)
++
++
++def _bundle(
++    bundle_id: str,
++    *,
++    aliases: tuple[str, ...],
++    profiles: tuple[str, ...],
++    default_profile: str,
++    installed_profiles: tuple[str, ...] = (),
++) -> SimpleNamespace:
++    return SimpleNamespace(
++        id=bundle_id,
++        ref=f"chatterbox:{bundle_id}",
++        display_name=f"Chatterbox {bundle_id}",
++        aliases=aliases,
++        languages=("en",),
++        profiles=profiles,
++        default_profile=default_profile,
++        installed_profiles=installed_profiles,
++        sample_rate=24_000,
++        source_revision=("a" * 39) + ("1" if bundle_id == "nano-v2" else "2"),
++        runtime_available=bool(installed_profiles),
++        metadata={"source_repository": "chatterbox-bundles"},
++    )
++
++
++def _managed_source(sha256: str = "a" * 64) -> dict[str, str]:
++    return {
++        "kind": "managed_reference",
++        "resolver": "voicefolio",
++        "value": "catalog:voice-a",
++        "sha256": sha256,
++        "source_revision": "voice-revision-1",
++        "source_repository": "voice-donations",
++        "source_path": "voices/a.wav",
++    }
++
++
++def _fake_chatterboxsynth() -> tuple[ModuleType, dict[str, Any]]:
++    module = ModuleType("chatterboxsynth")
++    module.__version__ = "0.1.1"
++    module.__file__ = "/fake/chatterboxsynth/__init__.py"
++    bundles = (
++        _bundle(
++            "nano-v2",
++            aliases=("nano", "nano-110m"),
++            profiles=("cpu", "fp32"),
++            default_profile="cpu",
++            installed_profiles=("cpu",),
++        ),
++        _bundle(
++            "turbo",
++            aliases=("turbo-350m",),
++            profiles=("fp32", "q4f16"),
++            default_profile="fp32",
++        ),
++    )
++    state: dict[str, Any] = {
++        "bundles": bundles,
++        "discoveries": [],
++        "opens": [],
++        "from_pretrained": 0,
++        "measurements": [],
++        "prepared": [],
++        "syntheses": [],
++        "closed": 0,
++        "open_error": None,
++        "measurement": SimpleNamespace(
++            amount=19, fits=True, maximum=None, unit="model_tokens"
++        ),
++        "contract": SimpleNamespace(
++            version=1,
++            supports_reference_voice=True,
++            supports_request_measurement=True,
++            supports_named_voices=False,
++        ),
++    }
++
++    class ChatterboxSynthError(Exception):
++        pass
++
++    class OptionalDependencyError(ChatterboxSynthError):
++        pass
++
++    class ModelLoadError(ChatterboxSynthError):
++        pass
++
++    class ModelNotInstalledError(ModelLoadError):
++        pass
++
++    class AudioPromptError(ChatterboxSynthError):
++        pass
++
++    class IncompatibleVoiceError(ChatterboxSynthError):
++        pass
++
++    class InvalidGenerationConfigError(ChatterboxSynthError):
++        pass
++
++    class EmptyTextError(ChatterboxSynthError):
++        pass
++
++    class RuntimeClosedError(ChatterboxSynthError):
++        pass
++
++    class SynthesisError(ChatterboxSynthError):
++        pass
++
++    class FakeSynthesisRequest:
++        def __init__(self, *, id: str, text: str, language: str) -> None:
++            self.id = id
++            self.text = text
++            self.language = language
++
++    class FakeGenerationConfig:
++        def __init__(
++            self,
++            *,
++            max_new_tokens: int | None = None,
++            repetition_penalty: float | None = None,
++        ) -> None:
++            if max_new_tokens is not None and (
++                isinstance(max_new_tokens, bool)
++                or not isinstance(max_new_tokens, int)
++                or max_new_tokens <= 0
++            ):
++                raise InvalidGenerationConfigError(
++                    "max_new_tokens must be a positive integer or None"
++                )
++            if repetition_penalty is not None and (
++                isinstance(repetition_penalty, bool)
++                or not isinstance(repetition_penalty, (int, float))
++                or repetition_penalty <= 0
++            ):
++                raise InvalidGenerationConfigError(
++                    "repetition_penalty must be positive or None"
++                )
++            self.max_new_tokens = max_new_tokens
++            self.repetition_penalty = repetition_penalty
++
++    class FakeRuntime:
++        def measure_request(self, request: Any) -> Any:
++            state["measurements"].append(request)
++            return state["measurement"]
++
++        def prepare_voice(self, path: str | Path) -> object:
++            state["prepared"].append(Path(path))
++            return object()
++
++        def synthesize(self, text: str, *, voice: Any, config: Any) -> Any:
++            state["syntheses"].append((text, voice, config))
++            return SimpleNamespace(
++                audio=np.linspace(-0.2, 0.2, 64, dtype=np.float32),
++                sample_rate=24_000,
++                model="nano-v2",
++                profile="cpu",
++                generated_tokens=11,
++                stopped_on_eos=True,
++            )
++
++        def close(self) -> None:
++            state["closed"] += 1
++
++    class ChatterboxRuntime:
++        @classmethod
++        def from_installed(cls, ref: str, **kwargs: Any) -> FakeRuntime:
++            state["opens"].append((ref, kwargs))
++            if state["open_error"] is not None:
++                raise state["open_error"]
++            return FakeRuntime()
++
++        @classmethod
++        def from_pretrained(cls, *args: Any, **kwargs: Any) -> None:
++            state["from_pretrained"] += 1
++            raise AssertionError("VoiceRender must not acquire Chatterbox models")
++
++        def prepare_voice(self, *args: Any, **kwargs: Any) -> None:
++            raise NotImplementedError
++
++        def measure_request(self, *args: Any, **kwargs: Any) -> None:
++            raise NotImplementedError
++
++        def synthesize(self, *args: Any, **kwargs: Any) -> None:
++            raise NotImplementedError
++
++        def close(self) -> None:
++            raise NotImplementedError
++
++    def discover_bundles(
++        *, offline: bool = False, refresh: bool = False
++    ) -> tuple[Any, ...]:
++        state["discoveries"].append({"offline": offline, "refresh": refresh})
++        return state["bundles"]
++
++    module.ChatterboxRuntime = ChatterboxRuntime
++    module.ChatterboxSynthError = ChatterboxSynthError
++    module.OptionalDependencyError = OptionalDependencyError
++    module.ModelLoadError = ModelLoadError
++    module.ModelNotInstalledError = ModelNotInstalledError
++    module.AudioPromptError = AudioPromptError
++    module.IncompatibleVoiceError = IncompatibleVoiceError
++    module.InvalidGenerationConfigError = InvalidGenerationConfigError
++    module.EmptyTextError = EmptyTextError
++    module.RuntimeClosedError = RuntimeClosedError
++    module.SynthesisError = SynthesisError
++    module.SynthesisRequest = FakeSynthesisRequest
++    module.SynthesisResult = type("SynthesisResult", (), {})
++    module.GenerationConfig = FakeGenerationConfig
++    module.PreparedVoice = type("PreparedVoice", (), {})
++    module.RequestMeasure = type("RequestMeasure", (), {})
++    module.DiscoveredBundle = type("DiscoveredBundle", (), {})
++    module.discover_bundles = discover_bundles
++    module.runtime_identity = lambda: {
++        "engine": "chatterboxsynth",
++        "engine_version": "0.1.1",
++        "request_api_version": 1,
++    }
++    module.REQUEST_API_VERSION = 1
++    module.request_api_contract = lambda: state["contract"]
++    return module, state
++
++
++def _install(
++    monkeypatch: pytest.MonkeyPatch,
++) -> tuple[Any, ModuleType, dict[str, Any]]:
++    from voicerender.engines.chatterboxsynth import ChatterboxSynthEngineAdapter
++
++    module, state = _fake_chatterboxsynth()
++    monkeypatch.setitem(sys.modules, "chatterboxsynth", module)
++    return ChatterboxSynthEngineAdapter(), module, state
++
++
++def _resolve(
++    adapter: Any,
++    *,
++    target_id: str = "nano-v2",
++    language: str = "en-US",
++    source: dict[str, Any] | None = None,
++    voice: str | None = None,
++    speaker: str | int | None = None,
++    options: dict[str, Any] | None = None,
++    engine_options: dict[str, Any] | None = None,
++) -> EngineSelection:
++    selection, diagnostics = adapter.resolve(
++        EngineRequest(
++            engine="chatterbox",
++            target_id=target_id,
++            language=language,
++            voice=voice,
++            speaker=speaker,
++            options={
++                **(options or {}),
++                **({"voice_source": source} if source is not None else {}),
++            },
++            engine_options=engine_options or {},
++        )
++    )
++    assert diagnostics == ()
++    return selection
++
++
++def test_chatterbox_api_probe_and_contract_failures(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, module, state = _install(monkeypatch)
++    probe = adapter.probe_api()
++    assert probe.compatible
++    assert probe.api_version == 1
++    assert probe.contract_source == "explicit"
++
++    del module.REQUEST_API_VERSION
++    missing = adapter.probe_api()
++    assert not missing.compatible
++    assert "REQUEST_API_VERSION" in missing.missing_symbols
++
++    module.REQUEST_API_VERSION = 2
++    wrong_version = adapter.probe_api()
++    assert not wrong_version.compatible
++    assert wrong_version.status == "api_version_incompatible"
++
++    module.REQUEST_API_VERSION = 1
++    for name, value in (
++        ("supports_reference_voice", False),
++        ("supports_request_measurement", False),
++        ("supports_named_voices", True),
++    ):
++        state["contract"] = SimpleNamespace(
++            version=1,
++            supports_reference_voice=True,
++            supports_request_measurement=True,
++            supports_named_voices=False,
++        )
++        setattr(state["contract"], name, value)
++        incompatible = adapter.probe_api()
++        assert not incompatible.compatible
++        assert incompatible.status == "api_incompatible"
++        assert name in incompatible.details["capability_mismatches"]
++
++
++def test_discovery_maps_nano_turbo_aliases_and_capacity_free_profile(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, _, state = _install(monkeypatch)
++    targets = adapter.discover(
++        CatalogRequest(engine="chatterbox", offline=True, refresh=True)
++    )
++    assert [target.id for target in targets] == ["nano-v2", "turbo"]
++    nano, turbo = targets
++    assert chatterbox_adapter_module._find_target(targets, "nano-110m") is nano
++    assert chatterbox_adapter_module._find_target(targets, "turbo-350m") is turbo
++    assert nano.languages == ("en",)
++    assert nano.qualities == ("cpu", "fp32")
++    assert nano.runtime_available is True
++    assert nano.metadata["ref"] == "chatterbox:nano-v2"
++    assert (
++        nano.metadata["source_revision"]
++        == _bundle(
++            "nano-v2", aliases=(), profiles=(), default_profile=""
++        ).source_revision
++    )
++    assert nano.metadata["installed_profiles"] == ("cpu",)
++    assert nano.capabilities == frozenset({"reference_voice", "request_measurement"})
++    assert nano.voices == () and nano.default_voice is None
++    assert state["discoveries"] == [{"offline": True, "refresh": True}]
++
++    capabilities = adapter.capabilities()
++    assert capabilities.id == "chatterbox"
++    assert capabilities.supports_reference_voice
++    assert capabilities.supports_request_measurement
++    assert not capabilities.supports_named_voices
++    assert normalize_engine_id("ChatterboxSynth") == "chatterbox"
++
++    selection = _resolve(adapter, source=_managed_source())
++    fragment = adapter.renderprofile_fragment(selection)
++    assert fragment.frontend == "chatterboxsynth"
++    assert fragment.renderer_capacity is None
++    assert fragment.planner_capacity is None
++    assert "capacity" not in fragment.binding["renderer_metadata"]
++
++
++def test_selection_requires_english_reference_and_supported_profile(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter, _, _ = _install(monkeypatch)
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"pinned local reference")
++    local = local_reference_source(reference)
++    selection = _resolve(adapter, target_id="nano", source=local)
++    assert selection.target_id == "nano-v2"
++    assert selection.language == "en-us"
++    assert selection.options["quality"] == "cpu"
++    assert adapter.validate_selection(selection) == ()
++
++    managed = _resolve(adapter, target_id="turbo-350m", source=_managed_source())
++    assert managed.target_id == "turbo"
++    assert managed.options["quality"] == "fp32"
++
++    with pytest.raises(EngineSelectionError) as missing:
++        _resolve(adapter)
++    assert missing.value.code == "chatterbox.reference_required"
++
++    with pytest.raises(EngineSelectionError) as named:
++        _resolve(adapter, source=_managed_source(), voice="narrator")
++    assert named.value.code == "chatterbox.named_voice_unsupported"
++
++    with pytest.raises(EngineSelectionError) as speaker:
++        _resolve(adapter, source=_managed_source(), speaker="speaker-a")
++    assert speaker.value.code == "chatterbox.speaker_unsupported"
++
++    prepared = {
++        "kind": "prepared",
++        "value": str((tmp_path / "voice.qvoice").resolve()),
++        "sha256": "b" * 64,
++        "format": "qwen3.qvoice.v2",
++    }
++    with pytest.raises(EngineSelectionError) as prepared_error:
++        _resolve(adapter, source=prepared)
++    assert prepared_error.value.code == "chatterbox.reference_required"
++
++    with pytest.raises(EngineSelectionError) as language:
++        _resolve(adapter, source=_managed_source(), language="fr-FR")
++    assert language.value.code == "chatterbox.language_incompatible"
++
++    with pytest.raises(EngineSelectionError) as profile:
++        _resolve(
++            adapter,
++            target_id="nano-v2",
++            source=_managed_source(),
++            options={"quality": "q4f16"},
++        )
++    assert profile.value.code == "chatterbox.quality_incompatible"
++
++    with pytest.raises(EngineSelectionError) as unknown:
++        _resolve(adapter, source=_managed_source(), engine_options={"unknown": True})
++    assert unknown.value.code == "chatterbox.invalid_option"
++
++    with pytest.raises(EngineSelectionError) as generation:
++        _resolve(
++            adapter, source=_managed_source(), engine_options={"max_new_tokens": 0}
++        )
++    assert generation.value.code == "chatterbox.generation_config_invalid"
++
++
++def test_measurement_is_exact_and_does_not_resolve_prepare_or_synthesize(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from voicerender.engines import chatterboxsynth as adapter_module
++
++    adapter, _, state = _install(monkeypatch)
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"pinned local reference")
++    selection = _resolve(
++        adapter,
++        source=local_reference_source(reference),
++        engine_options={"max_new_tokens": 128, "repetition_penalty": 1.2},
++    )
++    resolution_calls: list[Any] = []
++    original_resolve = adapter_module.resolve_reference_audio
++
++    def resolve_spy(*args: Any, **kwargs: Any) -> ResolvedReferenceAudio:
++        resolution_calls.append((args, kwargs))
++        return original_resolve(*args, **kwargs)
++
++    monkeypatch.setattr(adapter_module, "resolve_reference_audio", resolve_spy)
++    with adapter.open(selection) as session:
++        measured = session.measure(
++            SpeechRequest(id="measure-1", text="Count these tokens.", language="en-US")
++        )
++        assert measured.amount == 19
++        assert measured.maximum is None
++        assert measured.fits is True
++        assert measured.unit == "model_tokens"
++        assert measured.source == "chatterboxsynth.measure_request"
++        assert classify_measurement(measured).disposition is PreflightDisposition.OK
++        assert resolution_calls == []
++        assert state["prepared"] == []
++        assert state["syntheses"] == []
++
++
++def test_synthesis_resolves_and_prepares_reference_once_per_session(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter, _, state = _install(monkeypatch)
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"pinned local reference")
++    source = local_reference_source(reference)
++    selection = _resolve(
++        adapter,
++        source=source,
++        engine_options={"max_new_tokens": 128, "repetition_penalty": 1.15},
++    )
++    with adapter.open(selection) as session:
++        first = session.synthesize(
++            SpeechRequest(id="speech-1", text="First request.", language="en-US")
++        )
++        second = session.synthesize(
++            SpeechRequest(id="speech-2", text="Second request.", language="en-GB")
++        )
++
++    assert first.id == "speech-1" and second.id == "speech-2"
++    assert first.sample_rate == second.sample_rate == 24_000
++    assert first.metadata["generated_tokens"] == 11
++    assert first.metadata["stopped_on_eos"] is True
++    assert first.metadata["voice_source_identity"] == {
++        "kind": "reference",
++        "sha256": source["sha256"],
++    }
++    assert len(state["opens"]) == 1
++    assert state["opens"][0][0] == "chatterbox:nano-v2"
++    assert state["from_pretrained"] == 0
++    assert len(state["prepared"]) == 1
++    assert state["prepared"][0] == reference.resolve()
++    assert len(state["syntheses"]) == 2
++    assert state["syntheses"][0][2].max_new_tokens == 128
++    assert state["syntheses"][0][2].repetition_penalty == 1.15
++    assert state["closed"] == 1
++
++
++def test_reference_integrity_failure_prevents_preparation(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter, _, state = _install(monkeypatch)
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"original pinned reference")
++    selection = _resolve(adapter, source=local_reference_source(reference))
++    reference.write_bytes(b"changed reference bytes")
++
++    with (
++        adapter.open(selection) as session,
++        pytest.raises(InvalidEngineVoiceError) as changed,
++    ):
++        session.synthesize(
++            SpeechRequest(id="changed", text="Must not prepare", language="en")
++        )
++    assert changed.value.code == "voice_source.reference_changed"
++    assert state["prepared"] == []
++    assert state["syntheses"] == []
++
++
++def test_managed_pin_mismatch_from_generic_resolver_prevents_preparation(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    from voicerender.engines import chatterboxsynth as adapter_module
++
++    adapter, _, state = _install(monkeypatch)
++    selection = _resolve(adapter, source=_managed_source())
++
++    def reject_pin(*args: Any, **kwargs: Any) -> Any:
++        raise InvalidEngineVoiceError(
++            "Voicefolio reference pin mismatch",
++            engine="chatterbox",
++            code="voice_source.managed_pin_mismatch",
++        )
++
++    monkeypatch.setattr(adapter_module, "resolve_reference_audio", reject_pin)
++    with (
++        adapter.open(selection) as session,
++        pytest.raises(InvalidEngineVoiceError) as mismatch,
++    ):
++        session.synthesize(
++            SpeechRequest(id="managed", text="Must not prepare", language="en")
++        )
++    assert mismatch.value.code == "voice_source.managed_pin_mismatch"
++    assert state["prepared"] == []
++    assert state["syntheses"] == []
++
++
++def test_open_translates_missing_installed_model_with_context(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, module, state = _install(monkeypatch)
++    selection = _resolve(adapter, source=_managed_source())
++    state["open_error"] = module.ModelNotInstalledError("not installed")
++
++    with pytest.raises(EngineUnavailableError) as unavailable:
++        adapter.open(selection)
++    assert unavailable.value.code == "chatterbox.model_not_installed"
++    assert unavailable.value.details["engine"] == "chatterbox"
++    assert unavailable.value.details["target_id"] == "nano-v2"
++    assert unavailable.value.details["native_error_type"] == "ModelNotInstalledError"
++    assert unavailable.value.details["operation"] == "open"
++
++
++def test_canonical_identity_pins_model_profile_voice_and_generation_without_paths(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, _, _ = _install(monkeypatch)
++    first = _resolve(
++        adapter,
++        source=_managed_source("a" * 64),
++        options={
++            "voice_source": _managed_source("a" * 64),
++            "voice_cache_dir": "/private/voice-cache",
++            "voice_catalog_path": "/private/voice-catalog",
++            "cache_dir": "/private/model-cache",
++        },
++        engine_options={"max_new_tokens": 100},
++    )
++    changed_voice = _resolve(
++        adapter,
++        source=_managed_source("b" * 64),
++        engine_options={"max_new_tokens": 100},
++    )
++    changed_generation = _resolve(
++        adapter,
++        source=_managed_source("a" * 64),
++        engine_options={"max_new_tokens": 101},
++    )
++
++    first_identity = adapter.canonical_synthesis_identity(first)
++    encoded = json.dumps(first_identity, sort_keys=True)
++    assert first_identity["model_revision"] == first.metadata["source_revision"]
++    assert first_identity["quality"] == "cpu"
++    assert first_identity["generation"]["max_new_tokens"] == 100
++    assert first_identity["voice"]["sha256"] == "a" * 64
++    assert "/private/" not in encoded
++    assert first_identity != adapter.canonical_synthesis_identity(changed_voice)
++    assert first_identity != adapter.canonical_synthesis_identity(changed_generation)
++
++
++def test_renderplan_preflight_render_writes_common_wav_and_manifest(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter, _, state = _install(monkeypatch)
++    monkeypatch.setitem(_ADAPTERS, "chatterbox", adapter)
++    reference = tmp_path / "speaker.wav"
++    reference.write_bytes(b"RenderPlan pinned reference bytes")
++    source = local_reference_source(reference)
++    text = "A request measured and rendered by ChatterboxSynth."
++    binding = {
++        "renderer": "chatterbox",
++        "target_id": "nano-v2",
++        "options": {"voice_source": source, "quality": "cpu"},
++    }
++    plan = RenderPlan(
++        source_plan_id="sha256:" + "3" * 64,
++        render_profile_id="sha256:" + "4" * 64,
++        flow=(
++            SpeechItem(
++                number=1,
++                text=text,
++                language="en-US",
++                role="narrator",
++                binding=binding,
++                source=(SourceSpan(locator="f000001.s000", start=0, end=len(text)),),
++                planning_level="sentence",
++                preflight_required=True,
++            ),
++        ),
++    ).with_identity()
++
++    report = preflight_render_plan(plan, tmp_path / "preflight.toml")
++    assert report.status == "ok"
++    assert state["measurements"]
++    assert state["measurements"][0].language == "en"
++    assert state["prepared"] == []
++
++    output_dir = tmp_path / "render"
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output_dir,
++        cache_dir=tmp_path / "cache",
++    )
++    assert not result.failed
++    assert result.manifest.complete
++    artifact = result.manifest.speech[0]
++    assert artifact.sample_rate == 24_000
++    assert (output_dir / artifact.wav).is_file()
++    loaded = load_manifest(result.manifest_path)
++    loaded.validate_against(plan)
++    assert loaded.manifest_id == result.manifest.manifest_id
++    assert len(state["syntheses"]) == 1
++    assert state["from_pretrained"] == 0
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index a65f210..fb9dc97 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -18,6 +18,7 @@ from voicerender.engines.registry import (
+ )
+
+ ENGINE_IDS = {
++    "chatterbox",
+     "inflect",
+     "kitten",
+     "kokoro",
+@@ -28,6 +29,7 @@ ENGINE_IDS = {
+     "qwen3",
+ }
+ PACKAGES = {
++    "chatterbox": "chatterboxsynth",
+     "inflect": "inflectsynth",
+     "kitten": "kittensynth",
+     "kokoro": "pykokoro",
+@@ -39,6 +41,7 @@ PACKAGES = {
+ }
+
+ ADAPTER_MODULES = {
++    "chatterbox": "voicerender.engines.chatterboxsynth",
+     "inflect": "voicerender.engines.inflectsynth",
+     "kitten": "voicerender.engines.kittensynth",
+     "kokoro": "voicerender.engines.kokoro",
+@@ -53,7 +56,7 @@ ADAPTER_MODULES = {
+ def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
+     script = r"""
+ import builtins
+-blocked = {"inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
++blocked = {"chatterboxsynth", "inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
+ seen = []
+ original = builtins.__import__
+ def guarded(name, *args, **kwargs):
+@@ -70,7 +73,7 @@ assert not seen
+     # Keep the subprocess isolated from SDKs that may already be imported by pytest.
+     script = script.replace(
+         "blocked_to_ids",
+-        "{'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
++        "{'chatterbox', 'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
+     )
+     root = Path(__file__).resolve().parents[1]
+     result = subprocess.run(
+@@ -90,6 +93,14 @@ def _fake_package(package: str) -> ModuleType:
+
+     owner_methods = {
+         "PiperVoice": ("from_pretrained", "measure", "synthesize", "close"),
++        "ChatterboxRuntime": (
++            "from_installed",
++            "from_pretrained",
++            "prepare_voice",
++            "measure_request",
++            "synthesize",
++            "close",
++        ),
+         "VoiceAssetManager": ("list_voices", "get_voice_metadata"),
+         "KokoroSynthesizer": (
+             "prepare",
+@@ -145,6 +156,8 @@ def _fake_package(package: str) -> ModuleType:
+     }
+     symbols = {
+         "PiperVoice",
++        "ChatterboxRuntime",
++        "ChatterboxSynthError",
+         "VoiceAssetManager",
+         "SynthesisRequest",
+         "SynthesisResult",
+@@ -218,13 +231,14 @@ def _fake_package(package: str) -> ModuleType:
+     return module
+
+
+-def test_registry_lists_nine_engines_without_probing() -> None:
++def test_registry_lists_ten_engines_without_probing() -> None:
+     listed = list_engines()
+     assert {item["id"] for item in listed} == ENGINE_IDS
+     assert {item["package"] for item in listed} == set(PACKAGES.values())
+     assert all("installed_version" in item for item in listed)
+     by_id = {item["id"]: item for item in listed}
+     assert by_id["sopro"]["supports_reference_voice"] is True
++    assert by_id["chatterbox"]["supports_reference_voice"] is True
+     assert by_id["pocket"]["supports_reference_voice"] is True
+     assert by_id["kokoro"]["supports_reference_voice"] is True
+     assert by_id["piper"]["supports_reference_voice"] is False
+@@ -232,6 +246,8 @@ def test_registry_lists_nine_engines_without_probing() -> None:
+
+ def test_soprosynth_alias_normalizes_without_loading_sdk() -> None:
+     assert normalize_engine_id("SoproSynth") == "sopro"
++    assert normalize_engine_id("ChatterboxSynth") == "chatterbox"
++    assert normalize_engine_id("chatterboxsynth") == "chatterbox"
+
+
+ @pytest.mark.parametrize(("engine", "package"), sorted(PACKAGES.items()))
+@@ -262,7 +278,7 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+             supports_request_measurement=True,
+             supports_voice_design=True,
+         )
+-    elif engine == "sopro":
++    elif engine in {"chatterbox", "sopro"}:
+         fake.request_api_contract = lambda: SimpleNamespace(
+             supports_reference_voice=True,
+             supports_request_measurement=True,
+@@ -556,6 +572,23 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
+             ),
+         )
+         monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
++    elif engine == "chatterbox":
++        fake = _fake_package(PACKAGES[engine])
++        fake.discover_bundles = lambda **kwargs: (
++            SimpleNamespace(
++                id="chatterbox-demo",
++                ref="chatterbox:nano-v2",
++                display_name="Chatterbox Nano v2",
++                aliases=("nano",),
++                profiles=("cpu", "fp32"),
++                default_profile="cpu",
++                installed_profiles=("cpu",),
++                sample_rate=24000,
++                source_revision="revision-1",
++                runtime_available=True,
++            ),
++        )
++        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+     elif engine == "qwen3":
+         fake = _fake_package(PACKAGES[engine])
+         fake.discover_bundles = lambda **kwargs: (
+@@ -599,6 +632,7 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
+         "piper-demo",
+         "pocket-demo",
+         "sopro-demo",
++        "chatterbox-demo",
+         "demo-model",
+     }
+
+@@ -673,6 +707,34 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
+         fake.SoproOutputConfig = FakeOutputConfig
+         fake.VoiceLevelConfig = FakeVoiceLevelConfig
+         monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
++    if engine == "chatterbox":
++        fake = _fake_package(PACKAGES[engine])
++        fake.request_api_contract = lambda: SimpleNamespace(
++            supports_reference_voice=True,
++            supports_request_measurement=True,
++            supports_named_voices=False,
++        )
++        fake.discover_bundles = lambda **kwargs: (
++            SimpleNamespace(
++                id="demo-model",
++                ref="chatterbox:demo-model",
++                display_name="Chatterbox demo",
++                aliases=(),
++                profiles=("cpu", "fp32"),
++                default_profile="cpu",
++                installed_profiles=("cpu",),
++                sample_rate=24000,
++                source_revision="revision-1",
++                runtime_available=True,
++            ),
++        )
++
++        class FakeGenerationConfig:
++            def __init__(self, **values):
++                self.__dict__.update(values)
++
++        fake.GenerationConfig = FakeGenerationConfig
++        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+     if engine in {"inflect", "supertonic"}:
+         fake = _fake_package(PACKAGES[engine])
+
+@@ -704,7 +766,7 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
+         engine=engine,
+         target_id="demo-model",
+         language="en-US",
+-        voice=None if engine in {"sopro", "qwen3"} else "demo-voice",
++        voice=None if engine in {"sopro", "qwen3", "chatterbox"} else "demo-voice",
+         options=(
+             {
+                 "voice_source": {
+@@ -714,7 +776,7 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
+                 },
+                 **({"reference_text": "A reference."} if engine == "qwen3" else {}),
+             }
+-            if engine in {"sopro", "qwen3"}
++            if engine in {"sopro", "qwen3", "chatterbox"}
+             else {"speed": 2.0}
+             if engine == "piper"
+             else {}
+diff --git a/voicerender/engines/chatterboxsynth.py b/voicerender/engines/chatterboxsynth.py
+new file mode 100644
+index 0000000..a652716
+--- /dev/null
++++ b/voicerender/engines/chatterboxsynth.py
+@@ -0,0 +1,906 @@
++"""Lazy ChatterboxSynth adapter for VoiceRender's request-centric engine API."""
++
++from __future__ import annotations
++
++import importlib
++import json
++from collections.abc import Iterator, Mapping
++from contextlib import AbstractContextManager, contextmanager
++from dataclasses import replace
++from typing import Any
++
++from ..errors import (
++    EmptySpeechTextError,
++    EngineBackendError,
++    EngineError,
++    EngineSelectionError,
++    EngineSynthesisError,
++    EngineUnavailableError,
++    InvalidEngineLanguageError,
++    InvalidEngineModelError,
++    InvalidEngineOptionError,
++    InvalidEngineVoiceError,
++    UnsupportedSynthesisFeatureError,
++)
++from ..voice_sources import (
++    ResolvedReferenceAudio,
++    normalize_voice_source,
++    resolve_reference_audio,
++    validate_voice_source,
++    voice_source_identity,
++)
++from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
++from .base import (
++    EngineCapabilities,
++    EngineDiagnostic,
++    EngineSelection,
++    RenderedSpeech,
++    RenderProfileFragment,
++    RequestMeasure,
++    SpeechRequest,
++    distribution_version,
++    validate_rendered_speech,
++)
++from .catalog import CatalogRequest, SynthesisTarget
++from .metadata import language_base, normalize_locale_tag
++from .profiles import make_renderprofile_fragment
++from .selection import EngineRequest
++
++ENGINE_ID = "chatterbox"
++PACKAGE_NAME = "chatterboxsynth"
++SUPPORTED_LANGUAGES = frozenset({"en"})
++SAMPLE_RATE = 24_000
++CHATTERBOX_OPTION_NAMES = frozenset(
++    {
++        "voice_source",
++        "voice_catalog_path",
++        "voice_cache_dir",
++        "quality",
++        "provider",
++        "provider_options",
++        "session_options",
++        "cache_dir",
++        "max_new_tokens",
++        "repetition_penalty",
++    }
++)
++
++_REQUIRED_SYMBOLS = (
++    "ChatterboxRuntime",
++    "ChatterboxSynthError",
++    "SynthesisRequest",
++    "SynthesisResult",
++    "GenerationConfig",
++    "PreparedVoice",
++    "RequestMeasure",
++    "DiscoveredBundle",
++    "discover_bundles",
++    "runtime_identity",
++    "REQUEST_API_VERSION",
++    "request_api_contract",
++)
++_REQUIRED_METHODS = {
++    "ChatterboxRuntime": (
++        "from_installed",
++        "prepare_voice",
++        "measure_request",
++        "synthesize",
++        "close",
++    ),
++    "__module__": ("discover_bundles", "runtime_identity", "request_api_contract"),
++}
++
++
++def _module() -> Any:
++    """Import ChatterboxSynth only when a Chatterbox operation is requested."""
++    return importlib.import_module(PACKAGE_NAME)
++
++
++def _value(owner: Any, name: str, default: Any = None) -> Any:
++    if isinstance(owner, Mapping):
++        return owner.get(name, default)
++    return getattr(owner, name, default)
++
++
++def _string_tuple(value: Any) -> tuple[str, ...]:
++    if not isinstance(value, (list, tuple, set, frozenset)):
++        return ()
++    return tuple(
++        dict.fromkeys(item for item in value if isinstance(item, str) and item)
++    )
++
++
++def _target_from_bundle(bundle: Any) -> SynthesisTarget:
++    bundle_id = _value(bundle, "id")
++    if not isinstance(bundle_id, str) or not bundle_id:
++        raise InvalidEngineModelError(
++            "ChatterboxSynth discovery returned a bundle without an id.",
++            engine=ENGINE_ID,
++            code="chatterbox.catalog_invalid",
++        )
++
++    profiles = _string_tuple(_value(bundle, "profiles", ()))
++    aliases = _string_tuple(_value(bundle, "aliases", ()))
++    source_revision = _value(bundle, "source_revision")
++    ref = _value(bundle, "ref")
++    default_profile = _value(bundle, "default_profile")
++    installed_profiles = _string_tuple(_value(bundle, "installed_profiles", ()))
++    runtime_available = _value(bundle, "runtime_available", False) is True
++    raw_sample_rate = _value(bundle, "sample_rate")
++    sample_rate = (
++        raw_sample_rate
++        if isinstance(raw_sample_rate, int)
++        and not isinstance(raw_sample_rate, bool)
++        and raw_sample_rate > 0
++        else SAMPLE_RATE
++    )
++    metadata = {
++        "ref": ref,
++        "source_revision": source_revision,
++        "default_profile": default_profile,
++        "profiles": profiles,
++        "installed_profiles": installed_profiles,
++        "sample_rate": sample_rate,
++        "runtime_available": runtime_available,
++    }
++    return SynthesisTarget(
++        engine=ENGINE_ID,
++        id=bundle_id,
++        display_name=str(_value(bundle, "display_name") or bundle_id),
++        languages=("en",),
++        status="ready",
++        runtime_available=runtime_available,
++        sample_rate=SAMPLE_RATE,
++        qualities=profiles,
++        voices=(),
++        default_voice=None,
++        aliases=aliases,
++        capabilities=frozenset({"reference_voice", "request_measurement"}),
++        metadata=metadata,
++    )
++
++
++def _find_target(
++    targets: tuple[SynthesisTarget, ...], target_id: str
++) -> SynthesisTarget | None:
++    requested = target_id.casefold()
++    return next(
++        (
++            target
++            for target in targets
++            if target.id.casefold() == requested
++            or any(alias.casefold() == requested for alias in target.aliases)
++        ),
++        None,
++    )
++
++
++def _engine_language(value: str | None) -> str:
++    normalized = normalize_locale_tag(value or "en")
++    language = language_base(normalized)
++    if language not in SUPPORTED_LANGUAGES:
++        raise InvalidEngineLanguageError(
++            f"ChatterboxSynth supports English only, not {value!r}.",
++            engine=ENGINE_ID,
++            language=value,
++            code="chatterbox.language_incompatible",
++        )
++    return "en"
++
++
++def _error_context(
++    selection: EngineSelection,
++    error: Exception,
++    request: SpeechRequest | None,
++    *,
++    stage: str,
++) -> dict[str, Any]:
++    module = _module()
++    version = getattr(module, "__version__", None) or selection.metadata.get(
++        "engine_version"
++    )
++    return {
++        "engine": ENGINE_ID,
++        "engine_version": version if isinstance(version, str) else None,
++        "target_id": selection.target_id,
++        "language": request.language if request is not None else selection.language,
++        "request_id": request.id if request is not None else None,
++        "native_error_type": type(error).__name__,
++        "details": {"operation": stage, "native_error_type": type(error).__name__},
++    }
++
++
++def _translate_error(
++    error: Exception,
++    selection: EngineSelection,
++    request: SpeechRequest | None = None,
++    *,
++    stage: str,
++) -> EngineError:
++    if isinstance(error, EngineError):
++        return error
++    module = _module()
++    context = _error_context(selection, error, request, stage=stage)
++
++    def is_native(name: str) -> bool:
++        native_type = getattr(module, name, None)
++        return isinstance(native_type, type) and isinstance(error, native_type)
++
++    if is_native("OptionalDependencyError"):
++        return EngineUnavailableError(
++            f"ChatterboxSynth dependencies are unavailable: {error}",
++            **context,
++            code="chatterbox.optional_dependency_missing",
++        )
++    if is_native("ModelNotInstalledError"):
++        return EngineUnavailableError(
++            f"ChatterboxSynth target {selection.target_id!r} is not installed: {error}",
++            **context,
++            code="chatterbox.model_not_installed",
++        )
++    if is_native("ModelLoadError"):
++        if stage == "open":
++            return EngineUnavailableError(
++                f"Could not open installed ChatterboxSynth target {selection.target_id!r}: {error}",
++                **context,
++                code="chatterbox.model_unavailable",
++            )
++        return EngineBackendError(
++            f"ChatterboxSynth {stage} failed: {error}",
++            **context,
++            code=f"chatterbox.{stage}_failed",
++        )
++    if is_native("AudioPromptError") or is_native("IncompatibleVoiceError"):
++        return InvalidEngineVoiceError(
++            f"ChatterboxSynth rejected the selected reference voice: {error}",
++            **context,
++            code="chatterbox.reference_invalid",
++        )
++    if is_native("InvalidGenerationConfigError"):
++        return InvalidEngineOptionError(
++            f"ChatterboxSynth rejected generation options: {error}",
++            **context,
++            code="chatterbox.generation_config_invalid",
++        )
++    if is_native("EmptyTextError"):
++        return EmptySpeechTextError(str(error), **context, code="chatterbox.empty_text")
++    if is_native("RuntimeClosedError"):
++        return EngineBackendError(
++            f"ChatterboxSynth runtime is closed: {error}",
++            **context,
++            code="chatterbox.runtime_closed",
++        )
++    if is_native("SynthesisError"):
++        return EngineSynthesisError(
++            f"ChatterboxSynth synthesis failed: {error}",
++            **context,
++            code="chatterbox.synthesis_failed",
++        )
++    if stage == "open":
++        return EngineUnavailableError(
++            f"Could not open ChatterboxSynth target {selection.target_id!r}: {error}",
++            **context,
++            code="chatterbox.runtime_open_failed",
++        )
++    return EngineBackendError(
++        f"ChatterboxSynth {stage} failed: {error}",
++        **context,
++        code=f"chatterbox.{stage}_failed",
++    )
++
++
++def _voice_source(selection: EngineSelection) -> Mapping[str, Any]:
++    source = selection.options.get("voice_source")
++    if not isinstance(source, Mapping):
++        raise EngineSelectionError(
++            "ChatterboxSynth requires one pinned local or managed reference voice.",
++            engine=ENGINE_ID,
++            target_id=selection.target_id,
++            code="chatterbox.reference_required",
++        )
++    return source
++
++
++def _native_request(request: SpeechRequest, module: Any) -> Any:
++    return module.SynthesisRequest(
++        id=request.id,
++        text=request.text,
++        language=_engine_language(request.language),
++    )
++
++
++def _reject_unsupported(request: SpeechRequest, selection: EngineSelection) -> None:
++    if request.voice is not None:
++        raise InvalidEngineVoiceError(
++            "ChatterboxSynth does not support named voices.",
++            engine=ENGINE_ID,
++            target_id=selection.target_id,
++            voice=request.voice,
++            request_id=request.id,
++            code="chatterbox.named_voice_unsupported",
++        )
++    if request.speaker is not None:
++        raise UnsupportedSynthesisFeatureError(
++            "ChatterboxSynth does not support speaker selection.",
++            engine=ENGINE_ID,
++            target_id=selection.target_id,
++            speaker=request.speaker,
++            request_id=request.id,
++            code="chatterbox.speaker_unsupported",
++        )
++    if (
++        request.tokens
++        or request.pronunciation_overrides
++        or request.whole_request_phonemes
++    ):
++        raise UnsupportedSynthesisFeatureError(
++            "ChatterboxSynth does not support linguistic tokens, pronunciation overrides, or whole-request phonemes.",
++            engine=ENGINE_ID,
++            target_id=selection.target_id,
++            request_id=request.id,
++            code="chatterbox.feature_unsupported",
++        )
++
++
++class ChatterboxSynthEngineSession:
++    """One installed Chatterbox runtime with lazily prepared reference state."""
++
++    def __init__(self, runtime: Any, selection: EngineSelection, module: Any) -> None:
++        self._runtime = runtime
++        self._selection = selection
++        self._module = module
++        self._prepared_voices: dict[str, Any] = {}
++
++    def measure(self, request: SpeechRequest) -> RequestMeasure:
++        _reject_unsupported(request, self._selection)
++        try:
++            measured = self._runtime.measure_request(
++                _native_request(request, self._module)
++            )
++        except EngineError:
++            raise
++        except Exception as exc:
++            raise _translate_error(
++                exc, self._selection, request, stage="measure"
++            ) from exc
++
++        amount = _value(measured, "amount")
++        fits = _value(measured, "fits")
++        maximum = _value(measured, "maximum")
++        unit = _value(measured, "unit")
++        valid_maximum = maximum is None or (
++            isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
++        )
++        if (
++            isinstance(amount, bool)
++            or not isinstance(amount, int)
++            or amount < 0
++            or not isinstance(fits, bool)
++            or not valid_maximum
++            or (unit is not None and unit != "model_tokens")
++        ):
++            raise EngineBackendError(
++                "ChatterboxSynth returned an invalid request measurement.",
++                engine=ENGINE_ID,
++                engine_version=self._selection.metadata.get("engine_version"),
++                target_id=self._selection.target_id,
++                language=request.language,
++                request_id=request.id,
++                code="chatterbox.measurement_invalid",
++                details={
++                    "amount": amount,
++                    "fits": fits,
++                    "maximum": maximum,
++                    "unit": unit,
++                },
++            )
++        return RequestMeasure(
++            fits=fits,
++            amount=amount,
++            maximum=maximum,
++            unit="model_tokens",
++            source="chatterboxsynth.measure_request",
++            details={
++                "language": _engine_language(request.language),
++                "model": self._selection.target_id,
++                "quality": self._selection.options.get("quality"),
++            },
++        )
++
++    def _prepared_voice(self) -> Any:
++        source_value = _voice_source(self._selection)
++        try:
++            source = normalize_voice_source(source_value, allow_named=False)
++        except (EngineError, TypeError, ValueError) as exc:
++            raise InvalidEngineVoiceError(
++                str(exc),
++                engine=ENGINE_ID,
++                target_id=self._selection.target_id,
++                native_error_type=type(exc).__name__,
++                code="chatterbox.reference_invalid",
++            ) from exc
++        if source.kind not in {"reference", "managed_reference"}:
++            raise InvalidEngineVoiceError(
++                "ChatterboxSynth accepts local or managed reference audio only.",
++                engine=ENGINE_ID,
++                target_id=self._selection.target_id,
++                code="chatterbox.reference_required",
++            )
++        key = json.dumps(
++            dict(voice_source_identity(source)), sort_keys=True, separators=(",", ":")
++        )
++        if key in self._prepared_voices:
++            return self._prepared_voices[key]
++
++        options = self._selection.options
++        try:
++            resolved: ResolvedReferenceAudio = resolve_reference_audio(
++                source,
++                cache_dir=options.get("voice_cache_dir"),
++                offline=self._selection.offline,
++                catalog_paths=options.get("voice_catalog_path"),
++            )
++            prepared = self._runtime.prepare_voice(resolved.path)
++        except EngineError:
++            raise
++        except Exception as exc:
++            raise _translate_error(exc, self._selection, stage="prepare") from exc
++        self._prepared_voices[key] = prepared
++        return prepared
++
++    def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
++        _reject_unsupported(request, self._selection)
++        options = self._selection.options
++        try:
++            config = self._module.GenerationConfig(
++                max_new_tokens=options.get("max_new_tokens"),
++                repetition_penalty=options.get("repetition_penalty"),
++            )
++            result = self._runtime.synthesize(
++                request.text,
++                voice=self._prepared_voice(),
++                config=config,
++            )
++        except EngineError:
++            raise
++        except Exception as exc:
++            raise _translate_error(
++                exc, self._selection, request, stage="synthesis"
++            ) from exc
++
++        source_identity = dict(voice_source_identity(_voice_source(self._selection)))
++        rendered = RenderedSpeech(
++            id=request.id,
++            audio=_value(result, "audio"),
++            sample_rate=_value(result, "sample_rate"),
++            metadata={
++                "model": _value(result, "model"),
++                "profile": _value(result, "profile"),
++                "generated_tokens": _value(result, "generated_tokens"),
++                "stopped_on_eos": _value(result, "stopped_on_eos"),
++                "voice_source_identity": source_identity,
++            },
++        )
++        return validate_rendered_speech(
++            request,
++            rendered,
++            engine=ENGINE_ID,
++            engine_version=self._selection.metadata.get("engine_version"),
++            target_id=self._selection.target_id,
++        )
++
++
++class ChatterboxSynthEngineAdapter:
++    """ChatterboxSynth discovery, profile selection, and request synthesis."""
++
++    id = ENGINE_ID
++    package_name = PACKAGE_NAME
++
++    def version(self) -> str | None:
++        return distribution_version(self.package_name)
++
++    def probe_api(self) -> EngineApiProbe:
++        probe = probe_public_api(
++            engine=self.id,
++            package=self.package_name,
++            required_symbols=_REQUIRED_SYMBOLS,
++            required_methods=_REQUIRED_METHODS,
++            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
++            require_explicit_contract=True,
++        )
++        if not probe.compatible:
++            return probe
++        try:
++            contract = _module().request_api_contract()
++            required = {
++                "supports_reference_voice": True,
++                "supports_request_measurement": True,
++                "supports_named_voices": False,
++            }
++            mismatches = {
++                name: {"expected": expected, "actual": _value(contract, name)}
++                for name, expected in required.items()
++                if _value(contract, name) is not expected
++            }
++        except Exception as exc:  # noqa: BLE001 - Contract failures are probe results.
++            return replace(
++                probe,
++                compatible=False,
++                status="api_probe_failed",
++                failed_stage="request_capabilities",
++                failed_symbol="request_api_contract",
++                error_type=type(exc).__name__,
++                error_message=str(exc),
++            )
++        if mismatches:
++            return replace(
++                probe,
++                compatible=False,
++                status="api_incompatible",
++                failed_stage="request_capabilities",
++                failed_symbol="request_api_contract",
++                details={**dict(probe.details), "capability_mismatches": mismatches},
++            )
++        return probe
++
++    def compatible_api(self) -> bool:
++        return self.probe_api().compatible
++
++    def capabilities(self) -> EngineCapabilities:
++        return EngineCapabilities(
++            id=self.id,
++            voice_binding_namespace=self.id,
++            voice_binding_scope="target",
++            option_names=CHATTERBOX_OPTION_NAMES,
++            supports_named_voices=False,
++            supports_reference_voice=True,
++            supports_speakers=False,
++            supports_pronunciation_overrides=False,
++            supports_linguistic_tokens=False,
++            supports_whole_request_phonemes=False,
++            supports_request_measurement=True,
++        )
++
++    def renderprofile_fragment(
++        self, selection: EngineSelection
++    ) -> RenderProfileFragment:
++        return make_renderprofile_fragment(
++            self,
++            selection,
++            frontend="chatterboxsynth",
++            pronunciation="unsupported",
++        )
++
++    def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:
++        language = _engine_language(request.language) if request.language else None
++        module = _module()
++        bundles = module.discover_bundles(
++            offline=request.offline,
++            refresh=request.refresh,
++        )
++        targets = tuple(_target_from_bundle(bundle) for bundle in bundles)
++        if language is None:
++            return targets
++        return tuple(target for target in targets if language in target.languages)
++
++    def resolve(
++        self, request: EngineRequest
++    ) -> tuple[EngineSelection, tuple[Any, ...]]:
++        target_id = request.target_id
++        if not isinstance(target_id, str) or not target_id.strip():
++            raise EngineSelectionError(
++                "A ChatterboxSynth target id is required.",
++                engine=self.id,
++                code="chatterbox.target_not_found",
++            )
++
++        options = dict(request.options)
++        engine_options = dict(request.engine_options)
++        unknown = sorted(set(engine_options) - CHATTERBOX_OPTION_NAMES)
++        if unknown:
++            raise EngineSelectionError(
++                f"Unsupported ChatterboxSynth option(s): {', '.join(unknown)}.",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.invalid_option",
++                details={"options": unknown},
++            )
++        options.update(engine_options)
++
++        if request.voice is not None:
++            raise EngineSelectionError(
++                "ChatterboxSynth does not support named voices; provide voice_source.",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.named_voice_unsupported",
++            )
++        if request.speaker is not None:
++            raise EngineSelectionError(
++                "ChatterboxSynth does not support speaker selection.",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.speaker_unsupported",
++            )
++
++        source_value = options.get("voice_source")
++        if not isinstance(source_value, Mapping):
++            raise EngineSelectionError(
++                "ChatterboxSynth requires a pinned local or managed reference voice.",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.reference_required",
++            )
++        try:
++            source = normalize_voice_source(source_value, allow_named=False)
++        except (EngineError, TypeError, ValueError) as exc:
++            raise EngineSelectionError(
++                str(exc),
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.reference_required",
++                details={"native_error_type": type(exc).__name__},
++            ) from exc
++        if source.kind not in {"reference", "managed_reference"}:
++            raise EngineSelectionError(
++                "ChatterboxSynth accepts local or managed reference audio only.",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.reference_required",
++            )
++
++        language = normalize_locale_tag(request.language or "en-US")
++        try:
++            native_language = _engine_language(language)
++        except InvalidEngineLanguageError as exc:
++            raise EngineSelectionError(
++                str(exc),
++                engine=self.id,
++                target_id=target_id,
++                language=language,
++                code="chatterbox.language_incompatible",
++            ) from exc
++
++        try:
++            targets = self.discover(
++                CatalogRequest(
++                    engine=self.id,
++                    offline=request.offline,
++                    refresh=request.refresh,
++                )
++            )
++        except Exception as exc:
++            if isinstance(exc, EngineSelectionError):
++                raise
++            raise EngineSelectionError(
++                f"ChatterboxSynth target catalog is unavailable: {exc}",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.target_catalog_unavailable",
++                details={"native_error_type": type(exc).__name__},
++            ) from exc
++        target = _find_target(targets, target_id)
++        if target is None:
++            raise EngineSelectionError(
++                f"ChatterboxSynth target {target_id!r} was not found.",
++                engine=self.id,
++                target_id=target_id,
++                code="chatterbox.target_not_found",
++            )
++
++        quality = options.get("quality", target.metadata.get("default_profile"))
++        if not isinstance(quality, str) or quality not in target.qualities:
++            raise EngineSelectionError(
++                f"ChatterboxSynth target {target.id!r} does not support quality {quality!r}.",
++                engine=self.id,
++                target_id=target.id,
++                code="chatterbox.quality_incompatible",
++                details={"available": target.qualities},
++            )
++        provider = options.get("provider", "cpu")
++        if not isinstance(provider, str) or not provider.strip():
++            raise EngineSelectionError(
++                "ChatterboxSynth provider must be a non-empty string.",
++                engine=self.id,
++                target_id=target.id,
++                code="chatterbox.invalid_option",
++            )
++
++        module = _module()
++        try:
++            generation = module.GenerationConfig(
++                max_new_tokens=options.get("max_new_tokens"),
++                repetition_penalty=options.get("repetition_penalty"),
++            )
++        except Exception as exc:
++            synth_error = getattr(module, "ChatterboxSynthError", ())
++            if isinstance(synth_error, type) and isinstance(exc, synth_error):
++                raise EngineSelectionError(
++                    f"Invalid ChatterboxSynth generation options: {exc}",
++                    engine=self.id,
++                    target_id=target.id,
++                    code="chatterbox.generation_config_invalid",
++                    details={"native_error_type": type(exc).__name__},
++                ) from exc
++            if isinstance(exc, (TypeError, ValueError)):
++                raise EngineSelectionError(
++                    f"Invalid ChatterboxSynth generation options: {exc}",
++                    engine=self.id,
++                    target_id=target.id,
++                    code="chatterbox.generation_config_invalid",
++                    details={"native_error_type": type(exc).__name__},
++                ) from exc
++            raise
++
++        selected_options: dict[str, Any] = {
++            "voice_source": source.as_mapping(),
++            "quality": quality,
++            "provider": provider.strip(),
++            "max_new_tokens": generation.max_new_tokens,
++            "repetition_penalty": generation.repetition_penalty,
++        }
++        for name in (
++            "voice_catalog_path",
++            "voice_cache_dir",
++            "provider_options",
++            "session_options",
++            "cache_dir",
++        ):
++            if options.get(name) is not None:
++                selected_options[name] = options[name]
++
++        metadata = {
++            "ref": target.metadata.get("ref"),
++            "source_revision": target.metadata.get("source_revision"),
++            "default_profile": target.metadata.get("default_profile"),
++            "profiles": target.metadata.get("profiles", ()),
++            "installed_profiles": target.metadata.get("installed_profiles", ()),
++            "sample_rate": target.metadata.get("sample_rate", SAMPLE_RATE),
++            "runtime_available": target.runtime_available,
++            "engine_version": getattr(module, "__version__", self.version()),
++            "native_language": native_language,
++        }
++        return (
++            EngineSelection(
++                engine=self.id,
++                target_id=target.id,
++                language=language,
++                options=selected_options,
++                metadata=metadata,
++                offline=request.offline,
++                refresh=request.refresh,
++            ),
++            (),
++        )
++
++    def validate_selection(
++        self, selection: EngineSelection
++    ) -> tuple[EngineDiagnostic, ...]:
++        diagnostics: list[EngineDiagnostic] = []
++        try:
++            _engine_language(selection.language)
++        except EngineError as exc:
++            diagnostics.append(
++                EngineDiagnostic(
++                    code=getattr(exc, "code", "chatterbox.language_incompatible"),
++                    severity="error",
++                    message=str(exc),
++                    field="render.target.language",
++                )
++            )
++        source = selection.options.get("voice_source")
++        if not isinstance(source, Mapping):
++            diagnostics.append(
++                EngineDiagnostic(
++                    code="chatterbox.reference_required",
++                    severity="error",
++                    message="ChatterboxSynth requires pinned local or managed reference audio.",
++                    field="render.target.voice",
++                )
++            )
++        else:
++            try:
++                normalized = normalize_voice_source(source, allow_named=False)
++            except (EngineError, TypeError, ValueError) as exc:
++                diagnostics.append(
++                    EngineDiagnostic(
++                        code="chatterbox.reference_required",
++                        severity="error",
++                        message=str(exc),
++                        field="render.target.voice",
++                    )
++                )
++            else:
++                if normalized.kind not in {"reference", "managed_reference"}:
++                    diagnostics.append(
++                        EngineDiagnostic(
++                            code="chatterbox.reference_required",
++                            severity="error",
++                            message="ChatterboxSynth accepts reference audio only.",
++                            field="render.target.voice",
++                        )
++                    )
++                else:
++                    diagnostics.extend(
++                        validate_voice_source(
++                            normalized,
++                            offline=selection.offline,
++                            catalog_paths=selection.options.get("voice_catalog_path"),
++                        )
++                    )
++        return tuple(diagnostics)
++
++    def canonical_synthesis_identity(
++        self, selection: EngineSelection
++    ) -> Mapping[str, Any]:
++        module = _module()
++        options = selection.options
++        source = _voice_source(selection)
++        runtime_identity = module.runtime_identity()
++        identity: dict[str, Any] = {
++            "engine": self.id,
++            "engine_version": getattr(module, "__version__", self.version()),
++            "runtime_identity": (
++                dict(runtime_identity) if isinstance(runtime_identity, Mapping) else {}
++            ),
++            "target_id": selection.target_id,
++            "model_revision": selection.metadata.get("source_revision"),
++            "quality": options.get("quality"),
++            "provider": options.get("provider"),
++            "language": _engine_language(selection.language),
++            "voice": dict(voice_source_identity(source)),
++            "generation": {
++                "max_new_tokens": options.get("max_new_tokens"),
++                "repetition_penalty": options.get("repetition_penalty"),
++            },
++        }
++        for name in ("provider_options", "session_options"):
++            if options.get(name) is not None:
++                identity[name] = options[name]
++        return identity
++
++    def target_metadata(self, selection: EngineSelection) -> Mapping[str, Any]:
++        return dict(selection.metadata)
++
++    def open(
++        self, selection: EngineSelection
++    ) -> AbstractContextManager[ChatterboxSynthEngineSession]:
++        module = _module()
++        options = selection.options
++        bundle_ref = selection.metadata.get("ref") or selection.target_id
++        try:
++            runtime = module.ChatterboxRuntime.from_installed(
++                bundle_ref,
++                quality=options.get("quality"),
++                provider=options.get("provider", "cpu"),
++                provider_options=options.get("provider_options"),
++                session_options=options.get("session_options"),
++                cache_dir=options.get("cache_dir"),
++            )
++        except EngineError:
++            raise
++        except Exception as exc:
++            raise _translate_error(exc, selection, stage="open") from exc
++
++        @contextmanager
++        def session() -> Iterator[ChatterboxSynthEngineSession]:
++            try:
++                yield ChatterboxSynthEngineSession(runtime, selection, module)
++            finally:
++                try:
++                    runtime.close()
++                except EngineError:
++                    raise
++                except Exception as exc:
++                    raise _translate_error(exc, selection, stage="close") from exc
++
++        return session()
++
++
++__all__ = [
++    "CHATTERBOX_OPTION_NAMES",
++    "ENGINE_ID",
++    "PACKAGE_NAME",
++    "SUPPORTED_LANGUAGES",
++    "ChatterboxSynthEngineAdapter",
++    "ChatterboxSynthEngineSession",
++]
+diff --git a/voicerender/engines/registry.py b/voicerender/engines/registry.py
+index 7633f03..15de6b6 100644
+--- a/voicerender/engines/registry.py
++++ b/voicerender/engines/registry.py
+@@ -40,6 +40,12 @@ class BuiltinEngineSpec:
+
+
+ _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
++    "chatterbox": BuiltinEngineSpec(
++        "chatterboxsynth",
++        "voicerender.engines.chatterboxsynth",
++        "ChatterboxSynthEngineAdapter",
++        True,
++    ),
+     "inflect": BuiltinEngineSpec(
+         "inflectsynth", "voicerender.engines.inflectsynth", "InflectSynthEngineAdapter"
+     ),
+@@ -79,6 +85,7 @@ def normalize_engine_id(engine: str) -> str:
+     """Normalize a public engine identifier without importing its SDK."""
+     normalized = engine.strip().casefold()
+     aliases = {
++        "chatterboxsynth": "chatterbox",
+         "pykokoro": "kokoro",
+         "pipersynth": "piper",
+         "pocketsynth": "pocket",

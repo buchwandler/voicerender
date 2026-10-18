@@ -1,0 +1,145 @@
+ pyproject.toml                     |  2 +-
+ tests/test_kittensynth_engine.py   | 30 ++++++++++++++++++++++++++++++
+ tests/test_preflight.py            | 37 +++++++++++++++++++++++++++++++++++++
+ voicerender/engines/kittensynth.py |  5 +++++
+ 4 files changed, 73 insertions(+), 1 deletion(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 5aa5811..17b50ff 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -21,7 +21,7 @@ dependencies = [
+
+ [project.optional-dependencies]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+-kitten = ["kittensynth[cpu]>=0.1.4,<0.2"]
++kitten = ["kittensynth[cpu]>=0.1.6,<0.2"]
+ kokoro = ["pykokoro>=0.10.5,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+diff --git a/tests/test_kittensynth_engine.py b/tests/test_kittensynth_engine.py
+index 8c437ec..9fb2279 100644
+--- a/tests/test_kittensynth_engine.py
++++ b/tests/test_kittensynth_engine.py
+@@ -301,6 +301,36 @@ def test_synthesis_too_long_error_translates_with_replan_details(
+     assert outcome.measurement.maximum == 512
+
+
++def test_managed_dependency_error_is_a_non_replanable_runtime_reject(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    native_error_type = type("ManagedModelDependencyError", (Exception,), {})
++    module.ManagedModelDependencyError = native_error_type  # type: ignore[attr-defined]
++    native_error = native_error_type("managed download transport unavailable")
++
++    class FailingKittenVoice:
++        @classmethod
++        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
++            raise native_error
++
++    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    selection = EngineSelection(
++        engine="kitten",
++        target_id="nano-0.8-int8",
++        language="en-US",
++        voice="Jasper",
++    )
++
++    with pytest.raises(EngineBackendError) as caught:
++        KittenSynthEngineAdapter().open(selection)
++
++    assert caught.value.code == "kitten.runtime_dependency_error"
++    assert caught.value.native_error_type == "ManagedModelDependencyError"
++    assert classify_measurement(caught.value).disposition is PreflightDisposition.REJECT
++
++
+ def _synthesis_result(audio: Any) -> SimpleNamespace:
+     return SimpleNamespace(
+         audio=audio,
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 3303c9e..1fde38b 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -281,6 +281,7 @@ def _install_fake_kittensynth(
+     amount: int,
+     maximum: int | None,
+     fits: bool | None,
++    open_error: Exception | None = None,
+ ) -> list[tuple[str, Any]]:
+     events: list[tuple[str, Any]] = []
+     model = SimpleNamespace(
+@@ -310,6 +311,9 @@ def _install_fake_kittensynth(
+         @classmethod
+         def from_pretrained(cls, target_id: str, **kwargs: Any) -> FakeVoice:
+             assert target_id == "kitten-test-model"
++            if open_error is not None:
++                events.append(("open", target_id))
++                raise open_error
+             return cls()
+
+         def measure_prepared(self, text: str) -> Any:
+@@ -341,6 +345,8 @@ def _install_fake_kittensynth(
+         "measurement_metric": "model_tokens",
+     }
+     module.KittenVoice = FakeVoice
++    if open_error is not None:
++        module.ManagedModelDependencyError = type(open_error)  # type: ignore[attr-defined]
+     module.SynthesisMeasure = object
+     module.SynthesisConfig = object
+     module.SynthesisResult = object
+@@ -521,6 +527,37 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+     assert events[0][1] == "Kitten preflight"
+
+
++def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    native_error_type = type("ManagedModelDependencyError", (Exception,), {})
++    native_error = native_error_type("managed download transport unavailable")
++    events = _install_fake_kittensynth(
++        monkeypatch,
++        amount=180,
++        maximum=256,
++        fits=True,
++        open_error=native_error,
++    )
++    binding = {
++        "renderer": "kitten",
++        "target_id": "kitten-test-model",
++        "voice": "Jasper",
++    }
++    plan = _plan(
++        ("Kitten preflight dependency failure", True, "sentence"), binding=binding
++    )
++
++    report = preflight_render_plan(plan, tmp_path / "kitten-dependency-error.toml")
++
++    check = report.checks[0]
++    assert report.status == "reject"
++    assert check.status == "error"
++    assert check.source == "kitten.runtime_dependency_error"
++    assert report.replan == ()
++    assert [event[0] for event in events] == ["open"]
++
++
+ def test_kitten_preflight_defers_emphasis_to_composition(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index 9383225..cb87622 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -171,6 +171,11 @@ def _translate_kitten_error(
+         ("InvalidSpeedError", InvalidEngineOptionError, "kitten.invalid_speed"),
+         ("InvalidVoiceError", InvalidEngineVoiceError, "kitten.voice_unavailable"),
+         ("UnsupportedModelError", InvalidEngineModelError, "kitten.model_unsupported"),
++        (
++            "ManagedModelDependencyError",
++            EngineBackendError,
++            "kitten.runtime_dependency_error",
++        ),
+         ("OnnxVoiceContractError", EngineBackendError, "kitten.runtime_contract_error"),
+     )
+     error_type: type[EngineError] = EngineBackendError

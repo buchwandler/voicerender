@@ -1,0 +1,45 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 73,
+      "deletions": 1,
+      "patch_file": "67e4d8e.patch",
+      "patch_sha256": "00f6d05eb9614eb5eafc42c0b40fab4558d782b4fc683e788f2b2537800ddb1d",
+      "paths": [
+        "pyproject.toml",
+        "tests/test_kittensynth_engine.py",
+        "tests/test_preflight.py",
+        "voicerender/engines/kittensynth.py"
+      ],
+      "sha": "67e4d8ec44e04f96d7041afa8c87c762bec87b6f",
+      "short_sha": "67e4d8e",
+      "source_ref": "git:67e4d8ec44e04f96d7041afa8c87c762bec87b6f"
+    },
+    {
+      "additions": 1672,
+      "deletions": 7,
+      "patch_file": "b17f1a9.patch",
+      "patch_sha256": "78882070b14c681663af13eeb44d0e1d63ad3429bd809f27c86050b9a5e75986",
+      "paths": [
+        "README.md",
+        "pyproject.toml",
+        "tests/test_chatterboxsynth_engine.py",
+        "tests/test_engine_registry.py",
+        "voicerender/engines/chatterboxsynth.py",
+        "voicerender/engines/registry.py"
+      ],
+      "sha": "b17f1a9010849b0e6aec846f222e12a86f04ad79",
+      "short_sha": "b17f1a9",
+      "source_ref": "git:b17f1a9010849b0e6aec846f222e12a86f04ad79"
+    }
+  ],
+  "git_base_ref": "aecc0461fdecf55f60f20991e796efd1c240679a",
+  "git_base_sha": "aecc0461fdecf55f60f20991e796efd1c240679a",
+  "git_head_ref": "b17f1a9010849b0e6aec846f222e12a86f04ad79",
+  "git_head_sha": "b17f1a9010849b0e6aec846f222e12a86f04ad79",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.2.3",
+  "schema_version": 1
+}

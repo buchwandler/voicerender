@@ -1,0 +1,74 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.2.3
+git_base_ref: v0.2.2
+git_base_sha: aecc0461fdecf55f60f20991e796efd1c240679a
+git_head_ref: HEAD
+git_head_sha: b17f1a9010849b0e6aec846f222e12a86f04ad79
+git_range: aecc0461fdecf55f60f20991e796efd1c240679a..b17f1a9010849b0e6aec846f222e12a86f04ad79
+commit_count: 2
+rows:
+  - sha: 67e4d8ec44e04f96d7041afa8c87c762bec87b6f
+    source_ref: git:67e4d8ec44e04f96d7041afa8c87c762bec87b6f
+    short_sha: 67e4d8e
+    changed_paths:
+      - pyproject.toml
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - voicerender/engines/kittensynth.py
+    stats:
+      files_changed: 4
+      insertions: 73
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - pyproject.toml
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - voicerender/engines/kittensynth.py
+    observed_behavior:
+      Preflight now classifies managed model dependency failures as
+      non-replanable runtime rejects, preserving native error context instead of treating
+      the failure as a text-capacity issue; the KittenSynth optional dependency floor
+      is raised to 0.1.6.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: raise kittensynth floor"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: b17f1a9010849b0e6aec846f222e12a86f04ad79
+    source_ref: git:b17f1a9010849b0e6aec846f222e12a86f04ad79
+    short_sha: b17f1a9
+    changed_paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_chatterboxsynth_engine.py
+      - tests/test_engine_registry.py
+      - voicerender/engines/chatterboxsynth.py
+      - voicerender/engines/registry.py
+    stats:
+      files_changed: 6
+      insertions: 1672
+      deletions: 7
+    inspected: true
+    inspected_paths:
+      - README.md
+      - pyproject.toml
+      - tests/test_chatterboxsynth_engine.py
+      - tests/test_engine_registry.py
+      - voicerender/engines/chatterboxsynth.py
+      - voicerender/engines/registry.py
+    observed_behavior:
+      Adds optional English-only ChatterboxSynth rendering with installed-model
+      discovery, pinned local or managed reference voices, exact preflight measurement,
+      and lazy voice preparation.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add chatterbox"
+    target_entry_id: entry-0002
+    notes: ""

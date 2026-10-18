@@ -197,6 +197,7 @@ jobs:
                   ):
                       base_requirements.add(requirement.name.lower())
               engine_sdks = {
+                  "chatterboxsynth",
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
                   "pocketsynth", "soprosynth", "supertonicsynth",
                   "qwen3synth",
@@ -235,6 +236,7 @@ jobs:
           assert resources.files("voicerender").joinpath("book_layout.py").is_file()
           assert RenderPlanSet is not None
           assert {item["id"] for item in list_engines()} == {
+              "chatterbox",
               "inflect",
               "kitten",
               "kokoro",
@@ -246,6 +248,7 @@ jobs:
           }
           assert not any(
               name.split(".", 1)[0] in {
+                  "chatterboxsynth",
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
                   "pocketsynth", "soprosynth", "supertonicsynth", "utterplan",
                   "qwen3synth",
