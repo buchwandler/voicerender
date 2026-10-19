@@ -405,6 +405,18 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
 - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
 
+## SSMDDoc document workspaces
+
+For one editable SSMDDoc, compile and project explicitly with UtterPlan, then render the exact fingerprinted variant with VoiceRender:
+
+```bash
+utterplan compile-document story.ssmdoc
+utterplan render-document story.ssmdoc --profile narration.renderprofile.toml
+voicerender render-document story.ssmdoc --variant narration--<profile-fingerprint>
+```
+
+The document output is stored under `.readio/voicerender/<variant>/document-0001/`. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
+
 ## Tests
 
 ```bash

@@ -19,6 +19,41 @@ from .renderplan_render import (
 from .storage import verified_wav
 
 
+def estimate_render_document(
+    workspace: str | Path,
+    *,
+    variant: str,
+    speech: str = "all",
+    renderplan_root: str | Path | None = None,
+    output_root: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    force: bool = False,
+    reset_stale_output: bool = False,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+) -> RenderEstimate:
+    """Estimate one document's selected RenderPlan work without side effects."""
+    from .document import _resolve_document_request
+
+    request = _resolve_document_request(
+        workspace,
+        variant=variant,
+        speech=speech,
+        renderplan_root=renderplan_root,
+        output_root=output_root,
+        cache_dir=cache_dir,
+        force=force,
+        reset_stale_output=reset_stale_output,
+        emphasis_policy=emphasis_policy,
+    )
+    return estimate_renderplan(
+        request.plan,
+        output_dir=request.output_dir,
+        speech_numbers=request.speech_numbers,
+        force=force,
+        reset_stale_output=reset_stale_output,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RenderEstimate:
     """Workload and verified-output reuse counts without a latency prediction."""
@@ -176,4 +211,9 @@ def _estimate(selected_count: int, reusable_count: int) -> RenderEstimate:
     )
 
 
-__all__ = ["RenderEstimate", "estimate_render_book", "estimate_renderplan"]
+__all__ = [
+    "RenderEstimate",
+    "estimate_render_book",
+    "estimate_render_document",
+    "estimate_renderplan",
+]

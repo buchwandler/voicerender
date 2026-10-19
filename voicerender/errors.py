@@ -5,6 +5,17 @@ class VoiceRenderError(Exception):
     """Base error for VoiceRender."""
 
 
+class DocumentRenderError(VoiceRenderError, ValueError):
+    """A document workspace or document-render request is invalid."""
+
+    code = "workspace.invalid"
+
+    def __init__(self, message: str, *, code: str = "workspace.invalid") -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 class RenderEventCallbackError(VoiceRenderError):
     """A synchronous render-event callback raised an exception."""
 

@@ -18,6 +18,7 @@ from .book import (
     ChapterRenderOutcome,
     render_book,
 )
+from .document import DocumentRenderRequest, DocumentRenderResult, render_document
 from .engines.api_probe import EngineApiProbe
 from .engines.assets import (
     EngineAssetManager,
@@ -57,6 +58,7 @@ from .engines.registry import (
 from .engines.selection import EngineRequest
 from .errors import (
     ArtifactError,
+    DocumentRenderError,
     EngineApiIncompatibleError,
     EngineCapacityError,
     EngineError,
@@ -70,7 +72,12 @@ from .errors import (
     UnsupportedSynthesisFeatureError,
     VoiceRenderError,
 )
-from .estimates import RenderEstimate, estimate_render_book, estimate_renderplan
+from .estimates import (
+    RenderEstimate,
+    estimate_render_book,
+    estimate_render_document,
+    estimate_renderplan,
+)
 from .events import (
     RenderEvent,
     RenderEventCallback,
@@ -148,6 +155,9 @@ __all__ = [
     "CatalogRequest",
     "CatalogResult",
     "ChapterRenderOutcome",
+    "DocumentRenderError",
+    "DocumentRenderRequest",
+    "DocumentRenderResult",
     "EngineAdapter",
     "EngineApiIncompatibleError",
     "EngineApiProbe",
@@ -221,6 +231,7 @@ __all__ = [
     "engine_options",
     "engine_status",
     "estimate_render_book",
+    "estimate_render_document",
     "estimate_renderplan",
     "inspect_voice",
     "install_model",
@@ -243,6 +254,7 @@ __all__ = [
     "remove_profile_role",
     "render",
     "render_book",
+    "render_document",
     "render_plan",
     "render_renderplan",
     "resolve_prepared_voice",

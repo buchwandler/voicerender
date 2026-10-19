@@ -22,6 +22,8 @@ from . import (
     __version__,
     render_book,
 )
+from .document import _resolve_document_request
+from .document import render_document as _render_document
 from .engines.options import engine_option_to_dict, engine_options
 from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
 from .engines.registry import (
@@ -458,6 +460,26 @@ def build_parser() -> argparse.ArgumentParser:
     book_render.add_argument("--json", action="store_true")
     _add_progress_option(book_render)
 
+    document_render = commands.add_parser(
+        "render-document", help="Render one SSMDDoc workspace RenderPlan"
+    )
+    document_render.add_argument(
+        "document", type=Path, help="SSMDDoc workspace or canonical document.ssmd.md"
+    )
+    document_render.add_argument(
+        "--variant", required=True, help="exact RenderPlan variant directory name"
+    )
+    document_render.add_argument("--speech", default="all", metavar="SELECTOR")
+    document_render.add_argument("--renderplan-root", type=Path)
+    document_render.add_argument("--output-root", type=Path)
+    document_render.add_argument("--cache-dir", type=Path)
+    document_render.add_argument("--force", action="store_true")
+    document_render.add_argument("--reset-stale", action="store_true")
+    document_render.add_argument(
+        "--emphasis-policy", choices=("reject", "defer-to-compose"), default="reject"
+    )
+    document_render.add_argument("--json", action="store_true")
+    _add_progress_option(document_render)
     inspect = commands.add_parser(
         "inspect-manifest", help="Verify a render manifest and its WAVs"
     )
@@ -1785,6 +1807,71 @@ def main(argv: list[str] | None = None) -> int:
                 fresh = render_result.fresh_preflight
                 return 2 if fresh is not None and fresh.status == "replan" else 1
             return 0
+
+        if args.command == "render-document":
+            progress = _progress_callback(args)
+            try:
+                request = _resolve_document_request(
+                    args.document,
+                    variant=args.variant,
+                    speech=args.speech,
+                    renderplan_root=args.renderplan_root,
+                    output_root=args.output_root,
+                    cache_dir=args.cache_dir,
+                    force=args.force,
+                    reset_stale_output=args.reset_stale,
+                    emphasis_policy=args.emphasis_policy,
+                )
+                print("VoiceRender document render", file=sys.stderr)
+                print(f"  workspace:   {request.workspace}", file=sys.stderr)
+                print(f"  document:    {request.document_id}", file=sys.stderr)
+                print(f"  variant:     {request.variant_name}", file=sys.stderr)
+                print(f"  profile-id:  {request.render_profile_id}", file=sys.stderr)
+                print(f"  renderplan:  {request.renderplan_path}", file=sys.stderr)
+                print(f"  output:      {request.output_dir}", file=sys.stderr)
+                print(f"  cache:       {request.cache_dir}", file=sys.stderr)
+                print(f"  speech:      {request.speech_selector}", file=sys.stderr)
+                result = _render_document(
+                    args.document,
+                    variant=args.variant,
+                    speech=args.speech,
+                    renderplan_root=args.renderplan_root,
+                    output_root=args.output_root,
+                    cache_dir=args.cache_dir,
+                    force=args.force,
+                    reset_stale_output=args.reset_stale,
+                    emphasis_policy=args.emphasis_policy,
+                    on_event=progress,
+                )
+            except (OSError, ValueError, TypeError) as exc:
+                payload = {
+                    "error": str(exc),
+                    "code": getattr(exc, "code", "workspace.invalid"),
+                    "exit_code": 2,
+                }
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    print(f"error: {exc}", file=sys.stderr)
+                return 2
+            finally:
+                if progress is not None:
+                    progress.finish()
+            if args.json:
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print("VoiceRender document summary", file=sys.stderr)
+                print(f"  status:   {result.status}", file=sys.stderr)
+                print(f"  planned:  {result.planned_speech}", file=sys.stderr)
+                print(f"  selected: {result.selected_speech}", file=sys.stderr)
+                print(f"  rendered: {result.rendered}", file=sys.stderr)
+                print(f"  reused:   {result.reused}", file=sys.stderr)
+                print(f"  report:   {result.report_path}", file=sys.stderr)
+                if result.preflight_report:
+                    print(f"  preflight: {result.preflight_report}", file=sys.stderr)
+                if result.error_code:
+                    print(f"FAILED: {result.error_code}", file=sys.stderr)
+            return result.exit_code
 
         if args.command == "render-book":
             progress = _progress_callback(args)
