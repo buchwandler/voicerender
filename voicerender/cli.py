@@ -106,6 +106,35 @@ def _add_progress_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("profile", type=Path)
+    parser.add_argument("role")
+    parser.add_argument("--engine", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--language", required=True)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--voice")
+    source.add_argument("--voicefolio-ref")
+    source.add_argument("--reference-wav", type=Path)
+    source.add_argument("--prepared-voice", type=Path)
+    source.add_argument("--voice-source", type=Path)
+    parser.add_argument("--speaker")
+    parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
+    )
+    parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--make-default", action="store_true")
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("-o", "--output", type=Path)
+    destination.add_argument("--in-place", action="store_true")
+    parser.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="voicerender",
@@ -189,10 +218,17 @@ def build_parser() -> argparse.ArgumentParser:
     voice_inspect.add_argument("--lang")
     voice_inspect.add_argument("--json", action="store_true")
 
-    profiles = commands.add_parser("profile", help="Create and validate RenderProfiles")
+    profiles = commands.add_parser(
+        "profile", help="Create, bind, and inspect RenderProfiles"
+    )
     profile_commands = profiles.add_subparsers(dest="profile_command", required=True)
     profile_create = profile_commands.add_parser(
-        "create", help="Create a RenderProfile"
+        "create",
+        help="Create a RenderProfile with its first role binding",
+        description=(
+            "Create the first/default role binding of a complete RenderProfile cast; "
+            "use `profile bind` to add more roles."
+        ),
     )
     profile_create.add_argument("--engine", required=True)
     profile_create.add_argument("--target", required=True)
@@ -236,6 +272,12 @@ def build_parser() -> argparse.ArgumentParser:
     profile_inspect.add_argument("profile", type=Path)
     profile_inspect.add_argument("--json", action="store_true")
 
+    profile_show = profile_commands.add_parser(
+        "show", help="Show a RenderProfile cast and its policy"
+    )
+    profile_show.add_argument("profile", type=Path)
+    profile_show.add_argument("--json", action="store_true")
+
     profile_roles = profile_commands.add_parser(
         "role", help="Inspect or mutate RenderProfile roles"
     )
@@ -247,32 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
     role_list.add_argument("--json", action="store_true")
 
     role_set = role_commands.add_parser("set", help="Add or replace a role binding")
-    role_set.add_argument("profile", type=Path)
-    role_set.add_argument("role")
-    role_set.add_argument("--engine", required=True)
-    role_set.add_argument("--target", required=True)
-    role_set.add_argument("--language", required=True)
-    role_source = role_set.add_mutually_exclusive_group()
-    role_source.add_argument("--voice")
-    role_source.add_argument("--voicefolio-ref")
-    role_source.add_argument("--reference-wav", type=Path)
-    role_source.add_argument("--prepared-voice", type=Path)
-    role_source.add_argument("--voice-source", type=Path)
-    role_set.add_argument("--speaker")
-    role_set.add_argument(
-        "--option",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
+    _add_profile_role_binding_arguments(role_set)
+
+    profile_bind = profile_commands.add_parser(
+        "bind", help="Add or replace a role binding in a RenderProfile"
     )
-    role_set.add_argument("--offline", action="store_true")
-    role_set.add_argument("--refresh", action="store_true")
-    role_set.add_argument("--make-default", action="store_true")
-    role_set_output = role_set.add_mutually_exclusive_group(required=True)
-    role_set_output.add_argument("-o", "--output", type=Path)
-    role_set_output.add_argument("--in-place", action="store_true")
-    role_set.add_argument("--json", action="store_true")
+    _add_profile_role_binding_arguments(profile_bind)
 
     role_remove = role_commands.add_parser("remove", help="Remove a configured role")
     role_remove.add_argument("profile", type=Path)
@@ -461,7 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_progress_option(book_render)
 
     document_render = commands.add_parser(
-        "render-document", help="Render one SSMDDoc workspace RenderPlan"
+        "render-document",
+        help="Render one SSMDDoc RenderPlan from renderplan/<variant>",
+        description=(
+            "Reads renderplan/<variant>/document.renderplan.toml and writes "
+            "voicerender/<variant>/document-0001/ by default."
+        ),
     )
     document_render.add_argument(
         "document", type=Path, help="SSMDDoc workspace or canonical document.ssmd.md"
@@ -723,13 +750,38 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _profile_role_selector(binding: dict[str, Any]) -> str:
+    voice = binding.get("voice")
+    if voice is not None:
+        return _display_cli_value(voice)
+    speaker = binding.get("speaker")
+    if speaker is not None:
+        return f"speaker:{_display_cli_value(speaker)}"
+    source = binding.get("voice_source")
+    options = binding.get("options")
+    if source is None and isinstance(options, dict):
+        source = options.get("voice_source")
+    if isinstance(source, dict):
+        kind = source.get("kind") or source.get("type")
+        return f"source:{_display_cli_value(kind)}" if kind else "source"
+    if source is not None:
+        return "source"
+    return "unknown"
+
+
 def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+    print("  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE")
     for item in roles:
         marker = "*" if item["default"] else " "
         binding = item["binding"]
-        renderer = _display_cli_value(binding.get("renderer", "unknown"))
+        engine = _display_cli_value(binding.get("renderer", "unknown"))
         target = _display_cli_value(binding.get("target_id", "unknown"))
-        print(f"{marker} {item['role']}  {item['language']}  {renderer}/{target}")
+        language = _display_cli_value(item["language"])
+        selector = _profile_role_selector(binding)
+        print(
+            f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
+            f"{target:<18} {selector}"
+        )
 
 
 def _display_cli_value(value: Any) -> str:
@@ -1625,7 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
                 profile = refresh_render_profile(load_render_profile(args.profile))
                 output = save_render_profile(profile, args.output)
                 payload = {"profile_id": profile.profile_id, "path": str(output)}
-            elif args.profile_command == "inspect":
+            elif args.profile_command in {"inspect", "show"}:
                 profile = load_render_profile(args.profile)
                 payload = {
                     "profile_id": profile.profile_id or profile.computed_id(),
@@ -1634,8 +1686,11 @@ def main(argv: list[str] | None = None) -> int:
                     "planning": profile.planning.to_dict(),
                     "pauses": profile.pauses.to_dict(),
                 }
-            elif args.profile_command == "role":
-                if args.profile_role_command == "list":
+            elif args.profile_command in {"role", "bind"}:
+                if (
+                    args.profile_command == "role"
+                    and args.profile_role_command == "list"
+                ):
                     profile = load_render_profile(args.profile)
                     payload = {
                         "profile_id": profile.profile_id or profile.computed_id(),
@@ -1644,7 +1699,10 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 else:
                     destination = _profile_mutation_destination(args)
-                    if args.profile_role_command == "set":
+                    if (
+                        args.profile_command == "bind"
+                        or args.profile_role_command == "set"
+                    ):
                         source_paths = (
                             args.reference_wav,
                             args.prepared_voice,
@@ -1703,15 +1761,16 @@ def main(argv: list[str] | None = None) -> int:
                         sort_keys=True,
                     )
                 )
-            elif args.profile_command in {"inspect", "role"} and (
-                args.profile_command == "inspect" or args.profile_role_command == "list"
+            elif args.profile_command in {"inspect", "show", "role"} and (
+                args.profile_command in {"inspect", "show"}
+                or args.profile_role_command == "list"
             ):
                 print(
                     f"RenderProfile {payload['profile_id']} "
                     f"(default role: {payload['default_role']})"
                 )
                 _print_profile_role_items(payload["roles"])
-                if args.profile_command == "inspect":
+                if args.profile_command in {"inspect", "show"}:
                     planning = payload["planning"]
                     fallbacks = ", ".join(planning["capacity_fallback"]) or "none"
                     print(
@@ -1942,7 +2001,8 @@ def main(argv: list[str] | None = None) -> int:
             args.command in {"engines", "models", "voices"}
             or (
                 args.command == "profile"
-                and args.profile_command in {"inspect", "role", "default-role"}
+                and args.profile_command
+                in {"inspect", "show", "role", "bind", "default-role"}
             )
             or (args.command == "voice" and args.voice_command in {"source", "clone"})
         ):

@@ -46,7 +46,7 @@ PiperSynth owns the authoritative phoneme-capacity decision, and the `.[piper]` 
 
 ## CLI workflow
 
-A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
+A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create the first/default role of a complete cast through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
 
 ```bash
 voicerender engines list
@@ -127,21 +127,23 @@ voicerender voice clone --engine ENGINE --target TARGET \
   --transcript "Exact spoken words." -o clone.renderprofile.toml --json
 ```
 
-RenderProfiles can hold multiple independent role bindings. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves the other roles and user-authored planning/pause policy, and computes a new `profile_id`.
+RenderProfile is the complete cast for one render variant. Each logical role is bound independently, so one profile can mix engines and targets while sharing planning and pause policy. Create its initial/default role, bind the rest, and inspect the whole cast:
 
 ```bash
-voicerender profile inspect narration.renderprofile.toml --json
-voicerender profile role list narration.renderprofile.toml --json
-voicerender profile role set narration.renderprofile.toml guest \
-  --engine piper --target en_US-amy-medium --language en-US \
-  -o narration.with-guest.renderprofile.toml --json
-voicerender profile default-role narration.with-guest.renderprofile.toml guest \
-  --in-place --json
-voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
-  --new-default-role guest --in-place --json
+voicerender profile create \
+  --role narrator --engine kokoro --target v1.0 --voice af_heart \
+  --language en-US --offline -o printer-cast.renderprofile.toml
+voicerender profile bind printer-cast.renderprofile.toml host \
+  --engine kitten --target mini-0.8 --voice Jasper \
+  --language en-US --offline --in-place
+voicerender profile bind printer-cast.renderprofile.toml guest \
+  --engine piper --target en_US-amy-medium \
+  --language en-US --offline --in-place
+voicerender profile show printer-cast.renderprofile.toml
+voicerender profile validate printer-cast.renderprofile.toml
 ```
 
-Role mutations require exactly one explicit `--output PATH` or `--in-place`; the input profile is otherwise left untouched. Removing the final role is rejected, and removing the current default requires `--new-default-role`. The package root exports the model-management, option/voice discovery, source/clone, and multi-role profile APIs for automation. See [RenderProfile lifecycle](docs/renderprofile.md) for API examples and policy details.
+The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
 
 ## Reference voices
 
@@ -407,15 +409,41 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 
 ## SSMDDoc document workspaces
 
-For one editable SSMDDoc, compile and project explicitly with UtterPlan, then render the exact fingerprinted variant with VoiceRender:
+For one editable SSMDDoc, convert and compile the source, then let UtterPlan project a RenderPlan for the complete RenderProfile cast described above. VoiceRender consumes the exact projected variant:
 
 ```bash
+ssmdconvert document convert story.ssmd.md
 utterplan compile-document story.ssmdoc
-utterplan render-document story.ssmdoc --profile narration.renderprofile.toml
-voicerender render-document story.ssmdoc --variant narration--<profile-fingerprint>
+utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
+voicerender render-document story.ssmdoc \
+  --variant printer-cast--<profile-fingerprint>
 ```
 
-The document output is stored under `.readio/voicerender/<variant>/document-0001/`. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
+The current workspace contract keeps the UtterPlan document artifact filename distinct from the stable manifest identity and rendered output directory:
+
+```text
+story.ssmdoc/
+├── manifest.json
+├── document.ssmd.md
+├── utterplan/
+│   ├── document.utterplan.toml
+│   └── compile-report.toml
+├── renderplan/
+│   └── printer-cast--<profile-fingerprint>/
+│       ├── renderprofile.toml
+│       ├── document.renderplan.toml
+│       └── render-report.toml
+└── voicerender/
+    └── printer-cast--<profile-fingerprint>/
+        ├── voicerender-report.toml
+        ├── .voicerender-cache/
+        └── document-0001/
+            ├── preflight.toml
+            ├── render-manifest.toml
+            └── *.wav
+```
+
+By default, VoiceRender reads from `<workspace>/renderplan/<variant>/document.renderplan.toml` and writes per-document output under `<workspace>/voicerender/<variant>/document-0001/`; the cache and variant report are siblings of the document directory. `--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
 
 ## Tests
 

@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from renderplan import RenderProfile, RoleProfile
 
 from voicerender import cli
@@ -83,6 +84,76 @@ def test_profile_role_set_writes_only_explicit_output(
     }
 
 
+def test_profile_bind_delegates_to_role_set_and_requires_destination(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "source.renderprofile.toml"
+    original = _write_profile(source)
+    calls: dict[str, object] = {}
+
+    def fake_set_profile_role(profile, role, **kwargs):
+        calls.update(kwargs)
+        loaded = load_render_profile(profile)
+        roles = dict(loaded.roles)
+        roles[role] = RoleProfile(
+            language=kwargs["language"],
+            binding={"renderer": kwargs["engine"], "target_id": kwargs["target_id"]},
+        )
+        default_role = role if kwargs["make_default"] else loaded.default_role
+        return replace(
+            loaded, roles=roles, default_role=default_role, profile_id=None
+        ).with_identity()
+
+    monkeypatch.setattr(cli, "set_profile_role", fake_set_profile_role)
+    exit_code = cli.main(
+        [
+            "profile",
+            "bind",
+            str(source),
+            "host",
+            "--engine",
+            "kitten",
+            "--target",
+            "mini-0.8",
+            "--language",
+            "en-US",
+            "--voice",
+            "Jasper",
+            "--offline",
+            "--make-default",
+            "--in-place",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert calls["voice"] == "Jasper"
+    assert calls["offline"] is True
+    assert calls["make_default"] is True
+    assert load_render_profile(source).default_role == "host"
+    assert payload["path"] == str(source)
+    assert original.default_role == "narrator"
+
+    parser = cli.build_parser()
+    command = [
+        "profile",
+        "bind",
+        str(source),
+        "guest",
+        "--engine",
+        "piper",
+        "--target",
+        "en_US-amy-medium",
+        "--language",
+        "en-US",
+    ]
+    with pytest.raises(SystemExit):
+        parser.parse_args(command)
+    with pytest.raises(SystemExit):
+        parser.parse_args([*command, "--in-place", "-o", str(tmp_path / "out.toml")])
+
+
 def test_default_role_in_place_and_inspect_json(tmp_path: Path, capsys) -> None:
     source = tmp_path / "profile.renderprofile.toml"
     _write_profile(source)
@@ -134,16 +205,72 @@ def test_role_remove_default_requires_replacement_without_writing(
     assert not output.exists()
 
 
-def test_role_list_human_output_is_descriptive_not_python_repr(
+def test_role_list_and_profile_show_present_the_complete_cast(
     tmp_path: Path, capsys
 ) -> None:
     source = tmp_path / "profile.renderprofile.toml"
-    _write_profile(source)
+    profile = _write_profile(source)
+    roles = dict(profile.roles)
+    roles["narrator"] = replace(
+        roles["narrator"],
+        binding={
+            **roles["narrator"].binding,
+            "voice": "af_heart",
+            "renderer_metadata": {"private_detail": "not shown"},
+        },
+    )
+    roles["guest"] = replace(
+        roles["guest"],
+        binding={**roles["guest"].binding, "speaker": "Jasper"},
+    )
+    roles["source"] = RoleProfile(
+        language="en-US",
+        binding={
+            "renderer": "piper",
+            "target_id": "en_US-amy-medium",
+            "options": {
+                "voice_source": {
+                    "kind": "managed_reference",
+                    "reference": "large-reference-mapping-is-not-displayed",
+                }
+            },
+        },
+    )
+    save_render_profile(
+        replace(profile, roles=roles, profile_id=None).with_identity(), source
+    )
 
     exit_code = cli.main(["profile", "role", "list", str(source)])
-
-    output = capsys.readouterr().out
+    role_output = capsys.readouterr().out
     assert exit_code == 0
-    assert "* narrator  en-US  fixture/target-a" in output
-    assert "guest  en-GB  fixture/target-b" in output
-    assert "RoleProfile(" not in output
+    assert "VOICE/SPEAKER/SOURCE" in role_output
+    assert "af_heart" in role_output
+    assert "speaker:Jasper" in role_output
+    assert "source:managed_reference" in role_output
+    assert "private_detail" not in role_output
+    assert "large-reference-mapping-is-not-displayed" not in role_output
+    assert "RoleProfile(" not in role_output
+
+    exit_code = cli.main(["profile", "show", str(source)])
+    show_output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "RenderProfile " in show_output
+    assert "Planning:" in show_output
+    assert "Pauses:" in show_output
+    assert "af_heart" in show_output
+    assert "speaker:Jasper" in show_output
+    assert "source:managed_reference" in show_output
+
+    exit_code = cli.main(["profile", "show", str(source), "--json"])
+    show_payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    source_role = next(
+        item for item in show_payload["roles"] if item["role"] == "source"
+    )
+    assert source_role["binding"]["options"]["voice_source"]["reference"] == (
+        "large-reference-mapping-is-not-displayed"
+    )
+    narrator_role = next(
+        item for item in show_payload["roles"] if item["role"] == "narrator"
+    )
+    assert "private_detail" in narrator_role["binding"]["renderer_metadata"]

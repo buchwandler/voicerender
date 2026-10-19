@@ -15,7 +15,7 @@ VoiceRender owns its public engine-option and voice discovery, optional model-as
 
 ## Workflow
 
-1. Create or update a RenderProfile and review engine-derived binding metadata (see the [RenderProfile lifecycle](renderprofile.md)).
+1. Create a complete-cast RenderProfile with per-role engine bindings and review its metadata (see the [RenderProfile lifecycle](renderprofile.md)).
 2. Produce RenderPlans that reference the profile identity: use UtterPlan
    `render-plan` for one saved plan or `render-book` for selected SSMDBook
    chapters; both emit the same shared RenderPlan contract.
@@ -63,6 +63,10 @@ voicerender render-book "Novel.ssmdbook" \
 ```
 
 A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter, including execution fingerprints and the path to any fresh recheck report; each chapter directory contains its `preflight.toml`, optional `preflight-recheck.toml`, cumulative `render-manifest.toml`, and numbered WAVs. A stale persisted `ok` is invalidated only by a fresh report for the same plan and failed speech occurrence. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
+
+## Document-level rendering
+
+UtterPlan writes document RenderPlans to `<workspace>/renderplan/<variant>/document.renderplan.toml`. VoiceRender reads that direct workspace root by default and writes to `<workspace>/voicerender/<variant>/document-0001/`, with the variant report and `.voicerender-cache/` alongside the document directory. The RenderPlan filename follows the source artifact stem (`document`); `document-0001` remains the manifest identity and rendered entity directory. See the full mixed-engine cast workflow and workspace tree in [RenderProfile lifecycle](renderprofile.md#utterplan-document-workspaces).
 
 ## Engine integration
 

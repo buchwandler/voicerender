@@ -2,16 +2,17 @@
 
 A RenderProfile is the portable, user-owned renderer configuration shared by
 [RenderPlan](https://pypi.org/project/renderplan/) producers and VoiceRender. It
-captures engine-backed role bindings, renderer requirements, and planning policy;
-it is data, not a loaded engine or synthesis session. Create profiles with
-VoiceRender so bindings are seeded from installed adapter metadata, then review and
-validate them before planning:
+represents the complete cast for one render variant: each logical source role has
+its own engine/target/voice binding, while planning and pause policy are shared.
+Roles in a single profile may use different engines. Create the first/default role
+with VoiceRender so its binding is seeded from adapter metadata, then review and
+validate it before planning:
 
 ```bash
 voicerender engines list
 voicerender voices list --engine piper --lang en-US --offline --json
 voicerender profile create \
-  --engine piper --target en_US-amy-medium --language en-US \
+  --role narrator --engine piper --target en_US-amy-medium --language en-US \
   --offline --output narration.renderprofile.toml
 voicerender profile validate narration.renderprofile.toml
 ```
@@ -32,12 +33,24 @@ profile. Keep the original profile with its plans for provenance and inspection.
 
 ## Inspecting and mutating profile roles
 
-A RenderProfile can bind several logical roles (for example, `narrator` and `guest`). Inspect the profile or list its role items without loading an engine:
+One RenderProfile is the complete cast for a render variant. Its logical roles may use different engines and targets while sharing planning and pause policy. `profile show` is the preferred human view; JSON retains each full canonical binding:
 
 ```bash
-voicerender profile inspect narration.renderprofile.toml --json
-voicerender profile role list narration.renderprofile.toml --json
+voicerender profile create \
+  --role narrator --engine kokoro --target v1.0 --voice af_heart \
+  --language en-US --offline -o printer-cast.renderprofile.toml
+voicerender profile bind printer-cast.renderprofile.toml host \
+  --engine kitten --target mini-0.8 --voice Jasper \
+  --language en-US --offline --in-place
+voicerender profile bind printer-cast.renderprofile.toml guest \
+  --engine piper --target en_US-amy-medium \
+  --language en-US --offline --in-place
+voicerender profile show printer-cast.renderprofile.toml
+voicerender profile show printer-cast.renderprofile.toml --json
+voicerender profile role list printer-cast.renderprofile.toml --json
 ```
+
+`profile create` makes the initial/default role. `profile bind` adds or replaces a binding and supports voice, Voicefolio, reference WAV, prepared voice, voice-source, speaker, and engine-option selectors. The human view shows each role's engine, target, language, and actual voice/speaker/source identity without dumping renderer metadata.
 
 Use VoiceRender's public role helpers when building or editing profiles programmatically:
 
@@ -67,15 +80,18 @@ updated = remove_profile_role(updated, "narrator", new_default_role="guest")
 
 `set_profile_role` resolves the engine binding and regenerates its derived requirements and capacity. Existing role bindings and the profile's planning/pause policy are preserved; each successful mutation recomputes `profile_id`. Invalid selections/options, a missing role, removal of the last role, or removal of the default without a replacement are rejected. The helpers return a new profile and never write the input file.
 
-For the CLI, each mutation requires exactly one of `--output PATH` and `--in-place`. Use `--output` to review a proposal before replacing the original; `--in-place` is an explicit request to write over the selected profile:
+For CLI mutations, `profile bind` is the first-class way to add or replace a cast member; it and the structured `profile role set` form require exactly one of `--output PATH` and `--in-place`. Use `--output` to review a proposal before replacing the original:
 
 ```bash
-voicerender profile role set narration.renderprofile.toml guest \
-  --engine piper --target en_US-amy-medium --language en-US \
-  -o narration.with-guest.renderprofile.toml
-voicerender profile default-role narration.with-guest.renderprofile.toml guest \
+voicerender profile bind printer-cast.renderprofile.toml host \
+  --engine kitten --target mini-0.8 --language en-US --voice Jasper \
   --in-place
-voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
+voicerender profile role set printer-cast.renderprofile.toml guest \
+  --engine piper --target en_US-amy-medium --language en-US \
+  -o printer-cast.proposed.renderprofile.toml
+voicerender profile default-role printer-cast.proposed.renderprofile.toml guest \
+  --in-place
+voicerender profile role remove printer-cast.proposed.renderprofile.toml narrator \
   --new-default-role guest --in-place
 ```
 
@@ -133,6 +149,44 @@ rendering requires a matching all-`ok` report. See the
 [UtterPlan SSMDBook workflow](https://pypi.org/project/utterplan/) and the
 [RenderPlan package contract](https://pypi.org/project/renderplan/) for the
 producer/consumer boundary.
+
+## UtterPlan document workspaces
+
+UtterPlan projects the canonical document RenderPlan as `renderplan/<variant>/document.renderplan.toml`. VoiceRender's default document roots align with that handoff: it reads from `<workspace>/renderplan` and writes to `<workspace>/voicerender`. The artifact filename (`document.renderplan.toml`) is distinct from the manifest identity and rendered entity directory (`document-0001`).
+
+```bash
+ssmdconvert document convert story.ssmd.md
+utterplan compile-document story.ssmdoc
+utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
+voicerender render-document story.ssmdoc \
+  --variant printer-cast--<profile-fingerprint>
+```
+
+The resulting workspace is organized by planning, render variant, and rendered entity:
+
+```text
+story.ssmdoc/
+├── manifest.json
+├── document.ssmd.md
+├── utterplan/
+│   ├── document.utterplan.toml
+│   └── compile-report.toml
+├── renderplan/
+│   └── printer-cast--<profile-fingerprint>/
+│       ├── renderprofile.toml
+│       ├── document.renderplan.toml
+│       └── render-report.toml
+└── voicerender/
+    └── printer-cast--<profile-fingerprint>/
+        ├── voicerender-report.toml
+        ├── .voicerender-cache/
+        └── document-0001/
+            ├── preflight.toml
+            ├── render-manifest.toml
+            └── *.wav
+```
+
+`--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. Document estimation resolves the same input layout but does not create output directories.
 
 ## Reference-voice sources
 

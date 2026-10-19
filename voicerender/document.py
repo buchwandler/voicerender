@@ -21,6 +21,8 @@ from .events import RenderEventCallback
 from .renderplan_input import EmphasisPolicy
 from .renderplan_render import RENDER_MANIFEST_FILENAME, render_renderplan
 
+DOCUMENT_RENDERPLAN_FILENAME = "document.renderplan.toml"
+
 
 @dataclass(frozen=True, slots=True)
 class DocumentRenderRequest:
@@ -124,7 +126,7 @@ def _resolve_document_request(
     rp_root = (
         Path(renderplan_root).expanduser()
         if renderplan_root is not None
-        else index.root / ".readio" / "renderplan"
+        else index.root / "renderplan"
     )
     variant_dir = rp_root / variant
     rp_root = rp_root.resolve(strict=False)
@@ -152,7 +154,7 @@ def _resolve_document_request(
             "variant fingerprint does not match profile snapshot",
             code="variant.identity_mismatch",
         )
-    plan_path = variant_dir / f"{index.document_id}.renderplan.toml"
+    plan_path = variant_dir / DOCUMENT_RENDERPLAN_FILENAME
     plan_path = _contained_regular(plan_path, variant_dir, "RenderPlan")
     plan = load_plan(plan_path)
     if not isinstance(plan, RenderPlan) or plan.render_profile_id != profile_id:
@@ -181,7 +183,7 @@ def _resolve_document_request(
     out_root = (
         Path(output_root).expanduser()
         if output_root is not None
-        else index.root / ".readio" / "voicerender"
+        else index.root / "voicerender"
     )
     out_root = out_root.resolve(strict=False)
     out_variant = (out_root / variant).resolve(strict=False)

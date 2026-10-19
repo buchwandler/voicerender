@@ -61,16 +61,71 @@ def test_document_estimate_resolves_exact_variant_without_creating_outputs(
         "sha256:"
     )[:12]
     variant = f"narration--{fingerprint}"
-    variant_dir = root / ".readio/renderplan" / variant
+    variant_dir = root / "renderplan" / variant
     variant_dir.mkdir(parents=True)
     shutil.copy(profile, variant_dir / "renderprofile.toml")
     shutil.copy(
         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
-        variant_dir / "document-0001.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
+    )
+    from voicerender.document import _resolve_document_request
+
+    request = _resolve_document_request(root, variant=variant)
+    assert request.renderplan_variant_dir == (root / "renderplan" / variant).resolve()
+    assert (
+        request.renderplan_path
+        == (root / "renderplan" / variant / "document.renderplan.toml").resolve()
+    )
+    assert request.output_variant_dir == (root / "voicerender" / variant).resolve()
+    assert (
+        request.output_dir
+        == (root / "voicerender" / variant / "document-0001").resolve()
+    )
+    assert (
+        request.cache_dir
+        == (root / "voicerender" / variant / ".voicerender-cache").resolve()
     )
     estimate = estimate_render_document(root, variant=variant, speech="1")
     assert estimate.selected_count == 1
-    assert not (root / ".readio/voicerender").exists()
+    assert not (root / "voicerender").exists()
+
+
+def test_document_request_preserves_explicit_root_overrides(tmp_path: Path) -> None:
+    from voicerender.document import _resolve_document_request
+
+    root = _workspace(tmp_path / "story.ssmdoc")
+    profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+    profile_obj = codec.load_profile(profile)
+    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
+        "sha256:"
+    )[:12]
+    variant = f"narration--{fingerprint}"
+    renderplan_root = tmp_path / "custom-renderplan"
+    variant_dir = renderplan_root / variant
+    variant_dir.mkdir(parents=True)
+    shutil.copy(profile, variant_dir / "renderprofile.toml")
+    shutil.copy(
+        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
+    )
+    output_root = tmp_path / "custom-voicerender"
+    cache_dir = output_root / variant / ".custom-cache"
+
+    request = _resolve_document_request(
+        root,
+        variant=variant,
+        renderplan_root=renderplan_root,
+        output_root=output_root,
+        cache_dir=cache_dir,
+    )
+
+    assert request.renderplan_variant_dir == variant_dir.resolve()
+    assert (
+        request.renderplan_path == (variant_dir / "document.renderplan.toml").resolve()
+    )
+    assert request.output_variant_dir == (output_root / variant).resolve()
+    assert request.output_dir == (output_root / variant / "document-0001").resolve()
+    assert request.cache_dir == cache_dir.resolve()
 
 
 def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> None:
@@ -99,12 +154,12 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
         "sha256:"
     )[:12]
     variant = f"narration--{fingerprint}"
-    variant_dir = root / ".readio/renderplan" / variant
+    variant_dir = root / "renderplan" / variant
     variant_dir.mkdir(parents=True)
     shutil.copy(profile_path, variant_dir / "renderprofile.toml")
     shutil.copy(
         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
-        variant_dir / "document-0001.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
     )
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -163,12 +218,12 @@ def test_document_preflight_reject_stops_before_render(
         "sha256:"
     )[:12]
     variant = f"narration--{fingerprint}"
-    variant_dir = root / ".readio/renderplan" / variant
+    variant_dir = root / "renderplan" / variant
     variant_dir.mkdir(parents=True)
     shutil.copy(profile_path, variant_dir / "renderprofile.toml")
     shutil.copy(
         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
-        variant_dir / "document-0001.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
     )
     monkeypatch.setattr(
         document_module,
@@ -203,12 +258,12 @@ def test_document_render_reports_reused_complete_manifest(
         "sha256:"
     )[:12]
     variant = f"narration--{fingerprint}"
-    variant_dir = root / ".readio/renderplan" / variant
+    variant_dir = root / "renderplan" / variant
     variant_dir.mkdir(parents=True)
     shutil.copy(profile_path, variant_dir / "renderprofile.toml")
     shutil.copy(
         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
-        variant_dir / "document-0001.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
     )
     monkeypatch.setattr(
         document_module,
