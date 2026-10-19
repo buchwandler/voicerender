@@ -63,6 +63,9 @@ class DocumentRenderResult:
     replan_required: bool = False
     pending_composition: bool = False
     elapsed_seconds: float = 0.0
+    error_segment_number: int | None = None
+    error_segment_id: str | None = None
+    error_engine: str | None = None
 
     @property
     def exit_code(self) -> int:
@@ -96,6 +99,9 @@ class DocumentRenderResult:
             "replan_required": self.replan_required,
             "pending_composition": self.pending_composition,
             "elapsed_seconds": self.elapsed_seconds,
+            "error_segment_number": self.error_segment_number,
+            "error_segment_id": self.error_segment_id,
+            "error_engine": self.error_engine,
             "exit_code": self.exit_code,
         }
 
@@ -329,6 +335,9 @@ def render_document(
                 rendered.error,
                 False,
                 rendered.pending_composition,
+                error_segment_number=getattr(rendered, "error_segment_number", None),
+                error_segment_id=getattr(rendered, "error_segment_id", None),
+                error_engine=getattr(rendered, "error_engine", None),
             )
     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
         code = getattr(exc, "code", None) or "render.failed"
@@ -387,6 +396,9 @@ def _write_report(result: DocumentRenderResult) -> None:
         ("manifest", result.manifest),
         ("error_code", result.error_code),
         ("error_message", result.error_message),
+        ("error_segment_number", result.error_segment_number),
+        ("error_segment_id", result.error_segment_id),
+        ("error_engine", result.error_engine),
     ):
         if val is not None:
             data[key] = str(val) if isinstance(val, Path) else val

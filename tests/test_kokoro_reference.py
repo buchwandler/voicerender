@@ -10,13 +10,22 @@ from typing import Any
 import numpy as np
 import pytest
 
-from voicerender.engines.base import SpeechRequest
+from voicerender.engines.base import (
+    PCM_RANGE_POLICY,
+    EngineSelection,
+    RenderedSpeech,
+    SpeechRequest,
+    validate_rendered_speech,
+)
 from voicerender.engines.kokoro import (
     PyKokoroEngineAdapter,
+    _normalize_short_sentence,
+    _normalize_voice_level,
     _target_from_capabilities,
     _version_supported,
 )
 from voicerender.engines.selection import EngineRequest
+from voicerender.errors import EngineBackendError, EngineSelectionError
 from voicerender.voice_sources import local_reference_source
 
 
@@ -73,6 +82,8 @@ def _install(
     monkeypatch.setattr(models, "get_model_info", lambda *args, **kwargs: (model, ()))
     state: dict[str, Any] = {
         "config": None,
+        "audio": np.ones(24, dtype=np.float32),
+        "diagnostics": (),
         "measurements": [],
         "enrollments": [],
         "syntheses": [],
@@ -135,9 +146,9 @@ def _install(
             state["syntheses"].append(request)
             return SimpleNamespace(
                 id=request.id,
-                audio=np.ones(24, dtype=np.float32),
+                audio=state["audio"],
                 sample_rate=24000,
-                diagnostics=(),
+                diagnostics=state["diagnostics"],
                 word_timings=(),
                 language=request.language,
                 voice=request.voice,
@@ -403,3 +414,390 @@ def test_akinvox_requires_english_and_nonempty_reference_text(
     )
     diagnostics = adapter.validate_selection(selection)
     assert [item.code for item in diagnostics] == ["pykokoro.reference_text_required"]
+
+
+def _synthesize_pcm_audio(
+    monkeypatch: pytest.MonkeyPatch,
+    audio: Any,
+    *,
+    diagnostics: tuple[str, ...] = (),
+) -> Any:
+    adapter, state = _install(monkeypatch, _model())
+    state["audio"] = audio
+    state["diagnostics"] = diagnostics
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        voice="af_heart",
+    )
+    with adapter.open(selection) as session:
+        return session.synthesize(
+            SpeechRequest(id="pcm", text="PCM regression", language="en-US")
+        )
+
+
+def test_kokoro_pcm_range_preserves_in_range_audio_and_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact = _synthesize_pcm_audio(monkeypatch, np.array([0.25, 1.0], dtype=np.float32))
+    np.testing.assert_array_equal(exact.audio, np.array([0.25, 1.0], dtype=np.float32))
+    assert exact.warnings == ()
+    assert exact.metadata["pcm_range"] == {
+        "policy": PCM_RANGE_POLICY,
+        "peak_before_clip": 1.0,
+        "clipped_samples": 0,
+    }
+
+    tolerant = _synthesize_pcm_audio(
+        monkeypatch, np.array([0.25, 1.000005], dtype=np.float32)
+    )
+    assert float(np.max(np.abs(tolerant.audio))) == 1.0
+    assert tolerant.metadata["pcm_range"]["peak_before_clip"] == pytest.approx(1.000005)
+    assert "clamped 1 sample(s)" in tolerant.warnings[0]
+
+
+def test_kokoro_observed_pcm_overshoot_is_clamped_with_diagnostics_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio = np.asarray([0.0, -0.4, 1.008497], dtype=np.float32)
+    rendered = _synthesize_pcm_audio(
+        monkeypatch, audio, diagnostics=("PyKokoro diagnostic",)
+    )
+
+    assert float(np.max(np.abs(rendered.audio))) == 1.0
+    assert rendered.audio[-1] == 1.0
+    assert rendered.metadata["pcm_range"] == {
+        "policy": PCM_RANGE_POLICY,
+        "peak_before_clip": pytest.approx(1.008497),
+        "clipped_samples": 1,
+    }
+    assert rendered.warnings[0] == "PyKokoro diagnostic"
+    assert "PyKokoro returned audio above full scale" in rendered.warnings[1]
+    assert "clamped 1 sample(s)" in rendered.warnings[1]
+    assert "1.008497" in rendered.warnings[1]
+
+
+def test_kokoro_pcm_clamps_negative_and_multiple_overshoots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _synthesize_pcm_audio(
+        monkeypatch, np.array([-1.2, 0.0, 1.008497, -1.1], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(
+        rendered.audio, np.array([-1.0, 0.0, 1.0, -1.0], dtype=np.float32)
+    )
+    assert rendered.metadata["pcm_range"]["clipped_samples"] == 3
+    assert "clamped 3 sample(s)" in rendered.warnings[0]
+
+
+@pytest.mark.parametrize("bad_sample", [np.nan, np.inf])
+def test_kokoro_pcm_does_not_sanitize_nonfinite_audio(
+    monkeypatch: pytest.MonkeyPatch, bad_sample: float
+) -> None:
+    with pytest.raises(EngineBackendError, match="finite"):
+        _synthesize_pcm_audio(monkeypatch, np.array([0.0, bad_sample]))
+
+
+def test_kokoro_pcm_does_not_hide_empty_or_multidimensional_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(EngineBackendError, match="non-empty"):
+        _synthesize_pcm_audio(monkeypatch, np.array([], dtype=np.float32))
+    with pytest.raises(EngineBackendError, match="mono"):
+        _synthesize_pcm_audio(monkeypatch, np.ones((2, 2), dtype=np.float32))
+
+
+def test_kokoro_pcm_does_not_hide_nonconvertible_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(EngineBackendError, match="audio must convert to float32"):
+        _synthesize_pcm_audio(monkeypatch, object())
+
+
+def test_common_validator_keeps_full_scale_contract_strict() -> None:
+    request = SpeechRequest(id="strict", text="strict", language="en-US")
+    result = RenderedSpeech(
+        id="strict",
+        audio=np.array([1.008497], dtype=np.float32),
+        sample_rate=24000,
+    )
+    with pytest.raises(EngineBackendError, match="exceeds PCM full-scale range"):
+        validate_rendered_speech(request, result, engine="kokoro")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "off",
+            {
+                "enabled": False,
+                "resolve_mode": "randomized-phrase",
+                "min_phoneme_length": 30,
+                "phoneme_pretext": "—",
+                "phrase_fallback_tries": 1,
+            },
+        ),
+        (
+            "phrase",
+            {
+                "enabled": True,
+                "resolve_mode": "phrase",
+                "min_phoneme_length": 30,
+                "phoneme_pretext": "—",
+                "phrase_fallback_tries": 1,
+            },
+        ),
+        (
+            {
+                "enabled": True,
+                "resolve_mode": "wrap",
+                "min_phoneme_length": 45,
+                "phoneme_pretext": "—",
+                "phrase_fallback_tries": 2,
+            },
+            {
+                "enabled": True,
+                "resolve_mode": "wrap",
+                "min_phoneme_length": 45,
+                "phoneme_pretext": "—",
+                "phrase_fallback_tries": 2,
+            },
+        ),
+    ],
+)
+def test_short_sentence_options_normalize_shorthand_and_tables(
+    value: Any, expected: dict[str, Any]
+) -> None:
+    assert _normalize_short_sentence(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        True,
+        "invalid-mode",
+        {"resolve_mode": "off"},
+        {"resolve_mode": "typo"},
+        {"min_phoneme_length": -1},
+        {"min_phoneme_length": True},
+        {"phrase_fallback_tries": -1},
+        {"phrase_fallback_tries": False},
+        {"enabled": 1},
+        {"phoneme_pretext": ""},
+        {"unknown": 1},
+    ],
+)
+def test_short_sentence_options_reject_invalid_values(value: Any) -> None:
+    from voicerender.errors import InvalidEngineOptionError
+
+    with pytest.raises(InvalidEngineOptionError, match="short_sentence"):
+        _normalize_short_sentence(value)
+
+
+def test_voice_level_options_normalize_gain_and_preserve_shorthand() -> None:
+    assert _normalize_voice_level("off") == {"mode": "off", "gain_db": None}
+    assert _normalize_voice_level("calibrated") == {
+        "mode": "calibrated",
+        "gain_db": None,
+    }
+    assert _normalize_voice_level({"mode": "off", "gain_db": 1.5}) == {
+        "mode": "off",
+        "gain_db": 1.5,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "unknown",
+        {"mode": "unknown"},
+        {"gain_db": True},
+        {"gain_db": float("nan")},
+        {"gain_db": float("inf")},
+        {"unknown": 1},
+    ],
+)
+def test_voice_level_options_reject_invalid_values(value: Any) -> None:
+    from voicerender.errors import InvalidEngineOptionError
+
+    with pytest.raises(InvalidEngineOptionError, match="voice_level"):
+        _normalize_voice_level(value)
+
+
+def test_kokoro_shorthand_and_equivalent_tables_share_synthesis_identity() -> None:
+    adapter = PyKokoroEngineAdapter()
+    shorthand = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={"short_sentence": "phrase", "voice_level": "calibrated"},
+    )
+    tables = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={
+            "short_sentence": {"enabled": True, "resolve_mode": "phrase"},
+            "voice_level": {"mode": "calibrated"},
+        },
+    )
+    assert (
+        adapter.canonical_synthesis_identity(shorthand)["options"]
+        == adapter.canonical_synthesis_identity(tables)["options"]
+    )
+
+
+def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, state = _install(monkeypatch, _model())
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={
+            "short_sentence": {
+                "resolve_mode": "randomized-phrase",
+                "min_phoneme_length": 45,
+                "phoneme_pretext": "—",
+                "phrase_fallback_tries": 2,
+            },
+            "voice_level": {"mode": "off", "gain_db": -1.5},
+        },
+    )
+    with adapter.open(selection) as session:
+        config = state["config"]
+        rendered = session.synthesize(
+            SpeechRequest(id="structured", text="Configured speech", language="en-US")
+        )
+    assert config.short_sentence_config.enabled is True
+    assert config.short_sentence_config.resolve_mode == "randomized-phrase"
+    assert config.short_sentence_config.min_phoneme_length == 45
+    assert config.short_sentence_config.phoneme_pretext == "—"
+    assert config.short_sentence_config.phrase_fallback_tries == 2
+    assert config.voice_level.mode == "off"
+    assert config.voice_level.gain_db == -1.5
+    assert rendered.metadata["voice_level"]["mode"] == "off"
+
+
+def test_kokoro_invalid_option_is_reported_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _ = _install(monkeypatch, _model())
+    selection, _ = adapter.resolve(
+        EngineRequest(
+            engine="kokoro",
+            target_id="kokoro-test",
+            language="en-US",
+            options={"short_sentence": {"resolve_mode": "typo"}},
+        )
+    )
+    diagnostics = adapter.validate_selection(selection)
+    assert any(item.code == "pykokoro.invalid_options" for item in diagnostics)
+    with pytest.raises(Exception, match="short_sentence.resolve_mode"):
+        adapter.open(selection)
+
+
+def test_voice_level_gain_changes_synthesis_identity() -> None:
+    adapter = PyKokoroEngineAdapter()
+    first = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={"voice_level": {"mode": "off", "gain_db": 0}},
+    )
+    second = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={"voice_level": {"mode": "off", "gain_db": 2}},
+    )
+    assert (
+        adapter.canonical_synthesis_identity(first)["options"]
+        != adapter.canonical_synthesis_identity(second)["options"]
+    )
+
+
+def test_akinvox_rejects_non_unit_speed_during_selection_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model(voice_mode="reference", reference_enrollment=True)
+    adapter, _ = _install(monkeypatch, model)
+    selection, _ = adapter.resolve(
+        EngineRequest(
+            engine="kokoro",
+            target_id="kokoro-test",
+            language="en-US",
+            options={
+                "voice_source": _managed_source(),
+                "voice_enrollment": {
+                    "engine": "akinvox",
+                    "reference_text": "Exact transcript.",
+                },
+                "speed": 1.2,
+            },
+        )
+    )
+
+    diagnostics = adapter.validate_selection(selection)
+
+    speed_diagnostic = next(
+        item
+        for item in diagnostics
+        if item.code == "pykokoro.reference_speed_unsupported"
+    )
+    assert speed_diagnostic.field == "render.options.speed"
+
+
+def test_akinvox_binding_rejects_conflicting_explicit_transcript() -> None:
+    model = _model(voice_mode="reference", reference_enrollment=True)
+    adapter = PyKokoroEngineAdapter()
+
+    with pytest.raises(EngineSelectionError, match="Conflicting transcript") as caught:
+        adapter.bind_reference_voice(
+            target=model,
+            language="en-US",
+            voice_source={},
+            transcript="Clone transcript.",
+            options={
+                "voice_enrollment": {
+                    "engine": "akinvox",
+                    "reference_text": "Explicit nested transcript.",
+                }
+            },
+        )
+    assert caught.value.code == "pykokoro.reference_text_conflict"
+
+
+def test_inno_binding_rejects_clone_transcript() -> None:
+    model = _model(enrollers=({"id": "inno-v0.2", "transcript_required": False},))
+    adapter = PyKokoroEngineAdapter()
+
+    with pytest.raises(
+        EngineSelectionError, match="does not accept reference_text"
+    ) as caught:
+        adapter.bind_reference_voice(
+            target=model,
+            language="en-US",
+            voice_source={},
+            transcript="Transcript is not accepted by Inno.",
+            options={"voice_enrollment": {"engine": "auto"}},
+        )
+    assert caught.value.code == "pykokoro.reference_text_unsupported"
+
+
+def test_real_pykokoro_public_api_contract_smoke_without_runtime_load() -> None:
+    pykokoro = pytest.importorskip("pykokoro")
+    adapter = PyKokoroEngineAdapter()
+
+    probe = adapter.probe_api()
+    contract = pykokoro.request_api_contract()
+
+    assert pykokoro.REQUEST_API_VERSION == 1
+    assert probe.compatible, probe
+    assert probe.api_version == 1
+    assert contract.supports_request_measurement is True
+    assert contract.supports_reference_voice is True
+    assert contract.supports_voice_enrollment is True

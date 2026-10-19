@@ -53,6 +53,60 @@ def voice_level_metadata(
     }
 
 
+PCM_RANGE_POLICY = "voice-render.pcm-full-scale-clamp.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class PcmRangeAdaptation:
+    """VoiceRender's normalized PCM full-scale adaptation result."""
+
+    audio: Any
+    peak_before_clip: float | None
+    clipped_samples: int
+    warning: str | None
+
+
+def adapt_pcm_full_scale(
+    audio: Any,
+    *,
+    engine_label: str,
+) -> PcmRangeAdaptation:
+    """Clamp valid mono float audio and leave malformed results for validation."""
+    import numpy as np
+
+    try:
+        raw_audio = np.asarray(audio, dtype=np.float32)
+    except (TypeError, ValueError, OverflowError):
+        raw_audio = audio
+
+    peak_before_clip: float | None = None
+    clipped_samples = 0
+    adapted = raw_audio
+    if (
+        isinstance(raw_audio, np.ndarray)
+        and raw_audio.ndim == 1
+        and raw_audio.size
+        and np.isfinite(raw_audio).all()
+    ):
+        peak_before_clip = float(np.max(np.abs(raw_audio)))
+        clipped_samples = int(np.count_nonzero(np.abs(raw_audio) > 1.0))
+        adapted = np.clip(raw_audio, -1.0, 1.0).astype(np.float32, copy=False)
+
+    warning = None
+    if clipped_samples:
+        warning = (
+            f"{engine_label} returned audio above full scale; "
+            f"clamped {clipped_samples} sample(s) to [-1, 1] "
+            f"(peak before clamp={peak_before_clip:.6f})."
+        )
+    return PcmRangeAdaptation(
+        audio=adapted,
+        peak_before_clip=peak_before_clip,
+        clipped_samples=clipped_samples,
+        warning=warning,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SpeechToken:
     """One linguistic token with offsets local to a synthesis request."""
@@ -457,12 +511,14 @@ class SynthesisOutput:
 
 
 __all__ = [
+    "PCM_RANGE_POLICY",
     "EngineAdapter",
     "EngineCapabilities",
     "EngineDiagnostic",
     "EngineOption",
     "EngineSelection",
     "EngineSession",
+    "PcmRangeAdaptation",
     "PronunciationSpan",
     "RenderProfileFragment",
     "RenderedSpeech",
@@ -472,5 +528,6 @@ __all__ = [
     "SpeechWordTiming",
     "SynthesisOutput",
     "SynthesisRequest",
+    "adapt_pcm_full_scale",
     "validate_rendered_speech",
 ]

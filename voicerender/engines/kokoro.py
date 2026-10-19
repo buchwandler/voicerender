@@ -36,7 +36,9 @@ from ..voice_sources import (
 )
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
+    PCM_RANGE_POLICY,
     EngineCapabilities,
+    EngineOption,
     EngineSelection,
     PronunciationSpan,
     RenderedSpeech,
@@ -45,6 +47,7 @@ from .base import (
     SpeechRequest,
     SpeechToken,
     SpeechWordTiming,
+    adapt_pcm_full_scale,
     distribution_version,
     validate_rendered_speech,
     voice_level_metadata,
@@ -383,6 +386,129 @@ def _normalize_enrollment(raw: Any, model: Any, language: str) -> dict[str, Any]
     return result
 
 
+_KOKORO_SHORT_SENTENCE_MODES = frozenset({"off", "wrap", "phrase", "randomized-phrase"})
+_SHORT_SENTENCE_FIELDS = frozenset(
+    {
+        "enabled",
+        "resolve_mode",
+        "min_phoneme_length",
+        "phoneme_pretext",
+        "phrase_fallback_tries",
+    }
+)
+_VOICE_LEVEL_FIELDS = frozenset({"mode", "gain_db"})
+
+
+def _invalid_kokoro_option(message: str) -> InvalidEngineOptionError:
+    return InvalidEngineOptionError(message, code="pykokoro.invalid_options")
+
+
+def _normalize_short_sentence(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value not in _KOKORO_SHORT_SENTENCE_MODES:
+            raise _invalid_kokoro_option(
+                "short_sentence must be 'off', 'wrap', 'phrase', 'randomized-phrase', or a table"
+            )
+        config: dict[str, Any] = {
+            "enabled": value != "off",
+            "resolve_mode": "randomized-phrase" if value == "off" else value,
+        }
+    elif isinstance(value, Mapping):
+        unknown = set(value) - _SHORT_SENTENCE_FIELDS
+        if unknown:
+            raise _invalid_kokoro_option(
+                f"Unknown short_sentence option(s): {', '.join(sorted(map(str, unknown)))}"
+            )
+        config = {"enabled": value.get("enabled", True)}
+        config["resolve_mode"] = value.get("resolve_mode", "randomized-phrase")
+        config["min_phoneme_length"] = value.get("min_phoneme_length", 30)
+        config["phoneme_pretext"] = value.get("phoneme_pretext", "—")
+        config["phrase_fallback_tries"] = value.get("phrase_fallback_tries", 1)
+    else:
+        raise _invalid_kokoro_option(
+            "short_sentence must be a mode string, table, or None"
+        )
+
+    config.setdefault("min_phoneme_length", 30)
+    config.setdefault("phoneme_pretext", "—")
+    config.setdefault("phrase_fallback_tries", 1)
+    if not isinstance(config["enabled"], bool):
+        raise _invalid_kokoro_option("short_sentence.enabled must be a boolean")
+    mode = config["resolve_mode"]
+    if not isinstance(mode, str) or mode not in _KOKORO_SHORT_SENTENCE_MODES - {"off"}:
+        raise _invalid_kokoro_option(
+            "short_sentence.resolve_mode must be 'wrap', 'phrase', or 'randomized-phrase'"
+        )
+    threshold = config["min_phoneme_length"]
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 0:
+        raise _invalid_kokoro_option(
+            "short_sentence.min_phoneme_length must be a non-negative integer"
+        )
+    pretext = config["phoneme_pretext"]
+    if not isinstance(pretext, str) or not pretext.strip():
+        raise _invalid_kokoro_option(
+            "short_sentence.phoneme_pretext must be non-empty text"
+        )
+    retries = config["phrase_fallback_tries"]
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise _invalid_kokoro_option(
+            "short_sentence.phrase_fallback_tries must be a non-negative integer"
+        )
+    return config
+
+
+def _normalize_voice_level(value: Any) -> dict[str, Any]:
+    config: dict[str, Any]
+    if value is None:
+        config = {"mode": "off", "gain_db": None}
+    elif isinstance(value, str):
+        config = {"mode": value, "gain_db": None}
+    elif isinstance(value, Mapping):
+        unknown = set(value) - _VOICE_LEVEL_FIELDS
+        if unknown:
+            raise _invalid_kokoro_option(
+                f"Unknown voice_level option(s): {', '.join(sorted(map(str, unknown)))}"
+            )
+        config = {"mode": value.get("mode", "off"), "gain_db": value.get("gain_db")}
+    else:
+        raise _invalid_kokoro_option(
+            "voice_level must be 'off', 'calibrated', a table, or None"
+        )
+
+    mode = config["mode"]
+    if not isinstance(mode, str) or mode not in {"off", "calibrated"}:
+        raise _invalid_kokoro_option("voice_level.mode must be 'off' or 'calibrated'")
+    gain = config["gain_db"]
+    if gain is not None:
+        if isinstance(gain, bool) or not isinstance(gain, (int, float)):
+            raise _invalid_kokoro_option(
+                "voice_level.gain_db must be a finite number or None"
+            )
+        try:
+            normalized_gain = float(gain)
+        except OverflowError:
+            normalized_gain = math.inf
+        if not math.isfinite(normalized_gain):
+            raise _invalid_kokoro_option(
+                "voice_level.gain_db must be a finite number or None"
+            )
+        config["gain_db"] = normalized_gain
+    return config
+
+
+def _normalize_kokoro_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(options)
+    short_sentence = _normalize_short_sentence(normalized.get("short_sentence"))
+    if short_sentence is None:
+        normalized.pop("short_sentence", None)
+    else:
+        normalized["short_sentence"] = short_sentence
+    normalized["voice_level"] = _normalize_voice_level(normalized.get("voice_level"))
+    return normalized
+
+
 def _reference_text_digest(enrollment: Mapping[str, Any]) -> str | None:
     text = enrollment.get("reference_text")
     if not isinstance(text, str):
@@ -653,15 +779,23 @@ class PyKokoroEngineSession:
             )
             for item in result.word_timings
         )
+        adaptation = adapt_pcm_full_scale(result.audio, engine_label="PyKokoro")
         applications = tuple(getattr(result, "voice_level_applications", ()) or ())
         metadata: dict[str, Any] = {
             "language": result.language,
             "voice": result.voice,
             "phonemes": result.phonemes,
             "token_ids": tuple(result.token_ids),
+            "pcm_range": {
+                "policy": PCM_RANGE_POLICY,
+                "peak_before_clip": adaptation.peak_before_clip,
+                "clipped_samples": adaptation.clipped_samples,
+            },
             "voice_level": voice_level_metadata(
                 applications[0] if applications else None,
-                str(self._selection.options.get("voice_level", "off")),
+                _normalize_voice_level(self._selection.options.get("voice_level"))[
+                    "mode"
+                ],
                 identity_keys=("key", "calibration_identity"),
                 revision_keys=("corpus", "catalog_revision"),
             ),
@@ -673,9 +807,10 @@ class PyKokoroEngineSession:
             metadata["trace"] = result.trace
         rendered = RenderedSpeech(
             id=result.id,
-            audio=result.audio,
+            audio=adaptation.audio,
             sample_rate=result.sample_rate,
-            warnings=tuple(result.diagnostics),
+            warnings=tuple(result.diagnostics)
+            + ((adaptation.warning,) if adaptation.warning else ()),
             word_timings=timings,
             metadata=metadata,
         )
@@ -801,6 +936,74 @@ class PyKokoroEngineAdapter:
     def compatible_api(self) -> bool:
         return self.probe_api().compatible
 
+    def option_descriptors(
+        self, *, target_id: str | None = None
+    ) -> Mapping[str, EngineOption]:
+        """Describe supported Kokoro options, including structured table fields."""
+        del target_id
+        return {
+            "short_sentence": EngineOption(
+                name="short_sentence",
+                value_type="string|table",
+                default=None,
+                choices=("off", "wrap", "phrase", "randomized-phrase"),
+                description="Mode shorthand or table with enabled, resolve_mode, min_phoneme_length, phoneme_pretext, phrase_fallback_tries.",
+            ),
+            "short_sentence.enabled": EngineOption(
+                name="short_sentence.enabled",
+                value_type="boolean",
+                default=True,
+                description="Enable the short-sentence context quality fix.",
+            ),
+            "short_sentence.resolve_mode": EngineOption(
+                name="short_sentence.resolve_mode",
+                value_type="string",
+                default="randomized-phrase",
+                choices=("wrap", "phrase", "randomized-phrase"),
+                description="How short requests are expanded into context.",
+            ),
+            "short_sentence.min_phoneme_length": EngineOption(
+                name="short_sentence.min_phoneme_length",
+                value_type="integer",
+                default=30,
+                minimum=0,
+                description="Minimum phoneme count before short-sentence context is added.",
+            ),
+            "short_sentence.phoneme_pretext": EngineOption(
+                name="short_sentence.phoneme_pretext",
+                value_type="string",
+                default="—",
+                description="Text prepended to the short-sentence context.",
+            ),
+            "short_sentence.phrase_fallback_tries": EngineOption(
+                name="short_sentence.phrase_fallback_tries",
+                value_type="integer",
+                default=1,
+                minimum=0,
+                description="Number of phrase fallback attempts.",
+            ),
+            "voice_level": EngineOption(
+                name="voice_level",
+                value_type="string|table",
+                default="off",
+                choices=("off", "calibrated"),
+                description="Mode shorthand or table with mode and optional gain_db.",
+            ),
+            "voice_level.mode": EngineOption(
+                name="voice_level.mode",
+                value_type="string",
+                default="off",
+                choices=("off", "calibrated"),
+                description="Use the static PyKokoro calibration catalog when calibrated.",
+            ),
+            "voice_level.gain_db": EngineOption(
+                name="voice_level.gain_db",
+                value_type="number",
+                default=None,
+                description="Explicit PyKokoro gain override, including for enrolled voices.",
+            ),
+        }
+
     def capabilities(self) -> EngineCapabilities:
         return EngineCapabilities(
             id=self.id,
@@ -901,9 +1104,50 @@ class PyKokoroEngineAdapter:
         )
         return entries, result
 
+    def bind_reference_voice(
+        self,
+        *,
+        target: SynthesisTarget,
+        language: str,
+        voice_source: Mapping[str, Any],
+        transcript: str | None,
+        options: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Bind generic clone input to Kokoro's native enrollment configuration."""
+        del (
+            voice_source
+        )  # The normalized source remains bound by create_render_profile.
+        bound = dict(options)
+        raw_enrollment = bound.get("voice_enrollment")
+        if raw_enrollment is None:
+            raw_enrollment = {}
+        if not isinstance(raw_enrollment, Mapping):
+            raise EngineSelectionError(
+                "voice_enrollment must be a table",
+                code="pykokoro.invalid_enrollment_options",
+                target_id=target.id,
+            )
+        enrollment = dict(raw_enrollment)
+        existing = enrollment.get("reference_text")
+        if transcript is not None and existing is not None and existing != transcript:
+            raise EngineSelectionError(
+                "Conflicting transcript supplied in voice_enrollment.reference_text and clone request",
+                code="pykokoro.reference_text_conflict",
+                target_id=target.id,
+            )
+        if transcript is not None:
+            enrollment["reference_text"] = transcript
+        bound["voice_enrollment"] = _normalize_enrollment(enrollment, target, language)
+        return bound
+
     def resolve(self, request: Any) -> tuple[EngineSelection, tuple[Any, ...]]:
         options = dict(getattr(request, "options", {}) or {})
         options.update(dict(getattr(request, "engine_options", {}) or {}))
+        try:
+            options = _normalize_kokoro_options(options)
+        except InvalidEngineOptionError:
+            # Keep invalid input available for structured validation diagnostics.
+            pass
         target_id = (
             getattr(request, "target_id", None)
             or options.get("model_variant")
@@ -980,6 +1224,17 @@ class PyKokoroEngineAdapter:
                 ),
             )
         diagnostics: list[Any] = []
+        try:
+            _normalize_kokoro_options(selection.options)
+        except InvalidEngineOptionError as exc:
+            diagnostics.append(
+                EngineDiagnostic(
+                    code=exc.code,
+                    severity="error",
+                    message=str(exc),
+                    field="render.options",
+                )
+            )
         if not language_matches(selection.language, model.languages):
             diagnostics.append(
                 EngineDiagnostic(
@@ -1030,7 +1285,9 @@ class PyKokoroEngineAdapter:
                     )
                 )
             try:
-                _normalize_enrollment(enrollment_value, model, selection.language)
+                normalized_enrollment = _normalize_enrollment(
+                    enrollment_value, model, selection.language
+                )
             except EngineError as exc:
                 diagnostics.append(
                     EngineDiagnostic(
@@ -1041,6 +1298,27 @@ class PyKokoroEngineAdapter:
                         details=exc.details,
                     )
                 )
+            else:
+                if normalized_enrollment["engine"] == "akinvox":
+                    speed = selection.options.get("speed", 1.0)
+                    try:
+                        supported_speed = (
+                            not isinstance(speed, bool)
+                            and isinstance(speed, (int, float))
+                            and math.isfinite(float(speed))
+                            and float(speed) == 1.0
+                        )
+                    except OverflowError:
+                        supported_speed = False
+                    if not supported_speed:
+                        diagnostics.append(
+                            EngineDiagnostic(
+                                code="pykokoro.reference_speed_unsupported",
+                                severity="error",
+                                message="AkinVox reference synthesis requires speed == 1.0.",
+                                field="render.options.speed",
+                            )
+                        )
         elif enrollment_value is not None:
             diagnostics.append(
                 EngineDiagnostic(
@@ -1090,7 +1368,7 @@ class PyKokoroEngineAdapter:
     def canonical_synthesis_identity(
         self, selection: EngineSelection
     ) -> Mapping[str, Any]:
-        options = dict(selection.options)
+        options = _normalize_kokoro_options(selection.options)
         source_identity = _reference_source_identity(options)
         enrollment = options.get("voice_enrollment")
         safe_options = {
@@ -1115,6 +1393,7 @@ class PyKokoroEngineAdapter:
                 enrollment_identity["reference_text_sha256"] = transcript_digest
         identity: dict[str, Any] = {
             "engine": self.id,
+            "pcm_range_policy": PCM_RANGE_POLICY,
             "engine_version": self.version(),
             "target_id": selection.target_id,
             "voice": None if source_identity is not None else selection.voice,
@@ -1132,7 +1411,7 @@ class PyKokoroEngineAdapter:
     ) -> AbstractContextManager[PyKokoroEngineSession]:
         import pykokoro
 
-        options = dict(selection.options)
+        options = _normalize_kokoro_options(selection.options)
         try:
             generation = pykokoro.GenerationConfig(
                 speed=float(options.get("speed", 1.0)),
@@ -1145,16 +1424,11 @@ class PyKokoroEngineAdapter:
                 lexicon_data_policy=options.get("lexicon_data_policy", "auto"),
             )
             short_sentence = options.get("short_sentence")
-            short_sentence_config = None
-            if short_sentence is not None:
-                short_sentence_config = pykokoro.ShortSentenceConfig(
-                    enabled=short_sentence != "off",
-                    **(
-                        {"resolve_mode": short_sentence}
-                        if short_sentence != "off"
-                        else {}
-                    ),
-                )
+            short_sentence_config = (
+                pykokoro.ShortSentenceConfig(**short_sentence)
+                if short_sentence is not None
+                else None
+            )
             config = pykokoro.SynthesisConfig(
                 voice=None if "voice_source" in options else selection.voice,
                 generation=generation,
@@ -1168,9 +1442,7 @@ class PyKokoroEngineAdapter:
                 allow_experimental_frontend=bool(
                     options.get("allow_experimental_frontend", False)
                 ),
-                voice_level=pykokoro.VoiceLevelConfig(
-                    mode=options.get("voice_level", "off")
-                ),
+                voice_level=pykokoro.VoiceLevelConfig(**options["voice_level"]),
                 long_text_split="none",
                 long_text_use_spacy=False,
             )

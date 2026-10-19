@@ -9,8 +9,6 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from typing import Any, Literal
 
-import numpy as np
-
 from ..errors import (
     EmptySpeechTextError,
     EngineBackendError,
@@ -23,12 +21,14 @@ from ..errors import (
 )
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
+    PCM_RANGE_POLICY,
     EngineCapabilities,
     EngineSelection,
     RenderedSpeech,
     RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
+    adapt_pcm_full_scale,
     distribution_version,
     validate_rendered_speech,
 )
@@ -55,7 +55,7 @@ KITTEN_OPTION_NAMES = frozenset(
     }
 )
 
-KITTEN_PCM_RANGE_POLICY = "kitten-native-wav-clamp.v1"
+KITTEN_PCM_RANGE_POLICY = PCM_RANGE_POLICY
 
 
 class KittenSelectionError(ValueError):
@@ -324,24 +324,7 @@ class KittenSynthEngineSession:
             raise
         except Exception as exc:
             raise _translate_kitten_error(exc, self._selection, request) from exc
-        try:
-            raw_audio = np.asarray(result.audio, dtype=np.float32)
-        except (TypeError, ValueError, OverflowError):
-            # Let the shared validator report native values that cannot convert.
-            raw_audio = result.audio
-
-        clipped_samples = 0
-        peak_before_clip: float | None = None
-        audio = raw_audio
-        if (
-            isinstance(raw_audio, np.ndarray)
-            and raw_audio.ndim == 1
-            and raw_audio.size
-            and np.isfinite(raw_audio).all()
-        ):
-            peak_before_clip = float(np.max(np.abs(raw_audio)))
-            clipped_samples = int(np.count_nonzero(np.abs(raw_audio) > 1.0))
-            audio = np.clip(raw_audio, -1.0, 1.0).astype(np.float32, copy=False)
+        adaptation = adapt_pcm_full_scale(result.audio, engine_label="KittenSynth")
 
         metadata = dict(result.metadata or {})
         metadata.update(
@@ -351,23 +334,15 @@ class KittenSynthEngineSession:
                 "effective_speed": result.speed,
                 "pcm_range": {
                     "policy": KITTEN_PCM_RANGE_POLICY,
-                    "peak_before_clip": peak_before_clip,
-                    "clipped_samples": clipped_samples,
+                    "peak_before_clip": adaptation.peak_before_clip,
+                    "clipped_samples": adaptation.clipped_samples,
                 },
             }
         )
-        warnings: tuple[str, ...] = ()
-        if clipped_samples:
-            warnings = (
-                (
-                    "KittenSynth returned audio above full scale; "
-                    f"clamped {clipped_samples} sample(s) to [-1, 1] "
-                    f"(peak before clamp={peak_before_clip:.6f})."
-                ),
-            )
+        warnings = (adaptation.warning,) if adaptation.warning else ()
         rendered = RenderedSpeech(
             id=request.id,
-            audio=audio,
+            audio=adaptation.audio,
             sample_rate=result.sample_rate,
             warnings=warnings,
             word_timings=(),

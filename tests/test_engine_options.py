@@ -40,6 +40,17 @@ def test_engine_options_lists_all_accepted_names_and_optional_metadata(
     ) == ["unknown"]
 
 
+def test_kokoro_options_expose_shorthand_and_structured_capabilities() -> None:
+    options = {option.name: option for option in engine_options("kokoro")}
+
+    assert options["short_sentence"].value_type == "string|table"
+    assert "randomized-phrase" in options["short_sentence"].choices
+    assert options["short_sentence.resolve_mode"].default == "randomized-phrase"
+    assert options["short_sentence.min_phoneme_length"].minimum == 0
+    assert options["voice_level"].value_type == "string|table"
+    assert options["voice_level.gain_db"].value_type == "number"
+
+
 def test_engine_options_command_emits_deterministic_json(monkeypatch, capsys) -> None:
     option = EngineOption(name="speed", value_type="number", minimum=0.5, maximum=2.0)
     monkeypatch.setattr(

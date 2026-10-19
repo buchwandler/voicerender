@@ -36,6 +36,13 @@ class VoiceCloneRequest:
     refresh: bool = False
 
 
+def _source_transcript(source: VoiceSource) -> str | None:
+    transcript = source.metadata.get("transcript")
+    if transcript is None and source.origin is not None:
+        transcript = source.origin.get("reference_text")
+    return transcript
+
+
 def _source_for_request(request: VoiceCloneRequest) -> VoiceSource:
     selected = sum(
         value is not None
@@ -70,6 +77,11 @@ def _source_for_request(request: VoiceCloneRequest) -> VoiceSource:
         raise ProfileError("voice_source must be a source mapping or sidecar path")
     source = normalize_voice_source(source_value, allow_named=False)
     if request.transcript is not None:
+        source_transcript = _source_transcript(source)
+        if source_transcript is not None and source_transcript != request.transcript:
+            raise ProfileError(
+                "Conflicting transcript in voice source and clone request"
+            )
         metadata = dict(source.metadata)
         metadata["transcript"] = request.transcript
         source = normalize_voice_source(
@@ -129,26 +141,45 @@ def clone_voice_profile(
         raise ProfileError(
             "voice_source is selected by the clone request and cannot be overridden"
         )
-    source_transcript = source.metadata.get("transcript")
-    if source_transcript is None and source.origin is not None:
-        source_transcript = source.origin.get("reference_text")
+    source_transcript = _source_transcript(source)
     transcript = (
         request.transcript if request.transcript is not None else source_transcript
     )
-    accepted_options = set(adapter.capabilities().option_names) | set(
-        adapter.capabilities().options
-    )
-    transcript_option = next(
-        (name for name in ("reference_text", "transcript") if name in accepted_options),
-        None,
-    )
-    if transcript is not None and transcript_option is not None:
-        existing = options.get(transcript_option)
-        if existing is not None and existing != transcript:
-            raise ProfileError(
-                f"Conflicting transcript supplied in options.{transcript_option} and clone request"
+    capabilities = adapter.capabilities()
+    bind_reference_voice = getattr(adapter, "bind_reference_voice", None)
+    if callable(bind_reference_voice):
+        bound_options = bind_reference_voice(
+            target=target,
+            language=request.language,
+            voice_source=source.as_mapping(),
+            transcript=transcript,
+            options=options,
+        )
+        if not isinstance(bound_options, Mapping):
+            raise EngineSelectionError(
+                f"Engine {adapter.id!r} returned invalid reference voice options",
+                engine=adapter.id,
+                target_id=request.target_id,
+                code="voice_clone.invalid_binding",
             )
-        options[transcript_option] = transcript
+        options = dict(bound_options)
+    else:
+        accepted_options = set(capabilities.option_names) | set(capabilities.options)
+        transcript_option = next(
+            (
+                name
+                for name in ("reference_text", "transcript")
+                if name in accepted_options
+            ),
+            None,
+        )
+        if transcript is not None and transcript_option is not None:
+            existing = options.get(transcript_option)
+            if existing is not None and existing != transcript:
+                raise ProfileError(
+                    f"Conflicting transcript supplied in options.{transcript_option} and clone request"
+                )
+            options[transcript_option] = transcript
 
     return create_render_profile(
         engine=request.engine,

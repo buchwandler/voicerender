@@ -7,7 +7,7 @@ import pytest
 
 from voicerender.engines.base import EngineCapabilities
 from voicerender.engines.catalog import SynthesisTarget
-from voicerender.errors import EngineSelectionError
+from voicerender.errors import EngineSelectionError, ProfileError
 from voicerender.voice_clone import VoiceCloneRequest, clone_voice_profile
 
 
@@ -147,3 +147,73 @@ def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
 
     assert result["options"]["transcript"] == "From the source."
     assert result["voice_source"]["sha256"] == source["sha256"]
+
+
+def test_clone_uses_kokoro_adapter_to_bind_akinvox_transcript(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from voicerender.engines.kokoro import PyKokoroEngineAdapter
+
+    target = SynthesisTarget(
+        engine="kokoro",
+        id="clone-model",
+        display_name="AkinVox model",
+        languages=("en-US",),
+        capabilities=frozenset({"reference_voice", "voice_enrollment"}),
+        metadata={
+            "voice_mode": "reference",
+            "supports_reference_enrollment": True,
+            "supports_voice_enrollment": True,
+        },
+    )
+    adapter = PyKokoroEngineAdapter()
+    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: adapter)
+    monkeypatch.setattr(
+        "voicerender.voice_clone.discover_targets", lambda *args, **kwargs: (target,)
+    )
+    monkeypatch.setattr(
+        "voicerender.voice_clone.validate_voice_source", lambda *a, **k: ()
+    )
+    monkeypatch.setattr(
+        "voicerender.voice_clone.create_render_profile", lambda **kwargs: kwargs
+    )
+    reference = tmp_path / "speaker.wav"
+    reference.write_bytes(b"reference audio")
+
+    profile = clone_voice_profile(
+        VoiceCloneRequest(
+            "kokoro",
+            "clone-model",
+            "en-US",
+            reference_wav=reference,
+            transcript="Exact AkinVox transcript.",
+            options={"voice_enrollment": {"engine": "akinvox"}},
+        )
+    )
+
+    assert profile["options"]["voice_enrollment"] == {
+        "engine": "akinvox",
+        "reference_text": "Exact AkinVox transcript.",
+    }
+
+
+def test_clone_rejects_conflicting_source_and_cli_transcripts(
+    tmp_path: Path,
+) -> None:
+    from voicerender.voice_sources import local_reference_source
+
+    reference = tmp_path / "speaker.wav"
+    reference.write_bytes(b"reference audio")
+    source: dict[str, Any] = dict(local_reference_source(reference))
+    source["metadata"] = {"transcript": "Source transcript."}
+
+    with pytest.raises(ProfileError, match="Conflicting transcript"):
+        clone_voice_profile(
+            VoiceCloneRequest(
+                "fake",
+                "clone-model",
+                "en-US",
+                voice_source=source,
+                transcript="Different CLI transcript.",
+            )
+        )

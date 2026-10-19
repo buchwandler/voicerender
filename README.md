@@ -169,6 +169,27 @@ voicerender profile create \
 
 Preflight validates local content pins and managed catalog metadata, and measures text without fetching managed audio, enrolling a voice, or conditioning a reference. Rendering resolves the verified reference and enrolls it lazily; the enrolled voice is reused within that synthesis session. Canonical identity retains content/provenance pins and the exact AkinVox transcript digest, but excludes local/cache paths and raw transcript text. See the [RenderProfile lifecycle](docs/renderprofile.md) and [examples](examples/README.md) for details.
 
+### Kokoro quality and voice-level options
+
+Inspect Kokoro's accepted settings and their structured field descriptions with `voicerender engines options kokoro --json`. Existing string shorthand remains supported: `short_sentence` accepts `off`, `wrap`, `phrase`, or `randomized-phrase`; `voice_level` accepts `off` or `calibrated`. The structured forms expose the PyKokoro controls without adding VoiceRender-side audio processing:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target v1.0 --voice af_heart --language en-US \
+  --option 'short_sentence={"enabled":true,"resolve_mode":"phrase","min_phoneme_length":28}' \
+  --option 'voice_level={"mode":"calibrated"}' \
+  --output kokoro.renderprofile.toml
+
+# Explicit PyKokoro gain; also available when using an enrolled voice.
+voicerender profile bind kokoro.renderprofile.toml narrator \
+  --engine kokoro --target v1.0 --voice af_heart --language en-US \
+  --option 'voice_level={"mode":"off","gain_db":-1.5}' --in-place
+```
+
+`short_sentence` tables accept `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length` (default 30), `phoneme_pretext` (default `—`), and `phrase_fallback_tries` (default 1). Omitting the option leaves this PyKokoro quality fix unset; the `off` shorthand disables it. `voice_level` tables accept `mode` (`off` or `calibrated`) and finite numeric `gain_db`; an explicit gain takes precedence over the static calibration catalog. Automatic calibration is catalog-based for known model/quality/voice combinations and is unavailable for custom Inno/AkinVox enrolled voices, where an explicit gain may be used instead. These settings are PyKokoro's deterministic voice-level controls, not VoiceRender loudness normalization or mastering. VoiceRender separately adapts finite PCM overshoots at its artifact boundary; calibration does not guarantee a waveform will never need that adaptation.
+
+The enrollment paths remain distinct: **Inno** is a reference-audio voice tuner, does not require a transcript, and may accept `fmax`. **AkinVox** is transcript-conditioned cloning: it requires the exact non-empty spoken transcript, is English-only, and currently requires synthesis speed `1.0`. `voicerender voice clone --engine kokoro --target en-akinvox-cloning-v1 --reference-wav speaker.wav --transcript "Exact words spoken." --language en-US -o clone.renderprofile.toml` binds the generic transcript into AkinVox's enrollment options. Conflicting transcript sources and transcripts for Inno are rejected.
+
 ### ChatterboxSynth
 
 ChatterboxSynth is an optional English-only engine. Install the integration with `python -m pip install "voicerender[chatterbox]"`; VoiceRender discovers supported bundles (currently Nano v2 and Turbo) through ChatterboxSynth and opens only profiles already installed with the ChatterboxSynth/OnnxVoice tooling. Rendering and preflight never download or install a model.

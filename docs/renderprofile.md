@@ -206,6 +206,28 @@ Kokoro selects enrollment based on the target's discovered capabilities. `engine
 
 Preflight verifies local hashes and Voicefolio catalog metadata, then measures the request without fetching managed audio or enrolling/conditioning a voice. At synthesis time, the engine resolves the verified audio and lazily enrolls it; the enrolled voice is reused within that session. Canonical synthesis identity includes content/provenance pins, the selected enrollment engine/options, and the exact AkinVox transcript hash, but excludes local/cache paths and raw transcript text.
 
+## Kokoro quality and voice-level options
+
+`voicerender engines options kokoro --json` lists the adapter's accepted options and structured fields. The compatible shorthand forms remain `short_sentence = "off" | "wrap" | "phrase" | "randomized-phrase"` and `voice_level = "off" | "calibrated"`. These options may also be provided as tables:
+
+```toml
+[roles.narrator.binding.options.short_sentence]
+enabled = true
+resolve_mode = "randomized-phrase"
+min_phoneme_length = 30
+phoneme_pretext = "—"
+phrase_fallback_tries = 1
+
+[roles.narrator.binding.options.voice_level]
+mode = "calibrated"
+# Optional finite numeric PyKokoro gain; explicit gain takes precedence.
+# gain_db = -1.5
+```
+
+`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; the defaults are shown above. An omitted setting leaves PyKokoro's short-sentence fix unset, while the `off` shorthand disables it. `voice_level` accepts `mode = "off" | "calibrated"` and optional finite numeric `gain_db`. Calibrated mode uses PyKokoro's static per-model/quality/voice catalog; it is not runtime loudness normalization. Automatically matched catalog calibration is not available for custom enrolled voices, though explicit gain is supported. VoiceRender does not add loudness DSP; its separate PCM boundary adapter clamps finite full-scale overshoots and records diagnostics.
+
+Kokoro enrollment modes have different semantics. **Inno** uses reference audio to tune a voice, requires no transcript, and may accept `fmax`. **AkinVox** performs transcript-conditioned cloning: it requires the exact non-empty reference transcript, currently supports English only, and requires synthesis speed `1.0`. The generic `voicerender voice clone --engine kokoro ... --transcript ...` path binds that transcript into AkinVox's enrollment options. Conflicting transcript sources are rejected, and Inno does not accept a transcript. Reference resolution and enrollment remain lazy until rendering; preflight only checks pins/metadata and measures the text request.
+
 ## Qwen3Synth Base and VoiceDesign
 
 Qwen3Synth is an optional renderer. Install `voicerender[qwen3]` and install model bundles explicitly with ONNXVoice before using them:

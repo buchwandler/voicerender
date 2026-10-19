@@ -122,6 +122,9 @@ class ChapterRenderOutcome:
     preflight_report: Path | None = None
     replan_required: bool = False
     elapsed_seconds: float = 0.0
+    error_segment_number: int | None = None
+    error_segment_id: str | None = None
+    error_engine: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -921,6 +924,9 @@ def _render_chapter(
         manifest_complete=result.manifest.complete,
         error_code=((result.error_code or "render.failed") if result.failed else None),
         error_message=result.error,
+        error_segment_number=getattr(result, "error_segment_number", None),
+        error_segment_id=getattr(result, "error_segment_id", None),
+        error_engine=getattr(result, "error_engine", None),
         recheck_report=(
             recheck_report_path if result.fresh_preflight is not None else None
         ),
@@ -1260,6 +1266,12 @@ def _outcome_to_dict(
         item["error_code"] = outcome.error_code
     if outcome.error_message is not None:
         item["error_message"] = outcome.error_message
+    if outcome.error_segment_number is not None:
+        item["error_segment_number"] = outcome.error_segment_number
+    if outcome.error_segment_id is not None:
+        item["error_segment_id"] = outcome.error_segment_id
+    if outcome.error_engine is not None:
+        item["error_engine"] = outcome.error_engine
     return item
 
 

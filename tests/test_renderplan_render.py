@@ -48,6 +48,7 @@ from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import (
     ArtifactError,
+    EngineBackendError,
     PlanError,
     RenderEventCallbackError,
     UnsupportedSynthesisFeatureError,
@@ -94,6 +95,8 @@ class _Session:
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
         self.adapter.synthesized_texts.append(request.text)
         self.adapter.synthesized_requests.append(request)
+        if self.adapter.synthesis_error is not None:
+            raise self.adapter.synthesis_error
         return RenderedSpeech(
             id=request.id,
             audio=[0.0, 0.2, -0.2, 0.1],
@@ -114,6 +117,7 @@ class _Adapter:
         self.synthesized_requests: list[SpeechRequest] = []
         self.measurements: dict[str, RequestMeasure | Exception] = {}
         self.open_error: Exception | None = None
+        self.synthesis_error: Exception | None = None
         self.session = _Session(self)
 
     def probe_api(self) -> EngineApiProbe:
@@ -1640,3 +1644,35 @@ def test_estimate_renderplan_reports_verified_reuse_without_side_effects(
     assert adapter.open_count == before_open_count
     assert adapter.synthesized_texts == before_synthesized
     assert (output_dir / "render-manifest.toml").read_bytes() == before_manifest
+
+
+def test_render_failure_diagnostics_identify_segment_and_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.synthesis_error = EngineBackendError(
+        "backend failed", engine=adapter.id, request_id="request-1"
+    )
+    plan = _plan("fails during synthesis")
+    report = _report(adapter, plan, tmp_path)
+    output_dir = tmp_path / "render-output"
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output_dir,
+        cache_dir=tmp_path / "cache",
+    )
+
+    expected_segment_id = plan.speech[0].segment_id or plan.speech[0].computed_id()
+    assert result.failed
+    assert result.error_segment_number == 1
+    assert result.error_segment_id == expected_segment_id
+    assert result.error_engine == adapter.id
+    diagnostics = json.loads(
+        (output_dir / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
+    )
+    assert diagnostics["error_segment_number"] == 1
+    assert diagnostics["error_segment_id"] == expected_segment_id
+    assert diagnostics["error_engine"] == adapter.id
+    assert diagnostics["error_code"] == "synthesis.backend_error"

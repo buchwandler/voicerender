@@ -885,6 +885,9 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
         "diagnostics": str(result.manifest_path.parent / RENDER_DIAGNOSTICS_FILENAME),
         "pending_composition": result.pending_composition,
         "error_code": result.error_code,
+        "error_segment_number": result.error_segment_number,
+        "error_segment_id": result.error_segment_id,
+        "error_engine": result.error_engine,
         "execution_fingerprint": list(result.execution_fingerprint),
         "fresh_preflight": (
             _preflight_payload(result.fresh_preflight)

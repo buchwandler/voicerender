@@ -409,4 +409,4 @@ def test_canonical_identity_contains_versioned_pcm_range_policy(
 
     identity = KittenSynthEngineAdapter().canonical_synthesis_identity(selection)
 
-    assert identity["pcm_range_policy"] == "kitten-native-wav-clamp.v1"
+    assert identity["pcm_range_policy"] == KITTEN_PCM_RANGE_POLICY

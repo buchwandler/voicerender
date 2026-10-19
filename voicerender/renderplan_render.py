@@ -74,6 +74,9 @@ class RenderPlanResult:
     pending_composition: bool = False
 
     elapsed_seconds: float = 0.0
+    error_segment_number: int | None = None
+    error_segment_id: str | None = None
+    error_engine: str | None = None
 
     @property
     def failed(self) -> bool:
@@ -101,6 +104,9 @@ class _RenderFailure:
     message: str
     fresh_preflight: PreflightReport | None = None
     error_code: str = "render.failed"
+    error_segment_number: int | None = None
+    error_segment_id: str | None = None
+    error_engine: str | None = None
 
 
 def _render_progress_event(
@@ -422,6 +428,9 @@ def render_renderplan(
                                     if item.preflight_required
                                     else "engine.session_failed"
                                 ),
+                                error_segment_number=item.number,
+                                error_segment_id=current.segment_id,
+                                error_engine=current.selection.engine,
                             )
                             progress_tracker.complete("failed")
                             emit_render_event(
@@ -470,6 +479,9 @@ def render_renderplan(
                                     if fresh is not None
                                     else "engine.measurement_failed"
                                 ),
+                                error_segment_number=item.number,
+                                error_segment_id=current.segment_id,
+                                error_engine=current.selection.engine,
                             )
                             progress_tracker.complete("failed")
                             emit_render_event(
@@ -581,6 +593,11 @@ def render_renderplan(
                             if isinstance(error_code, str)
                             else "render.failed"
                         ),
+                        error_segment_number=item.number,
+                        error_segment_id=current.segment_id,
+                        error_engine=(
+                            getattr(exc, "engine", None) or current.selection.engine
+                        ),
                     )
                     fingerprint["execution_status"] = "render_failed"
                     execution_fingerprints[key] = _finalize_execution_fingerprint(
@@ -614,7 +631,20 @@ def render_renderplan(
                     f"Cannot persist fresh preflight report {recheck_report_path}: {exc}",
                     fresh_preflight=failure.fresh_preflight,
                     error_code="preflight.report_write_failed",
+                    error_segment_number=failure.error_segment_number,
+                    error_segment_id=failure.error_segment_id,
+                    error_engine=failure.error_engine,
                 )
+        if failure is not None:
+            diagnostics["error_code"] = failure.error_code
+            diagnostics["error_message"] = failure.message
+            if failure.error_segment_number is not None:
+                diagnostics["error_segment_number"] = failure.error_segment_number
+            if failure.error_segment_id is not None:
+                diagnostics["error_segment_id"] = failure.error_segment_id
+            if failure.error_engine is not None:
+                diagnostics["error_engine"] = failure.error_engine
+        atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
         current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
         manifest = _persist_manifest(
             parsed_plan,
@@ -645,6 +675,11 @@ def render_renderplan(
         execution_fingerprint=tuple(execution_fingerprints.values()),
         pending_composition=bool(deferred_controls),
         elapsed_seconds=final_snapshot.elapsed_seconds,
+        error_segment_number=(
+            failure.error_segment_number if failure is not None else None
+        ),
+        error_segment_id=failure.error_segment_id if failure is not None else None,
+        error_engine=failure.error_engine if failure is not None else None,
     )
     emit_render_event(
         on_event,
