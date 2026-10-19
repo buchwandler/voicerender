@@ -101,6 +101,7 @@ jobs:
             "pytest==8.0.0" \
             "numpy==1.23.0" \
             "soundfile==0.12.1" \
+            "tomlkit==0.13.3" \
             "tomli==2.0.1" \
             "renderplan==0.1.2" \
             "voicefolio==0.1.1"

@@ -14,6 +14,7 @@ keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
 dependencies = [
   "numpy>=1.23",
   "soundfile>=0.12",
+  "tomlkit>=0.13",
   "tomli>=2; python_version < '3.11'",
   "renderplan>=0.1.2,<0.2",
   "voicefolio>=0.1.1,<0.2",
