@@ -1,0 +1,98 @@
+rows:
+  - sha: 5ffdff4e822f5ea3bff212cf708a6d797029915d
+    inspected: true
+    inspected_paths:
+      - README.md
+      - tests/test_document_contract.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/document_contract.py
+      - voicerender/errors.py
+      - voicerender/estimates.py
+    observed_behavior: >-
+      Added SSMDDoc v1 workspace validation plus document-level render and estimate
+      operations that resolve a checked RenderPlan variant and keep outputs and
+      caches in variant-scoped workspace directories.
+    public_impact: public
+    decision: accepted
+    target_entry_key: document-workspace
+    target_entry_id: null
+    notes: Reviewed implementation and focused contract tests.
+    stale: false
+  - sha: efe4f37393479c1143e37f5288b8b586d3fbcc8c
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_document_contract.py
+      - tests/test_profile_roles_cli.py
+      - voicerender/cli.py
+      - voicerender/document.py
+    observed_behavior: >-
+      Expanded RenderProfile role workflows so one profile can describe a complete
+      cast with mixed engine bindings, including first-class role binding and
+      descriptive human and JSON profile inspection.
+    public_impact: public
+    decision: accepted
+    target_entry_key: mixed-engine-casts
+    target_entry_id: null
+    notes: Reviewed CLI, documentation, and role presentation tests.
+    stale: false
+  - sha: 304b84d7fca0509a1524e2d3131858740124ed1a
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - pyproject.toml
+    observed_behavior: >-
+      Added the tomlkit runtime dependency required by the release's TOML report
+      writing path and kept the dependency available in the test workflow.
+    public_impact: internal
+    decision: internal
+    target_entry_key: tomlkit-dependency
+    target_entry_id: null
+    notes: Packaging and workflow support only; intentionally excluded from public notes.
+    stale: false
+  - sha: 3d486d5fddcc8612430c321760e9ebd3d84607fc
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/renderprofile.md
+      - tests/test_engine_options.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_kokoro_reference.py
+      - tests/test_renderplan_render.py
+      - tests/test_voice_clone.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/renderplan_render.py
+      - voicerender/voice_clone.py
+    observed_behavior: >-
+      Added configurable Kokoro short-sentence and voice-level controls, normalized
+      and clamped finite PCM overshoots with diagnostics, enforced AkinVox transcript
+      and speed constraints, delegated engine-specific clone binding, and recorded
+      segment and engine identity in render failures.
+    public_impact: public
+    decision: accepted
+    target_entry_key: kokoro-rendering
+    target_entry_id: null
+    notes: Reviewed adapter, cloning, diagnostics, and regression tests.
+    stale: false
+  - sha: ccd30d20fcc85c71d35c850accaf41ffdc5fc960
+    inspected: true
+    inspected_paths:
+      - voicerender/renderplan_render.py
+    observed_behavior: >-
+      Refined render result typing for the existing failure-diagnostics fields
+      without changing runtime behavior.
+    public_impact: internal
+    decision: internal
+    target_entry_key: typing-maintenance
+    target_entry_id: null
+    notes: Static typing maintenance only; intentionally excluded from public notes.
+    stale: false

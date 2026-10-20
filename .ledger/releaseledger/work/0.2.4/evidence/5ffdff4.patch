@@ -1,0 +1,1108 @@
+ README.md                        |  12 ++
+ tests/test_document_contract.py  | 239 +++++++++++++++++++++
+ voicerender/__init__.py          |  14 +-
+ voicerender/cli.py               |  87 ++++++++
+ voicerender/document.py          | 440 +++++++++++++++++++++++++++++++++++++++
+ voicerender/document_contract.py | 127 +++++++++++
+ voicerender/errors.py            |  11 +
+ voicerender/estimates.py         |  42 +++-
+ 8 files changed, 970 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index e46dbc5..202cf9f 100644
+--- a/README.md
++++ b/README.md
+@@ -405,6 +405,18 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
+ - **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
+ - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
+
++## SSMDDoc document workspaces
++
++For one editable SSMDDoc, compile and project explicitly with UtterPlan, then render the exact fingerprinted variant with VoiceRender:
++
++```bash
++utterplan compile-document story.ssmdoc
++utterplan render-document story.ssmdoc --profile narration.renderprofile.toml
++voicerender render-document story.ssmdoc --variant narration--<profile-fingerprint>
++```
++
++The document output is stored under `.readio/voicerender/<variant>/document-0001/`. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
++
+ ## Tests
+
+ ```bash
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+new file mode 100644
+index 0000000..cef4b86
+--- /dev/null
++++ b/tests/test_document_contract.py
+@@ -0,0 +1,239 @@
++import json
++import shutil
++from pathlib import Path
++
++import pytest
++from renderplan import codec
++
++from voicerender.document_contract import (
++    DocumentWorkspaceError,
++    load_document_workspace,
++)
++from voicerender.estimates import estimate_render_document
++
++
++def _workspace(root: Path) -> Path:
++    root.mkdir()
++    (root / "manifest.json").write_text(
++        json.dumps(
++            {
++                "format": "ssmdconvert.document",
++                "schema_version": 1,
++                "ssmd_version": "0.9",
++                "document": {"id": "document-0001", "path": "document.ssmd.md"},
++            }
++        ),
++        encoding="utf-8",
++    )
++    (root / "document.ssmd.md").write_text("Hello.", encoding="utf-8")
++    return root
++
++
++def test_load_ssmdoc_workspace_root_and_canonical_document(tmp_path: Path) -> None:
++    root = _workspace(tmp_path / "story.ssmdoc")
++    index = load_document_workspace(root)
++    assert index.root == root.resolve()
++    assert index.document_id == "document-0001"
++    assert load_document_workspace(index.document_path) == index
++
++
++def test_rejects_wrong_format_and_traversal(tmp_path: Path) -> None:
++    root = _workspace(tmp_path / "story.ssmdoc")
++    manifest = json.loads((root / "manifest.json").read_text())
++    manifest["document"]["path"] = "../outside.md"
++    (root / "manifest.json").write_text(json.dumps(manifest))
++    with pytest.raises(DocumentWorkspaceError):
++        load_document_workspace(root)
++
++
++def test_rejects_zip_input(tmp_path: Path) -> None:
++    with pytest.raises(DocumentWorkspaceError):
++        load_document_workspace(tmp_path / "story.ssmdoc.zip")
++
++
++def test_document_estimate_resolves_exact_variant_without_creating_outputs(
++    tmp_path: Path,
++) -> None:
++    root = _workspace(tmp_path / "story.ssmdoc")
++    profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    profile_obj = codec.load_profile(profile)
++    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
++        "sha256:"
++    )[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document-0001.renderplan.toml",
++    )
++    estimate = estimate_render_document(root, variant=variant, speech="1")
++    assert estimate.selected_count == 1
++    assert not (root / ".readio/voicerender").exists()
++
++
++def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> None:
++    from voicerender import DocumentRenderError
++    from voicerender.document import _resolve_document_request
++
++    root = _workspace(tmp_path / "story.ssmdoc")
++    with pytest.raises(DocumentRenderError) as caught:
++        _resolve_document_request(root, variant="not-created--000000000000")
++    assert caught.value.code == "variant.not_found"
++
++
++def test_document_render_uses_preflight_and_existing_renderplan_executor(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    from types import SimpleNamespace
++
++    import voicerender.document as document_module
++
++    root = _workspace(tmp_path / "story.ssmdoc")
++    profile_path = (
++        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    )
++    profile_obj = codec.load_profile(profile_path)
++    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
++        "sha256:"
++    )[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document-0001.renderplan.toml",
++    )
++    calls: list[dict[str, object]] = []
++    monkeypatch.setattr(
++        document_module,
++        "_get_preflight",
++        lambda *args, **kwargs: SimpleNamespace(status="ok"),
++    )
++
++    def fake_render(plan: object, **kwargs: object) -> object:
++        calls.append(kwargs)
++        return SimpleNamespace(
++            manifest=SimpleNamespace(complete=False),
++            manifest_path=Path(kwargs["output_dir"]) / "render-manifest.toml",
++            failed=False,
++            planned_count=3,
++            selected_count=1,
++            available_count=0,
++            rendered_count=1,
++            reused_count=0,
++            fresh_preflight=None,
++            error_code=None,
++            error=None,
++            pending_composition=False,
++        )
++
++    monkeypatch.setattr(document_module, "render_renderplan", fake_render)
++    result = document_module.render_document(
++        root,
++        variant=variant,
++        speech="1",
++        force=True,
++        reset_stale_output=True,
++        emphasis_policy="defer-to-compose",
++    )
++    assert result.status == "partial"
++    assert result.selected_speech == 1
++    assert result.report_path.is_file()
++    assert calls[0]["speech_numbers"] == frozenset({1})
++    assert calls[0]["force"] is True
++    assert calls[0]["reset_stale_output"] is True
++
++
++def test_document_preflight_reject_stops_before_render(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    from types import SimpleNamespace
++
++    import voicerender.document as document_module
++
++    root = _workspace(tmp_path / "story.ssmdoc")
++    profile_path = (
++        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    )
++    profile_obj = codec.load_profile(profile_path)
++    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
++        "sha256:"
++    )[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document-0001.renderplan.toml",
++    )
++    monkeypatch.setattr(
++        document_module,
++        "_get_preflight",
++        lambda *args, **kwargs: SimpleNamespace(status="replan"),
++    )
++    monkeypatch.setattr(
++        document_module,
++        "render_renderplan",
++        lambda *args, **kwargs: pytest.fail("must not synthesize after replan"),
++    )
++    result = document_module.render_document(root, variant=variant)
++    assert result.error_code == "preflight.replan"
++    assert result.replan_required is True
++    assert result.preflight_report is not None
++    assert result.report_path.is_file()
++
++
++def test_document_render_reports_reused_complete_manifest(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    from types import SimpleNamespace
++
++    import voicerender.document as document_module
++
++    root = _workspace(tmp_path / "story.ssmdoc")
++    profile_path = (
++        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    )
++    profile_obj = codec.load_profile(profile_path)
++    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
++        "sha256:"
++    )[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document-0001.renderplan.toml",
++    )
++    monkeypatch.setattr(
++        document_module,
++        "_get_preflight",
++        lambda *args, **kwargs: SimpleNamespace(status="ok"),
++    )
++    monkeypatch.setattr(
++        document_module,
++        "render_renderplan",
++        lambda plan, **kwargs: SimpleNamespace(
++            manifest=SimpleNamespace(complete=True),
++            manifest_path=Path(kwargs["output_dir"]) / "render-manifest.toml",
++            failed=False,
++            planned_count=1,
++            selected_count=1,
++            available_count=1,
++            rendered_count=0,
++            reused_count=1,
++            fresh_preflight=None,
++            error_code=None,
++            error=None,
++            pending_composition=False,
++        ),
++    )
++    result = document_module.render_document(root, variant=variant)
++    assert result.status == "reused"
++    assert result.manifest_complete is True
++    assert result.reused == 1
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index 534d65d..bc6f611 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -18,6 +18,7 @@ from .book import (
+     ChapterRenderOutcome,
+     render_book,
+ )
++from .document import DocumentRenderRequest, DocumentRenderResult, render_document
+ from .engines.api_probe import EngineApiProbe
+ from .engines.assets import (
+     EngineAssetManager,
+@@ -57,6 +58,7 @@ from .engines.registry import (
+ from .engines.selection import EngineRequest
+ from .errors import (
+     ArtifactError,
++    DocumentRenderError,
+     EngineApiIncompatibleError,
+     EngineCapacityError,
+     EngineError,
+@@ -70,7 +72,12 @@ from .errors import (
+     UnsupportedSynthesisFeatureError,
+     VoiceRenderError,
+ )
+-from .estimates import RenderEstimate, estimate_render_book, estimate_renderplan
++from .estimates import (
++    RenderEstimate,
++    estimate_render_book,
++    estimate_render_document,
++    estimate_renderplan,
++)
+ from .events import (
+     RenderEvent,
+     RenderEventCallback,
+@@ -148,6 +155,9 @@ __all__ = [
+     "CatalogRequest",
+     "CatalogResult",
+     "ChapterRenderOutcome",
++    "DocumentRenderError",
++    "DocumentRenderRequest",
++    "DocumentRenderResult",
+     "EngineAdapter",
+     "EngineApiIncompatibleError",
+     "EngineApiProbe",
+@@ -221,6 +231,7 @@ __all__ = [
+     "engine_options",
+     "engine_status",
+     "estimate_render_book",
++    "estimate_render_document",
+     "estimate_renderplan",
+     "inspect_voice",
+     "install_model",
+@@ -243,6 +254,7 @@ __all__ = [
+     "remove_profile_role",
+     "render",
+     "render_book",
++    "render_document",
+     "render_plan",
+     "render_renderplan",
+     "resolve_prepared_voice",
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 45b9b07..120d4b9 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -22,6 +22,8 @@ from . import (
+     __version__,
+     render_book,
+ )
++from .document import _resolve_document_request
++from .document import render_document as _render_document
+ from .engines.options import engine_option_to_dict, engine_options
+ from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
+ from .engines.registry import (
+@@ -458,6 +460,26 @@ def build_parser() -> argparse.ArgumentParser:
+     book_render.add_argument("--json", action="store_true")
+     _add_progress_option(book_render)
+
++    document_render = commands.add_parser(
++        "render-document", help="Render one SSMDDoc workspace RenderPlan"
++    )
++    document_render.add_argument(
++        "document", type=Path, help="SSMDDoc workspace or canonical document.ssmd.md"
++    )
++    document_render.add_argument(
++        "--variant", required=True, help="exact RenderPlan variant directory name"
++    )
++    document_render.add_argument("--speech", default="all", metavar="SELECTOR")
++    document_render.add_argument("--renderplan-root", type=Path)
++    document_render.add_argument("--output-root", type=Path)
++    document_render.add_argument("--cache-dir", type=Path)
++    document_render.add_argument("--force", action="store_true")
++    document_render.add_argument("--reset-stale", action="store_true")
++    document_render.add_argument(
++        "--emphasis-policy", choices=("reject", "defer-to-compose"), default="reject"
++    )
++    document_render.add_argument("--json", action="store_true")
++    _add_progress_option(document_render)
+     inspect = commands.add_parser(
+         "inspect-manifest", help="Verify a render manifest and its WAVs"
+     )
+@@ -1786,6 +1808,71 @@ def main(argv: list[str] | None = None) -> int:
+                 return 2 if fresh is not None and fresh.status == "replan" else 1
+             return 0
+
++        if args.command == "render-document":
++            progress = _progress_callback(args)
++            try:
++                request = _resolve_document_request(
++                    args.document,
++                    variant=args.variant,
++                    speech=args.speech,
++                    renderplan_root=args.renderplan_root,
++                    output_root=args.output_root,
++                    cache_dir=args.cache_dir,
++                    force=args.force,
++                    reset_stale_output=args.reset_stale,
++                    emphasis_policy=args.emphasis_policy,
++                )
++                print("VoiceRender document render", file=sys.stderr)
++                print(f"  workspace:   {request.workspace}", file=sys.stderr)
++                print(f"  document:    {request.document_id}", file=sys.stderr)
++                print(f"  variant:     {request.variant_name}", file=sys.stderr)
++                print(f"  profile-id:  {request.render_profile_id}", file=sys.stderr)
++                print(f"  renderplan:  {request.renderplan_path}", file=sys.stderr)
++                print(f"  output:      {request.output_dir}", file=sys.stderr)
++                print(f"  cache:       {request.cache_dir}", file=sys.stderr)
++                print(f"  speech:      {request.speech_selector}", file=sys.stderr)
++                result = _render_document(
++                    args.document,
++                    variant=args.variant,
++                    speech=args.speech,
++                    renderplan_root=args.renderplan_root,
++                    output_root=args.output_root,
++                    cache_dir=args.cache_dir,
++                    force=args.force,
++                    reset_stale_output=args.reset_stale,
++                    emphasis_policy=args.emphasis_policy,
++                    on_event=progress,
++                )
++            except (OSError, ValueError, TypeError) as exc:
++                payload = {
++                    "error": str(exc),
++                    "code": getattr(exc, "code", "workspace.invalid"),
++                    "exit_code": 2,
++                }
++                if args.json:
++                    print(json.dumps(payload, ensure_ascii=False, indent=2))
++                else:
++                    print(f"error: {exc}", file=sys.stderr)
++                return 2
++            finally:
++                if progress is not None:
++                    progress.finish()
++            if args.json:
++                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
++            else:
++                print("VoiceRender document summary", file=sys.stderr)
++                print(f"  status:   {result.status}", file=sys.stderr)
++                print(f"  planned:  {result.planned_speech}", file=sys.stderr)
++                print(f"  selected: {result.selected_speech}", file=sys.stderr)
++                print(f"  rendered: {result.rendered}", file=sys.stderr)
++                print(f"  reused:   {result.reused}", file=sys.stderr)
++                print(f"  report:   {result.report_path}", file=sys.stderr)
++                if result.preflight_report:
++                    print(f"  preflight: {result.preflight_report}", file=sys.stderr)
++                if result.error_code:
++                    print(f"FAILED: {result.error_code}", file=sys.stderr)
++            return result.exit_code
++
+         if args.command == "render-book":
+             progress = _progress_callback(args)
+             try:
+diff --git a/voicerender/document.py b/voicerender/document.py
+new file mode 100644
+index 0000000..c62f525
+--- /dev/null
++++ b/voicerender/document.py
+@@ -0,0 +1,440 @@
++"""Single-document SSMDDoc rendering on the existing RenderPlan execution path."""
++
++from __future__ import annotations
++
++import os
++import re
++import tempfile
++from dataclasses import dataclass, replace
++from pathlib import Path
++from time import monotonic
++from typing import Any, Literal
++
++import tomlkit
++from renderplan import RenderPlan, load_plan
++from renderplan import codec as renderplan_codec
++
++from .book import _get_preflight
++from .document_contract import DocumentWorkspaceError, load_document_workspace
++from .errors import ArtifactError, DocumentRenderError, PlanError
++from .events import RenderEventCallback
++from .renderplan_input import EmphasisPolicy
++from .renderplan_render import RENDER_MANIFEST_FILENAME, render_renderplan
++
++
++@dataclass(frozen=True, slots=True)
++class DocumentRenderRequest:
++    workspace: Path
++    document_id: str
++    variant_name: str
++    renderplan_variant_dir: Path
++    profile_path: Path
++    renderplan_path: Path
++    output_variant_dir: Path
++    output_dir: Path
++    cache_dir: Path
++    speech_numbers: frozenset[int] | None
++    speech_selector: str
++    force: bool
++    reset_stale_output: bool
++    emphasis_policy: EmphasisPolicy
++    render_profile_id: str
++    plan: RenderPlan
++
++
++@dataclass(frozen=True, slots=True)
++class DocumentRenderResult:
++    request: DocumentRenderRequest
++    report_path: Path
++    preflight_report: Path | None
++    recheck_report: Path | None
++    manifest: Path | None
++    status: Literal["complete", "partial", "failed", "reused"]
++    planned_speech: int
++    selected_speech: int
++    available_speech: int
++    rendered: int
++    reused: int
++    manifest_complete: bool
++    error_code: str | None = None
++    error_message: str | None = None
++    replan_required: bool = False
++    pending_composition: bool = False
++    elapsed_seconds: float = 0.0
++
++    @property
++    def exit_code(self) -> int:
++        return 1 if self.status == "failed" else 0
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "workspace": str(self.request.workspace),
++            "document_id": self.request.document_id,
++            "variant": self.request.variant_name,
++            "render_profile_id": self.request.render_profile_id,
++            "renderplan": str(self.request.renderplan_path),
++            "output": str(self.request.output_dir),
++            "cache": str(self.request.cache_dir),
++            "speech_selector": self.request.speech_selector,
++            "status": self.status,
++            "planned_speech": self.planned_speech,
++            "selected_speech": self.selected_speech,
++            "available_speech": self.available_speech,
++            "rendered": self.rendered,
++            "reused": self.reused,
++            "manifest_complete": self.manifest_complete,
++            "preflight_report": str(self.preflight_report)
++            if self.preflight_report
++            else None,
++            "recheck_report": str(self.recheck_report) if self.recheck_report else None,
++            "manifest": str(self.manifest) if self.manifest else None,
++            "report": str(self.report_path),
++            "error_code": self.error_code,
++            "error_message": self.error_message,
++            "replan_required": self.replan_required,
++            "pending_composition": self.pending_composition,
++            "elapsed_seconds": self.elapsed_seconds,
++            "exit_code": self.exit_code,
++        }
++
++
++def _resolve_document_request(
++    workspace: str | Path,
++    *,
++    variant: str,
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    reset_stale_output: bool = False,
++    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++) -> DocumentRenderRequest:
++    index = load_document_workspace(workspace)
++    if (
++        not isinstance(variant, str)
++        or not variant
++        or variant in {".", ".."}
++        or "/" in variant
++        or "\\" in variant
++        or "\x00" in variant
++        or Path(variant).name != variant
++    ):
++        raise DocumentWorkspaceError("variant must be an exact safe directory basename")
++    rp_root = (
++        Path(renderplan_root).expanduser()
++        if renderplan_root is not None
++        else index.root / ".readio" / "renderplan"
++    )
++    variant_dir = rp_root / variant
++    rp_root = rp_root.resolve(strict=False)
++    if not variant_dir.is_dir():
++        raise DocumentRenderError(
++            f"RenderPlan variant not found: {variant_dir}", code="variant.not_found"
++        )
++    variant_dir = variant_dir.resolve(strict=True)
++    if not _within(variant_dir, rp_root):
++        raise DocumentWorkspaceError("RenderPlan variant escapes the selected root")
++    if not variant_dir.is_dir():
++        raise DocumentRenderError(
++            f"RenderPlan variant not found: {variant_dir}", code="variant.not_found"
++        )
++    snapshot = variant_dir / "renderprofile.toml"
++    snapshot = _contained_regular(snapshot, variant_dir, "profile snapshot")
++    if not snapshot.is_file():
++        raise DocumentRenderError(
++            f"profile snapshot missing: {snapshot}", code="profile.snapshot_missing"
++        )
++    profile = renderplan_codec.load_profile(snapshot)
++    profile_id = profile.profile_id or profile.computed_id()
++    if not variant.endswith("--" + profile_id.removeprefix("sha256:")[:12]):
++        raise DocumentRenderError(
++            "variant fingerprint does not match profile snapshot",
++            code="variant.identity_mismatch",
++        )
++    plan_path = variant_dir / f"{index.document_id}.renderplan.toml"
++    plan_path = _contained_regular(plan_path, variant_dir, "RenderPlan")
++    plan = load_plan(plan_path)
++    if not isinstance(plan, RenderPlan) or plan.render_profile_id != profile_id:
++        raise DocumentRenderError(
++            "RenderPlan profile identity does not match profile snapshot",
++            code="plan.identity_mismatch",
++        )
++    if speech.strip().lower() == "all":
++        selected = None
++    else:
++        numbers: set[int] = set()
++        try:
++            for part in speech.split(","):
++                match = re.fullmatch(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*", part)
++                if not match:
++                    raise ValueError
++                start, end = int(match.group(1)), int(match.group(2) or match.group(1))
++                if start < 1 or end < start or end > len(plan.speech):
++                    raise ValueError
++                numbers.update(range(start, end + 1))
++        except ValueError as exc:
++            raise DocumentRenderError(
++                f"invalid speech selector: {speech}", code="selection.invalid"
++            ) from exc
++        selected = frozenset(numbers)
++    out_root = (
++        Path(output_root).expanduser()
++        if output_root is not None
++        else index.root / ".readio" / "voicerender"
++    )
++    out_root = out_root.resolve(strict=False)
++    out_variant = (out_root / variant).resolve(strict=False)
++    if not _within(out_variant, out_root):
++        raise DocumentWorkspaceError("output variant escapes the selected root")
++    output = out_variant / index.document_id
++    cache = (
++        Path(cache_dir).expanduser()
++        if cache_dir is not None
++        else out_variant / ".voicerender-cache"
++    )
++    output = output.resolve(strict=False)
++    cache = cache.resolve(strict=False)
++    if not _within(output, out_variant) or not _within(cache, out_variant):
++        raise DocumentWorkspaceError(
++            "output and cache paths must be contained by the output variant"
++        )
++    if output.is_relative_to(cache) or cache.is_relative_to(output):
++        raise DocumentWorkspaceError(
++            "cache and document output paths must be siblings, not nested"
++        )
++    if output.resolve(strict=False).is_relative_to(variant_dir.resolve(strict=False)):
++        raise DocumentWorkspaceError(
++            "VoiceRender output must not be inside the RenderPlan variant"
++        )
++    return DocumentRenderRequest(
++        index.root,
++        index.document_id,
++        variant,
++        variant_dir,
++        snapshot,
++        plan_path,
++        out_variant,
++        output,
++        cache,
++        selected,
++        speech,
++        force,
++        reset_stale_output,
++        EmphasisPolicy(emphasis_policy),
++        profile_id,
++        plan,
++    )
++
++
++def render_document(
++    workspace: str | Path,
++    *,
++    variant: str,
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    reset_stale_output: bool = False,
++    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    on_event: RenderEventCallback | None = None,
++) -> DocumentRenderResult:
++    start = monotonic()
++    request = _resolve_document_request(
++        workspace,
++        variant=variant,
++        speech=speech,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++        cache_dir=cache_dir,
++        force=force,
++        reset_stale_output=reset_stale_output,
++        emphasis_policy=emphasis_policy,
++    )
++    report_path = request.output_variant_dir / "voicerender-report.toml"
++    preflight_path = request.output_dir / "preflight.toml"
++    recheck_path = request.output_dir / "preflight-recheck.toml"
++    manifest_path = request.output_dir / RENDER_MANIFEST_FILENAME
++    try:
++        request.output_dir.mkdir(parents=True, exist_ok=True)
++        preflight = _get_preflight(
++            request.plan,
++            preflight_path,
++            emphasis_policy=request.emphasis_policy,
++            on_event=on_event,
++        )
++        if preflight.status != "ok":
++            code = (
++                "preflight.replan"
++                if preflight.status == "replan"
++                else "preflight.reject"
++            )
++            result = DocumentRenderResult(
++                request,
++                report_path,
++                preflight_path,
++                None,
++                None,
++                "failed",
++                len(request.plan.speech),
++                len(request.plan.speech)
++                if request.speech_numbers is None
++                else len(request.speech_numbers),
++                0,
++                0,
++                0,
++                False,
++                code,
++                f"RenderPlan preflight status is {preflight.status!r}",
++                preflight.status == "replan",
++            )
++        else:
++            rendered = render_renderplan(
++                request.plan,
++                preflight=preflight,
++                output_dir=request.output_dir,
++                cache_dir=request.cache_dir,
++                force=request.force,
++                reset_stale_output=request.reset_stale_output,
++                recheck_report_path=recheck_path,
++                speech_numbers=request.speech_numbers,
++                emphasis_policy=request.emphasis_policy,
++                on_event=on_event,
++            )
++            result = DocumentRenderResult(
++                request,
++                report_path,
++                preflight_path,
++                recheck_path if rendered.fresh_preflight else None,
++                rendered.manifest_path,
++                "failed"
++                if rendered.failed
++                else (
++                    "reused"
++                    if rendered.rendered_count == 0
++                    and rendered.reused_count > 0
++                    and rendered.manifest.complete
++                    else ("complete" if rendered.manifest.complete else "partial")
++                ),
++                rendered.planned_count,
++                rendered.selected_count,
++                rendered.available_count,
++                rendered.rendered_count,
++                rendered.reused_count,
++                rendered.manifest.complete,
++                rendered.error_code,
++                rendered.error,
++                False,
++                rendered.pending_composition,
++            )
++    except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
++        code = getattr(exc, "code", None) or "render.failed"
++        result = DocumentRenderResult(
++            request,
++            report_path,
++            preflight_path if preflight_path.exists() else None,
++            None,
++            manifest_path if manifest_path.exists() else None,
++            "failed",
++            len(request.plan.speech),
++            len(request.plan.speech)
++            if request.speech_numbers is None
++            else len(request.speech_numbers),
++            0,
++            0,
++            0,
++            False,
++            code,
++            str(exc),
++        )
++    result = replace(result, elapsed_seconds=monotonic() - start)
++    _write_report(result)
++    return result
++
++
++def _write_report(result: DocumentRenderResult) -> None:
++    req = result.request
++    data = {
++        "format": "voicerender-document-report",
++        "version": 1,
++        "workspace": str(req.workspace),
++        "document_id": req.document_id,
++        "variant": req.variant_name,
++        "render_profile_id": req.render_profile_id,
++        "renderplan": str(req.renderplan_path),
++        "render_plan_id": req.plan.plan_id,
++        "source_plan_id": req.plan.source_plan_id,
++        "output": str(req.output_dir),
++        "cache": str(req.cache_dir),
++        "speech_selector": req.speech_selector,
++        "planned_speech": result.planned_speech,
++        "selected_speech": result.selected_speech,
++        "available_speech": result.available_speech,
++        "rendered": result.rendered,
++        "reused": result.reused,
++        "status": result.status,
++        "manifest_complete": result.manifest_complete,
++        "pending_composition": result.pending_composition,
++        "replan_required": result.replan_required,
++        "elapsed_seconds": result.elapsed_seconds,
++    }
++    for key, val in (
++        ("preflight_report", result.preflight_report),
++        ("recheck_report", result.recheck_report),
++        ("manifest", result.manifest),
++        ("error_code", result.error_code),
++        ("error_message", result.error_message),
++    ):
++        if val is not None:
++            data[key] = str(val) if isinstance(val, Path) else val
++    _atomic_write_text(result.report_path, tomlkit.dumps(data))
++
++
++def _atomic_write_text(path: Path, content: str) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    descriptor, name = tempfile.mkstemp(
++        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
++    )
++    temporary = Path(name)
++    try:
++        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
++            stream.write(content)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, path)
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
++def _within(path: Path, root: Path) -> bool:
++    try:
++        path.relative_to(root)
++        return True
++    except ValueError:
++        return False
++
++
++def _contained_regular(path: Path, root: Path, label: str) -> Path:
++    try:
++        resolved = path.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise DocumentRenderError(
++            f"{label} missing or unreadable: {path}",
++            code="profile.snapshot_missing"
++            if label == "profile snapshot"
++            else "plan.missing",
++        ) from exc
++    if not _within(resolved, root.resolve(strict=True)) or not resolved.is_file():
++        raise DocumentWorkspaceError(
++            f"{label} must be a contained regular file: {path}"
++        )
++    return resolved
++
++
++__all__ = [
++    "DocumentRenderRequest",
++    "DocumentRenderResult",
++    "_resolve_document_request",
++    "render_document",
++]
+diff --git a/voicerender/document_contract.py b/voicerender/document_contract.py
+new file mode 100644
+index 0000000..d39a473
+--- /dev/null
++++ b/voicerender/document_contract.py
+@@ -0,0 +1,127 @@
++"""Minimal, dependency-free SSMDDoc v1 workspace identity reader."""
++
++from __future__ import annotations
++
++import json
++import re
++from dataclasses import dataclass
++from pathlib import Path, PurePosixPath
++from typing import Any
++
++from .errors import DocumentRenderError
++
++MAX_MANIFEST_BYTES = 2 * 1024 * 1024
++DOCUMENT_FORMAT = "ssmdconvert.document"
++
++
++class DocumentWorkspaceError(DocumentRenderError):
++    """The input is not a safe, valid SSMDDoc v1 workspace."""
++
++
++@dataclass(frozen=True, slots=True)
++class DocumentWorkspaceIndex:
++    root: Path
++    manifest_path: Path
++    document_id: str
++    document_path: Path
++
++
++def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
++    """Resolve a workspace root or its canonical document file without parsing SSMD."""
++    input_path = Path(value).expanduser()
++    if input_path.suffix.lower() == ".zip" or input_path.name.lower().endswith(
++        ".ssmdoc.zip"
++    ):
++        raise DocumentWorkspaceError("ZIP bundles are not accepted by render-document")
++    try:
++        input_path = input_path.resolve(strict=True)
++        root = (
++            input_path.parent
++            if input_path.is_file() and input_path.name == "document.ssmd.md"
++            else input_path
++        )
++        root = root.resolve(strict=True)
++        if not root.is_dir():
++            raise DocumentWorkspaceError(
++                "document workspace input is not a directory or canonical document"
++            )
++        manifest = root / "manifest.json"
++        if manifest.is_symlink():
++            raise DocumentWorkspaceError("manifest.json must not be a symlink")
++        manifest = manifest.resolve(strict=True)
++        if not _within(manifest, root) or not manifest.is_file():
++            raise DocumentWorkspaceError(
++                "manifest.json is not a contained regular file"
++            )
++        if manifest.stat().st_size > MAX_MANIFEST_BYTES:
++            raise DocumentWorkspaceError("manifest.json exceeds the 2 MiB size limit")
++        raw = manifest.read_bytes().decode("utf-8", errors="strict")
++        data: Any = json.loads(raw)
++    except DocumentWorkspaceError:
++        raise
++    except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError) as exc:
++        raise DocumentWorkspaceError(f"cannot read SSMDDoc workspace: {exc}") from exc
++    if not isinstance(data, dict):
++        raise DocumentWorkspaceError("manifest root must be a JSON object")
++    if (
++        data.get("format") != DOCUMENT_FORMAT
++        or data.get("schema_version") != 1
++        or data.get("ssmd_version") != "0.9"
++    ):
++        raise DocumentWorkspaceError("unsupported SSMDDoc manifest format or version")
++    document = data.get("document")
++    if not isinstance(document, dict) or document.get("id") != "document-0001":
++        raise DocumentWorkspaceError(
++            "manifest document must have canonical id document-0001"
++        )
++    relative = document.get("path")
++    if (
++        not isinstance(relative, str)
++        or not relative
++        or "\x00" in relative
++        or "\\" in relative
++        or re.match(r"^[A-Za-z]:", relative)
++    ):
++        raise DocumentWorkspaceError("manifest document path is unsafe")
++    posix = PurePosixPath(relative)
++    if (
++        posix.is_absolute()
++        or any(part in {"", ".", ".."} for part in relative.split("/"))
++        or posix.as_posix() != relative
++    ):
++        raise DocumentWorkspaceError(
++            "manifest document path must be normalized and relative"
++        )
++    if relative != "document.ssmd.md":
++        raise DocumentWorkspaceError("schema v1 document path must be document.ssmd.md")
++    document_path = root / relative
++    if document_path.is_symlink():
++        raise DocumentWorkspaceError(
++            "canonical document must not escape through a symlink"
++        )
++    try:
++        resolved_document = document_path.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise DocumentWorkspaceError(
++            f"canonical document is missing or unsafe: {exc}"
++        ) from exc
++    if not _within(resolved_document, root) or not resolved_document.is_file():
++        raise DocumentWorkspaceError(
++            "canonical document is not a contained regular file"
++        )
++    return DocumentWorkspaceIndex(root, manifest, "document-0001", resolved_document)
++
++
++def _within(path: Path, root: Path) -> bool:
++    try:
++        path.relative_to(root)
++        return True
++    except ValueError:
++        return False
++
++
++__all__ = [
++    "DocumentWorkspaceError",
++    "DocumentWorkspaceIndex",
++    "load_document_workspace",
++]
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+index 2b64fa6..e9f6916 100644
+--- a/voicerender/errors.py
++++ b/voicerender/errors.py
+@@ -5,6 +5,17 @@ class VoiceRenderError(Exception):
+     """Base error for VoiceRender."""
+
+
++class DocumentRenderError(VoiceRenderError, ValueError):
++    """A document workspace or document-render request is invalid."""
++
++    code = "workspace.invalid"
++
++    def __init__(self, message: str, *, code: str = "workspace.invalid") -> None:
++        super().__init__(message)
++        self.message = message
++        self.code = code
++
++
+ class RenderEventCallbackError(VoiceRenderError):
+     """A synchronous render-event callback raised an exception."""
+
+diff --git a/voicerender/estimates.py b/voicerender/estimates.py
+index fd7aa4e..c618216 100644
+--- a/voicerender/estimates.py
++++ b/voicerender/estimates.py
+@@ -19,6 +19,41 @@ from .renderplan_render import (
+ from .storage import verified_wav
+
+
++def estimate_render_document(
++    workspace: str | Path,
++    *,
++    variant: str,
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    reset_stale_output: bool = False,
++    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++) -> RenderEstimate:
++    """Estimate one document's selected RenderPlan work without side effects."""
++    from .document import _resolve_document_request
++
++    request = _resolve_document_request(
++        workspace,
++        variant=variant,
++        speech=speech,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++        cache_dir=cache_dir,
++        force=force,
++        reset_stale_output=reset_stale_output,
++        emphasis_policy=emphasis_policy,
++    )
++    return estimate_renderplan(
++        request.plan,
++        output_dir=request.output_dir,
++        speech_numbers=request.speech_numbers,
++        force=force,
++        reset_stale_output=reset_stale_output,
++    )
++
++
+ @dataclass(frozen=True, slots=True)
+ class RenderEstimate:
+     """Workload and verified-output reuse counts without a latency prediction."""
+@@ -176,4 +211,9 @@ def _estimate(selected_count: int, reusable_count: int) -> RenderEstimate:
+     )
+
+
+-__all__ = ["RenderEstimate", "estimate_render_book", "estimate_renderplan"]
++__all__ = [
++    "RenderEstimate",
++    "estimate_render_book",
++    "estimate_render_document",
++    "estimate_renderplan",
++]

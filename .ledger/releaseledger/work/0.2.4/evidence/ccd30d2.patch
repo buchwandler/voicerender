@@ -1,0 +1,16 @@
+ voicerender/renderplan_render.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index b1e292b..b6b88fe 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -226,7 +226,7 @@ def render_renderplan(
+         for item in emphasis_items
+         if policy is EmphasisPolicy.DEFER_TO_COMPOSE
+     ]
+-    diagnostics = {
++    diagnostics: dict[str, Any] = {
+         "schema": "voicerender.render-diagnostics.v1",
+         "render_plan_id": parsed_plan.plan_id or parsed_plan.computed_id(),
+         "emphasis_policy": policy.value,

@@ -1,0 +1,96 @@
+{
+  "candidate_count": 5,
+  "candidates": [
+    {
+      "additions": 970,
+      "deletions": 2,
+      "patch_file": "5ffdff4.patch",
+      "patch_sha256": "41ac420d983c71abf938540d62675995b63f321876373a995912db05b7226e48",
+      "paths": [
+        "README.md",
+        "tests/test_document_contract.py",
+        "voicerender/__init__.py",
+        "voicerender/cli.py",
+        "voicerender/document.py",
+        "voicerender/document_contract.py",
+        "voicerender/errors.py",
+        "voicerender/estimates.py"
+      ],
+      "sha": "5ffdff4e822f5ea3bff212cf708a6d797029915d",
+      "short_sha": "5ffdff4",
+      "source_ref": "git:5ffdff4e822f5ea3bff212cf708a6d797029915d"
+    },
+    {
+      "additions": 416,
+      "deletions": 86,
+      "patch_file": "efe4f37.patch",
+      "patch_sha256": "0bbf99af6e1aa268f696c2323acca6d18f122da471c2c9a9c358204b073d8e83",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "docs/renderprofile.md",
+        "tests/test_document_contract.py",
+        "tests/test_profile_roles_cli.py",
+        "voicerender/cli.py",
+        "voicerender/document.py"
+      ],
+      "sha": "efe4f37393479c1143e37f5288b8b586d3fbcc8c",
+      "short_sha": "efe4f37",
+      "source_ref": "git:efe4f37393479c1143e37f5288b8b586d3fbcc8c"
+    },
+    {
+      "additions": 2,
+      "deletions": 0,
+      "patch_file": "304b84d.patch",
+      "patch_sha256": "faf1624969a18676eed0d67fe3c4979c7351bbd3f46fa896df9739bee4fde81a",
+      "paths": [".github/workflows/tests.yml", "pyproject.toml"],
+      "sha": "304b84d7fca0509a1524e2d3131858740124ed1a",
+      "short_sha": "304b84d",
+      "source_ref": "git:304b84d7fca0509a1524e2d3131858740124ed1a"
+    },
+    {
+      "additions": 1028,
+      "deletions": 73,
+      "patch_file": "3d486d5.patch",
+      "patch_sha256": "7d205c0d2d919fdad2557f3f71b1dd5d5174f7ac9210c008a87c04a94b1509a3",
+      "paths": [
+        "README.md",
+        "docs/renderprofile.md",
+        "tests/test_engine_options.py",
+        "tests/test_kittensynth_engine.py",
+        "tests/test_kokoro_reference.py",
+        "tests/test_renderplan_render.py",
+        "tests/test_voice_clone.py",
+        "voicerender/book.py",
+        "voicerender/cli.py",
+        "voicerender/document.py",
+        "voicerender/engines/base.py",
+        "voicerender/engines/kittensynth.py",
+        "voicerender/engines/kokoro.py",
+        "voicerender/renderplan_render.py",
+        "voicerender/voice_clone.py"
+      ],
+      "sha": "3d486d5fddcc8612430c321760e9ebd3d84607fc",
+      "short_sha": "3d486d5",
+      "source_ref": "git:3d486d5fddcc8612430c321760e9ebd3d84607fc"
+    },
+    {
+      "additions": 1,
+      "deletions": 1,
+      "patch_file": "ccd30d2.patch",
+      "patch_sha256": "9a453986e0b1e41a3fe9b980886882aa74e355c29753dbb5901155e8a6e3f84b",
+      "paths": ["voicerender/renderplan_render.py"],
+      "sha": "ccd30d20fcc85c71d35c850accaf41ffdc5fc960",
+      "short_sha": "ccd30d2",
+      "source_ref": "git:ccd30d20fcc85c71d35c850accaf41ffdc5fc960"
+    }
+  ],
+  "git_base_ref": "817587bef3fafffbe39f6b8b715720263dec50dd",
+  "git_base_sha": "817587bef3fafffbe39f6b8b715720263dec50dd",
+  "git_head_ref": "ccd30d20fcc85c71d35c850accaf41ffdc5fc960",
+  "git_head_sha": "ccd30d20fcc85c71d35c850accaf41ffdc5fc960",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.2.4",
+  "schema_version": 1
+}

@@ -1,0 +1,815 @@
+ README.md                       |  60 ++++++++++++-----
+ docs/index.md                   |   6 +-
+ docs/renderprofile.md           |  80 +++++++++++++++++++----
+ tests/test_document_contract.py |  73 ++++++++++++++++++---
+ tests/test_profile_roles_cli.py | 139 ++++++++++++++++++++++++++++++++++++++--
+ voicerender/cli.py              | 136 ++++++++++++++++++++++++++++-----------
+ voicerender/document.py         |   8 ++-
+ 7 files changed, 416 insertions(+), 86 deletions(-)
+
+diff --git a/README.md b/README.md
+index 202cf9f..edef655 100644
+--- a/README.md
++++ b/README.md
+@@ -46,7 +46,7 @@ PiperSynth owns the authoritative phoneme-capacity decision, and the `.[piper]`
+
+ ## CLI workflow
+
+-A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create a profile through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
++A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create the first/default role of a complete cast through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
+
+ ```bash
+ voicerender engines list
+@@ -127,21 +127,23 @@ voicerender voice clone --engine ENGINE --target TARGET \
+   --transcript "Exact spoken words." -o clone.renderprofile.toml --json
+ ```
+
+-RenderProfiles can hold multiple independent role bindings. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves the other roles and user-authored planning/pause policy, and computes a new `profile_id`.
++RenderProfile is the complete cast for one render variant. Each logical role is bound independently, so one profile can mix engines and targets while sharing planning and pause policy. Create its initial/default role, bind the rest, and inspect the whole cast:
+
+ ```bash
+-voicerender profile inspect narration.renderprofile.toml --json
+-voicerender profile role list narration.renderprofile.toml --json
+-voicerender profile role set narration.renderprofile.toml guest \
+-  --engine piper --target en_US-amy-medium --language en-US \
+-  -o narration.with-guest.renderprofile.toml --json
+-voicerender profile default-role narration.with-guest.renderprofile.toml guest \
+-  --in-place --json
+-voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
+-  --new-default-role guest --in-place --json
++voicerender profile create \
++  --role narrator --engine kokoro --target v1.0 --voice af_heart \
++  --language en-US --offline -o printer-cast.renderprofile.toml
++voicerender profile bind printer-cast.renderprofile.toml host \
++  --engine kitten --target mini-0.8 --voice Jasper \
++  --language en-US --offline --in-place
++voicerender profile bind printer-cast.renderprofile.toml guest \
++  --engine piper --target en_US-amy-medium \
++  --language en-US --offline --in-place
++voicerender profile show printer-cast.renderprofile.toml
++voicerender profile validate printer-cast.renderprofile.toml
+ ```
+
+-Role mutations require exactly one explicit `--output PATH` or `--in-place`; the input profile is otherwise left untouched. Removing the final role is rejected, and removing the current default requires `--new-default-role`. The package root exports the model-management, option/voice discovery, source/clone, and multi-role profile APIs for automation. See [RenderProfile lifecycle](docs/renderprofile.md) for API examples and policy details.
++The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+
+ ## Reference voices
+
+@@ -407,15 +409,41 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
+
+ ## SSMDDoc document workspaces
+
+-For one editable SSMDDoc, compile and project explicitly with UtterPlan, then render the exact fingerprinted variant with VoiceRender:
++For one editable SSMDDoc, convert and compile the source, then let UtterPlan project a RenderPlan for the complete RenderProfile cast described above. VoiceRender consumes the exact projected variant:
+
+ ```bash
++ssmdconvert document convert story.ssmd.md
+ utterplan compile-document story.ssmdoc
+-utterplan render-document story.ssmdoc --profile narration.renderprofile.toml
+-voicerender render-document story.ssmdoc --variant narration--<profile-fingerprint>
++utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
++voicerender render-document story.ssmdoc \
++  --variant printer-cast--<profile-fingerprint>
++```
++
++The current workspace contract keeps the UtterPlan document artifact filename distinct from the stable manifest identity and rendered output directory:
++
++```text
++story.ssmdoc/
++├── manifest.json
++├── document.ssmd.md
++├── utterplan/
++│   ├── document.utterplan.toml
++│   └── compile-report.toml
++├── renderplan/
++│   └── printer-cast--<profile-fingerprint>/
++│       ├── renderprofile.toml
++│       ├── document.renderplan.toml
++│       └── render-report.toml
++└── voicerender/
++    └── printer-cast--<profile-fingerprint>/
++        ├── voicerender-report.toml
++        ├── .voicerender-cache/
++        └── document-0001/
++            ├── preflight.toml
++            ├── render-manifest.toml
++            └── *.wav
+ ```
+
+-The document output is stored under `.readio/voicerender/<variant>/document-0001/`. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
++By default, VoiceRender reads from `<workspace>/renderplan/<variant>/document.renderplan.toml` and writes per-document output under `<workspace>/voicerender/<variant>/document-0001/`; the cache and variant report are siblings of the document directory. `--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
+
+ ## Tests
+
+diff --git a/docs/index.md b/docs/index.md
+index b8446c1..d340dc0 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -15,7 +15,7 @@ VoiceRender owns its public engine-option and voice discovery, optional model-as
+
+ ## Workflow
+
+-1. Create or update a RenderProfile and review engine-derived binding metadata (see the [RenderProfile lifecycle](renderprofile.md)).
++1. Create a complete-cast RenderProfile with per-role engine bindings and review its metadata (see the [RenderProfile lifecycle](renderprofile.md)).
+ 2. Produce RenderPlans that reference the profile identity: use UtterPlan
+    `render-plan` for one saved plan or `render-book` for selected SSMDBook
+    chapters; both emit the same shared RenderPlan contract.
+@@ -64,6 +64,10 @@ voicerender render-book "Novel.ssmdbook" \
+
+ A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter, including execution fingerprints and the path to any fresh recheck report; each chapter directory contains its `preflight.toml`, optional `preflight-recheck.toml`, cumulative `render-manifest.toml`, and numbered WAVs. A stale persisted `ok` is invalidated only by a fresh report for the same plan and failed speech occurrence. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
+
++## Document-level rendering
++
++UtterPlan writes document RenderPlans to `<workspace>/renderplan/<variant>/document.renderplan.toml`. VoiceRender reads that direct workspace root by default and writes to `<workspace>/voicerender/<variant>/document-0001/`, with the variant report and `.voicerender-cache/` alongside the document directory. The RenderPlan filename follows the source artifact stem (`document`); `document-0001` remains the manifest identity and rendered entity directory. See the full mixed-engine cast workflow and workspace tree in [RenderProfile lifecycle](renderprofile.md#utterplan-document-workspaces).
++
+ ## Engine integration
+
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 21fba2b..b4dda9a 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -2,16 +2,17 @@
+
+ A RenderProfile is the portable, user-owned renderer configuration shared by
+ [RenderPlan](https://pypi.org/project/renderplan/) producers and VoiceRender. It
+-captures engine-backed role bindings, renderer requirements, and planning policy;
+-it is data, not a loaded engine or synthesis session. Create profiles with
+-VoiceRender so bindings are seeded from installed adapter metadata, then review and
+-validate them before planning:
++represents the complete cast for one render variant: each logical source role has
++its own engine/target/voice binding, while planning and pause policy are shared.
++Roles in a single profile may use different engines. Create the first/default role
++with VoiceRender so its binding is seeded from adapter metadata, then review and
++validate it before planning:
+
+ ```bash
+ voicerender engines list
+ voicerender voices list --engine piper --lang en-US --offline --json
+ voicerender profile create \
+-  --engine piper --target en_US-amy-medium --language en-US \
++  --role narrator --engine piper --target en_US-amy-medium --language en-US \
+   --offline --output narration.renderprofile.toml
+ voicerender profile validate narration.renderprofile.toml
+ ```
+@@ -32,13 +33,25 @@ profile. Keep the original profile with its plans for provenance and inspection.
+
+ ## Inspecting and mutating profile roles
+
+-A RenderProfile can bind several logical roles (for example, `narrator` and `guest`). Inspect the profile or list its role items without loading an engine:
++One RenderProfile is the complete cast for a render variant. Its logical roles may use different engines and targets while sharing planning and pause policy. `profile show` is the preferred human view; JSON retains each full canonical binding:
+
+ ```bash
+-voicerender profile inspect narration.renderprofile.toml --json
+-voicerender profile role list narration.renderprofile.toml --json
++voicerender profile create \
++  --role narrator --engine kokoro --target v1.0 --voice af_heart \
++  --language en-US --offline -o printer-cast.renderprofile.toml
++voicerender profile bind printer-cast.renderprofile.toml host \
++  --engine kitten --target mini-0.8 --voice Jasper \
++  --language en-US --offline --in-place
++voicerender profile bind printer-cast.renderprofile.toml guest \
++  --engine piper --target en_US-amy-medium \
++  --language en-US --offline --in-place
++voicerender profile show printer-cast.renderprofile.toml
++voicerender profile show printer-cast.renderprofile.toml --json
++voicerender profile role list printer-cast.renderprofile.toml --json
+ ```
+
++`profile create` makes the initial/default role. `profile bind` adds or replaces a binding and supports voice, Voicefolio, reference WAV, prepared voice, voice-source, speaker, and engine-option selectors. The human view shows each role's engine, target, language, and actual voice/speaker/source identity without dumping renderer metadata.
++
+ Use VoiceRender's public role helpers when building or editing profiles programmatically:
+
+ ```python
+@@ -67,15 +80,18 @@ updated = remove_profile_role(updated, "narrator", new_default_role="guest")
+
+ `set_profile_role` resolves the engine binding and regenerates its derived requirements and capacity. Existing role bindings and the profile's planning/pause policy are preserved; each successful mutation recomputes `profile_id`. Invalid selections/options, a missing role, removal of the last role, or removal of the default without a replacement are rejected. The helpers return a new profile and never write the input file.
+
+-For the CLI, each mutation requires exactly one of `--output PATH` and `--in-place`. Use `--output` to review a proposal before replacing the original; `--in-place` is an explicit request to write over the selected profile:
++For CLI mutations, `profile bind` is the first-class way to add or replace a cast member; it and the structured `profile role set` form require exactly one of `--output PATH` and `--in-place`. Use `--output` to review a proposal before replacing the original:
+
+ ```bash
+-voicerender profile role set narration.renderprofile.toml guest \
++voicerender profile bind printer-cast.renderprofile.toml host \
++  --engine kitten --target mini-0.8 --language en-US --voice Jasper \
++  --in-place
++voicerender profile role set printer-cast.renderprofile.toml guest \
+   --engine piper --target en_US-amy-medium --language en-US \
+-  -o narration.with-guest.renderprofile.toml
+-voicerender profile default-role narration.with-guest.renderprofile.toml guest \
++  -o printer-cast.proposed.renderprofile.toml
++voicerender profile default-role printer-cast.proposed.renderprofile.toml guest \
+   --in-place
+-voicerender profile role remove narration.with-guest.renderprofile.toml narrator \
++voicerender profile role remove printer-cast.proposed.renderprofile.toml narrator \
+   --new-default-role guest --in-place
+ ```
+
+@@ -134,6 +150,44 @@ rendering requires a matching all-`ok` report. See the
+ [RenderPlan package contract](https://pypi.org/project/renderplan/) for the
+ producer/consumer boundary.
+
++## UtterPlan document workspaces
++
++UtterPlan projects the canonical document RenderPlan as `renderplan/<variant>/document.renderplan.toml`. VoiceRender's default document roots align with that handoff: it reads from `<workspace>/renderplan` and writes to `<workspace>/voicerender`. The artifact filename (`document.renderplan.toml`) is distinct from the manifest identity and rendered entity directory (`document-0001`).
++
++```bash
++ssmdconvert document convert story.ssmd.md
++utterplan compile-document story.ssmdoc
++utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
++voicerender render-document story.ssmdoc \
++  --variant printer-cast--<profile-fingerprint>
++```
++
++The resulting workspace is organized by planning, render variant, and rendered entity:
++
++```text
++story.ssmdoc/
++├── manifest.json
++├── document.ssmd.md
++├── utterplan/
++│   ├── document.utterplan.toml
++│   └── compile-report.toml
++├── renderplan/
++│   └── printer-cast--<profile-fingerprint>/
++│       ├── renderprofile.toml
++│       ├── document.renderplan.toml
++│       └── render-report.toml
++└── voicerender/
++    └── printer-cast--<profile-fingerprint>/
++        ├── voicerender-report.toml
++        ├── .voicerender-cache/
++        └── document-0001/
++            ├── preflight.toml
++            ├── render-manifest.toml
++            └── *.wav
++```
++
++`--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. Document estimation resolves the same input layout but does not create output directories.
++
+ ## Reference-voice sources
+
+ A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They can be used in a local RenderProfile but are machine-specific; do not share a local profile unless that path and file are intentionally available on the other machine. Validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references; persist the Voicefolio reference, content digest, source revision, repository, and source path pins.
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index cef4b86..16b0f6c 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -61,16 +61,71 @@ def test_document_estimate_resolves_exact_variant_without_creating_outputs(
+         "sha256:"
+     )[:12]
+     variant = f"narration--{fingerprint}"
+-    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir = root / "renderplan" / variant
+     variant_dir.mkdir(parents=True)
+     shutil.copy(profile, variant_dir / "renderprofile.toml")
+     shutil.copy(
+         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+-        variant_dir / "document-0001.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
++    )
++    from voicerender.document import _resolve_document_request
++
++    request = _resolve_document_request(root, variant=variant)
++    assert request.renderplan_variant_dir == (root / "renderplan" / variant).resolve()
++    assert (
++        request.renderplan_path
++        == (root / "renderplan" / variant / "document.renderplan.toml").resolve()
++    )
++    assert request.output_variant_dir == (root / "voicerender" / variant).resolve()
++    assert (
++        request.output_dir
++        == (root / "voicerender" / variant / "document-0001").resolve()
++    )
++    assert (
++        request.cache_dir
++        == (root / "voicerender" / variant / ".voicerender-cache").resolve()
+     )
+     estimate = estimate_render_document(root, variant=variant, speech="1")
+     assert estimate.selected_count == 1
+-    assert not (root / ".readio/voicerender").exists()
++    assert not (root / "voicerender").exists()
++
++
++def test_document_request_preserves_explicit_root_overrides(tmp_path: Path) -> None:
++    from voicerender.document import _resolve_document_request
++
++    root = _workspace(tmp_path / "story.ssmdoc")
++    profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    profile_obj = codec.load_profile(profile)
++    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
++        "sha256:"
++    )[:12]
++    variant = f"narration--{fingerprint}"
++    renderplan_root = tmp_path / "custom-renderplan"
++    variant_dir = renderplan_root / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
++    )
++    output_root = tmp_path / "custom-voicerender"
++    cache_dir = output_root / variant / ".custom-cache"
++
++    request = _resolve_document_request(
++        root,
++        variant=variant,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++        cache_dir=cache_dir,
++    )
++
++    assert request.renderplan_variant_dir == variant_dir.resolve()
++    assert (
++        request.renderplan_path == (variant_dir / "document.renderplan.toml").resolve()
++    )
++    assert request.output_variant_dir == (output_root / variant).resolve()
++    assert request.output_dir == (output_root / variant / "document-0001").resolve()
++    assert request.cache_dir == cache_dir.resolve()
+
+
+ def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> None:
+@@ -99,12 +154,12 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
+         "sha256:"
+     )[:12]
+     variant = f"narration--{fingerprint}"
+-    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir = root / "renderplan" / variant
+     variant_dir.mkdir(parents=True)
+     shutil.copy(profile_path, variant_dir / "renderprofile.toml")
+     shutil.copy(
+         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+-        variant_dir / "document-0001.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
+     )
+     calls: list[dict[str, object]] = []
+     monkeypatch.setattr(
+@@ -163,12 +218,12 @@ def test_document_preflight_reject_stops_before_render(
+         "sha256:"
+     )[:12]
+     variant = f"narration--{fingerprint}"
+-    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir = root / "renderplan" / variant
+     variant_dir.mkdir(parents=True)
+     shutil.copy(profile_path, variant_dir / "renderprofile.toml")
+     shutil.copy(
+         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+-        variant_dir / "document-0001.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
+     )
+     monkeypatch.setattr(
+         document_module,
+@@ -203,12 +258,12 @@ def test_document_render_reports_reused_complete_manifest(
+         "sha256:"
+     )[:12]
+     variant = f"narration--{fingerprint}"
+-    variant_dir = root / ".readio/renderplan" / variant
++    variant_dir = root / "renderplan" / variant
+     variant_dir.mkdir(parents=True)
+     shutil.copy(profile_path, variant_dir / "renderprofile.toml")
+     shutil.copy(
+         Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+-        variant_dir / "document-0001.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
+     )
+     monkeypatch.setattr(
+         document_module,
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 0d04fc7..3e01999 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -4,6 +4,7 @@ import json
+ from dataclasses import replace
+ from pathlib import Path
+
++import pytest
+ from renderplan import RenderProfile, RoleProfile
+
+ from voicerender import cli
+@@ -83,6 +84,76 @@ def test_profile_role_set_writes_only_explicit_output(
+     }
+
+
++def test_profile_bind_delegates_to_role_set_and_requires_destination(
++    tmp_path: Path, monkeypatch, capsys
++) -> None:
++    source = tmp_path / "source.renderprofile.toml"
++    original = _write_profile(source)
++    calls: dict[str, object] = {}
++
++    def fake_set_profile_role(profile, role, **kwargs):
++        calls.update(kwargs)
++        loaded = load_render_profile(profile)
++        roles = dict(loaded.roles)
++        roles[role] = RoleProfile(
++            language=kwargs["language"],
++            binding={"renderer": kwargs["engine"], "target_id": kwargs["target_id"]},
++        )
++        default_role = role if kwargs["make_default"] else loaded.default_role
++        return replace(
++            loaded, roles=roles, default_role=default_role, profile_id=None
++        ).with_identity()
++
++    monkeypatch.setattr(cli, "set_profile_role", fake_set_profile_role)
++    exit_code = cli.main(
++        [
++            "profile",
++            "bind",
++            str(source),
++            "host",
++            "--engine",
++            "kitten",
++            "--target",
++            "mini-0.8",
++            "--language",
++            "en-US",
++            "--voice",
++            "Jasper",
++            "--offline",
++            "--make-default",
++            "--in-place",
++            "--json",
++        ]
++    )
++    payload = json.loads(capsys.readouterr().out)
++
++    assert exit_code == 0
++    assert calls["voice"] == "Jasper"
++    assert calls["offline"] is True
++    assert calls["make_default"] is True
++    assert load_render_profile(source).default_role == "host"
++    assert payload["path"] == str(source)
++    assert original.default_role == "narrator"
++
++    parser = cli.build_parser()
++    command = [
++        "profile",
++        "bind",
++        str(source),
++        "guest",
++        "--engine",
++        "piper",
++        "--target",
++        "en_US-amy-medium",
++        "--language",
++        "en-US",
++    ]
++    with pytest.raises(SystemExit):
++        parser.parse_args(command)
++    with pytest.raises(SystemExit):
++        parser.parse_args([*command, "--in-place", "-o", str(tmp_path / "out.toml")])
++
++
+ def test_default_role_in_place_and_inspect_json(tmp_path: Path, capsys) -> None:
+     source = tmp_path / "profile.renderprofile.toml"
+     _write_profile(source)
+@@ -134,16 +205,72 @@ def test_role_remove_default_requires_replacement_without_writing(
+     assert not output.exists()
+
+
+-def test_role_list_human_output_is_descriptive_not_python_repr(
++def test_role_list_and_profile_show_present_the_complete_cast(
+     tmp_path: Path, capsys
+ ) -> None:
+     source = tmp_path / "profile.renderprofile.toml"
+-    _write_profile(source)
++    profile = _write_profile(source)
++    roles = dict(profile.roles)
++    roles["narrator"] = replace(
++        roles["narrator"],
++        binding={
++            **roles["narrator"].binding,
++            "voice": "af_heart",
++            "renderer_metadata": {"private_detail": "not shown"},
++        },
++    )
++    roles["guest"] = replace(
++        roles["guest"],
++        binding={**roles["guest"].binding, "speaker": "Jasper"},
++    )
++    roles["source"] = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "piper",
++            "target_id": "en_US-amy-medium",
++            "options": {
++                "voice_source": {
++                    "kind": "managed_reference",
++                    "reference": "large-reference-mapping-is-not-displayed",
++                }
++            },
++        },
++    )
++    save_render_profile(
++        replace(profile, roles=roles, profile_id=None).with_identity(), source
++    )
+
+     exit_code = cli.main(["profile", "role", "list", str(source)])
++    role_output = capsys.readouterr().out
++    assert exit_code == 0
++    assert "VOICE/SPEAKER/SOURCE" in role_output
++    assert "af_heart" in role_output
++    assert "speaker:Jasper" in role_output
++    assert "source:managed_reference" in role_output
++    assert "private_detail" not in role_output
++    assert "large-reference-mapping-is-not-displayed" not in role_output
++    assert "RoleProfile(" not in role_output
+
+-    output = capsys.readouterr().out
++    exit_code = cli.main(["profile", "show", str(source)])
++    show_output = capsys.readouterr().out
+     assert exit_code == 0
+-    assert "* narrator  en-US  fixture/target-a" in output
+-    assert "guest  en-GB  fixture/target-b" in output
+-    assert "RoleProfile(" not in output
++    assert "RenderProfile " in show_output
++    assert "Planning:" in show_output
++    assert "Pauses:" in show_output
++    assert "af_heart" in show_output
++    assert "speaker:Jasper" in show_output
++    assert "source:managed_reference" in show_output
++
++    exit_code = cli.main(["profile", "show", str(source), "--json"])
++    show_payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    source_role = next(
++        item for item in show_payload["roles"] if item["role"] == "source"
++    )
++    assert source_role["binding"]["options"]["voice_source"]["reference"] == (
++        "large-reference-mapping-is-not-displayed"
++    )
++    narrator_role = next(
++        item for item in show_payload["roles"] if item["role"] == "narrator"
++    )
++    assert "private_detail" in narrator_role["binding"]["renderer_metadata"]
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 120d4b9..08ed820 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -106,6 +106,35 @@ def _add_progress_option(parser: argparse.ArgumentParser) -> None:
+     )
+
+
++def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None:
++    parser.add_argument("profile", type=Path)
++    parser.add_argument("role")
++    parser.add_argument("--engine", required=True)
++    parser.add_argument("--target", required=True)
++    parser.add_argument("--language", required=True)
++    source = parser.add_mutually_exclusive_group()
++    source.add_argument("--voice")
++    source.add_argument("--voicefolio-ref")
++    source.add_argument("--reference-wav", type=Path)
++    source.add_argument("--prepared-voice", type=Path)
++    source.add_argument("--voice-source", type=Path)
++    parser.add_argument("--speaker")
++    parser.add_argument(
++        "--option",
++        action="append",
++        default=[],
++        metavar="KEY=VALUE",
++        help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
++    )
++    parser.add_argument("--offline", action="store_true")
++    parser.add_argument("--refresh", action="store_true")
++    parser.add_argument("--make-default", action="store_true")
++    destination = parser.add_mutually_exclusive_group(required=True)
++    destination.add_argument("-o", "--output", type=Path)
++    destination.add_argument("--in-place", action="store_true")
++    parser.add_argument("--json", action="store_true")
++
++
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(
+         prog="voicerender",
+@@ -189,10 +218,17 @@ def build_parser() -> argparse.ArgumentParser:
+     voice_inspect.add_argument("--lang")
+     voice_inspect.add_argument("--json", action="store_true")
+
+-    profiles = commands.add_parser("profile", help="Create and validate RenderProfiles")
++    profiles = commands.add_parser(
++        "profile", help="Create, bind, and inspect RenderProfiles"
++    )
+     profile_commands = profiles.add_subparsers(dest="profile_command", required=True)
+     profile_create = profile_commands.add_parser(
+-        "create", help="Create a RenderProfile"
++        "create",
++        help="Create a RenderProfile with its first role binding",
++        description=(
++            "Create the first/default role binding of a complete RenderProfile cast; "
++            "use `profile bind` to add more roles."
++        ),
+     )
+     profile_create.add_argument("--engine", required=True)
+     profile_create.add_argument("--target", required=True)
+@@ -236,6 +272,12 @@ def build_parser() -> argparse.ArgumentParser:
+     profile_inspect.add_argument("profile", type=Path)
+     profile_inspect.add_argument("--json", action="store_true")
+
++    profile_show = profile_commands.add_parser(
++        "show", help="Show a RenderProfile cast and its policy"
++    )
++    profile_show.add_argument("profile", type=Path)
++    profile_show.add_argument("--json", action="store_true")
++
+     profile_roles = profile_commands.add_parser(
+         "role", help="Inspect or mutate RenderProfile roles"
+     )
+@@ -247,32 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
+     role_list.add_argument("--json", action="store_true")
+
+     role_set = role_commands.add_parser("set", help="Add or replace a role binding")
+-    role_set.add_argument("profile", type=Path)
+-    role_set.add_argument("role")
+-    role_set.add_argument("--engine", required=True)
+-    role_set.add_argument("--target", required=True)
+-    role_set.add_argument("--language", required=True)
+-    role_source = role_set.add_mutually_exclusive_group()
+-    role_source.add_argument("--voice")
+-    role_source.add_argument("--voicefolio-ref")
+-    role_source.add_argument("--reference-wav", type=Path)
+-    role_source.add_argument("--prepared-voice", type=Path)
+-    role_source.add_argument("--voice-source", type=Path)
+-    role_set.add_argument("--speaker")
+-    role_set.add_argument(
+-        "--option",
+-        action="append",
+-        default=[],
+-        metavar="KEY=VALUE",
+-        help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
++    _add_profile_role_binding_arguments(role_set)
++
++    profile_bind = profile_commands.add_parser(
++        "bind", help="Add or replace a role binding in a RenderProfile"
+     )
+-    role_set.add_argument("--offline", action="store_true")
+-    role_set.add_argument("--refresh", action="store_true")
+-    role_set.add_argument("--make-default", action="store_true")
+-    role_set_output = role_set.add_mutually_exclusive_group(required=True)
+-    role_set_output.add_argument("-o", "--output", type=Path)
+-    role_set_output.add_argument("--in-place", action="store_true")
+-    role_set.add_argument("--json", action="store_true")
++    _add_profile_role_binding_arguments(profile_bind)
+
+     role_remove = role_commands.add_parser("remove", help="Remove a configured role")
+     role_remove.add_argument("profile", type=Path)
+@@ -461,7 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
+     _add_progress_option(book_render)
+
+     document_render = commands.add_parser(
+-        "render-document", help="Render one SSMDDoc workspace RenderPlan"
++        "render-document",
++        help="Render one SSMDDoc RenderPlan from renderplan/<variant>",
++        description=(
++            "Reads renderplan/<variant>/document.renderplan.toml and writes "
++            "voicerender/<variant>/document-0001/ by default."
++        ),
+     )
+     document_render.add_argument(
+         "document", type=Path, help="SSMDDoc workspace or canonical document.ssmd.md"
+@@ -723,13 +750,38 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
+     ]
+
+
++def _profile_role_selector(binding: dict[str, Any]) -> str:
++    voice = binding.get("voice")
++    if voice is not None:
++        return _display_cli_value(voice)
++    speaker = binding.get("speaker")
++    if speaker is not None:
++        return f"speaker:{_display_cli_value(speaker)}"
++    source = binding.get("voice_source")
++    options = binding.get("options")
++    if source is None and isinstance(options, dict):
++        source = options.get("voice_source")
++    if isinstance(source, dict):
++        kind = source.get("kind") or source.get("type")
++        return f"source:{_display_cli_value(kind)}" if kind else "source"
++    if source is not None:
++        return "source"
++    return "unknown"
++
++
+ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
++    print("  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE")
+     for item in roles:
+         marker = "*" if item["default"] else " "
+         binding = item["binding"]
+-        renderer = _display_cli_value(binding.get("renderer", "unknown"))
++        engine = _display_cli_value(binding.get("renderer", "unknown"))
+         target = _display_cli_value(binding.get("target_id", "unknown"))
+-        print(f"{marker} {item['role']}  {item['language']}  {renderer}/{target}")
++        language = _display_cli_value(item["language"])
++        selector = _profile_role_selector(binding)
++        print(
++            f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
++            f"{target:<18} {selector}"
++        )
+
+
+ def _display_cli_value(value: Any) -> str:
+@@ -1625,7 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
+                 profile = refresh_render_profile(load_render_profile(args.profile))
+                 output = save_render_profile(profile, args.output)
+                 payload = {"profile_id": profile.profile_id, "path": str(output)}
+-            elif args.profile_command == "inspect":
++            elif args.profile_command in {"inspect", "show"}:
+                 profile = load_render_profile(args.profile)
+                 payload = {
+                     "profile_id": profile.profile_id or profile.computed_id(),
+@@ -1634,8 +1686,11 @@ def main(argv: list[str] | None = None) -> int:
+                     "planning": profile.planning.to_dict(),
+                     "pauses": profile.pauses.to_dict(),
+                 }
+-            elif args.profile_command == "role":
+-                if args.profile_role_command == "list":
++            elif args.profile_command in {"role", "bind"}:
++                if (
++                    args.profile_command == "role"
++                    and args.profile_role_command == "list"
++                ):
+                     profile = load_render_profile(args.profile)
+                     payload = {
+                         "profile_id": profile.profile_id or profile.computed_id(),
+@@ -1644,7 +1699,10 @@ def main(argv: list[str] | None = None) -> int:
+                     }
+                 else:
+                     destination = _profile_mutation_destination(args)
+-                    if args.profile_role_command == "set":
++                    if (
++                        args.profile_command == "bind"
++                        or args.profile_role_command == "set"
++                    ):
+                         source_paths = (
+                             args.reference_wav,
+                             args.prepared_voice,
+@@ -1703,15 +1761,16 @@ def main(argv: list[str] | None = None) -> int:
+                         sort_keys=True,
+                     )
+                 )
+-            elif args.profile_command in {"inspect", "role"} and (
+-                args.profile_command == "inspect" or args.profile_role_command == "list"
++            elif args.profile_command in {"inspect", "show", "role"} and (
++                args.profile_command in {"inspect", "show"}
++                or args.profile_role_command == "list"
+             ):
+                 print(
+                     f"RenderProfile {payload['profile_id']} "
+                     f"(default role: {payload['default_role']})"
+                 )
+                 _print_profile_role_items(payload["roles"])
+-                if args.profile_command == "inspect":
++                if args.profile_command in {"inspect", "show"}:
+                     planning = payload["planning"]
+                     fallbacks = ", ".join(planning["capacity_fallback"]) or "none"
+                     print(
+@@ -1942,7 +2001,8 @@ def main(argv: list[str] | None = None) -> int:
+             args.command in {"engines", "models", "voices"}
+             or (
+                 args.command == "profile"
+-                and args.profile_command in {"inspect", "role", "default-role"}
++                and args.profile_command
++                in {"inspect", "show", "role", "bind", "default-role"}
+             )
+             or (args.command == "voice" and args.voice_command in {"source", "clone"})
+         ):
+diff --git a/voicerender/document.py b/voicerender/document.py
+index c62f525..a73da9b 100644
+--- a/voicerender/document.py
++++ b/voicerender/document.py
+@@ -21,6 +21,8 @@ from .events import RenderEventCallback
+ from .renderplan_input import EmphasisPolicy
+ from .renderplan_render import RENDER_MANIFEST_FILENAME, render_renderplan
+
++DOCUMENT_RENDERPLAN_FILENAME = "document.renderplan.toml"
++
+
+ @dataclass(frozen=True, slots=True)
+ class DocumentRenderRequest:
+@@ -124,7 +126,7 @@ def _resolve_document_request(
+     rp_root = (
+         Path(renderplan_root).expanduser()
+         if renderplan_root is not None
+-        else index.root / ".readio" / "renderplan"
++        else index.root / "renderplan"
+     )
+     variant_dir = rp_root / variant
+     rp_root = rp_root.resolve(strict=False)
+@@ -152,7 +154,7 @@ def _resolve_document_request(
+             "variant fingerprint does not match profile snapshot",
+             code="variant.identity_mismatch",
+         )
+-    plan_path = variant_dir / f"{index.document_id}.renderplan.toml"
++    plan_path = variant_dir / DOCUMENT_RENDERPLAN_FILENAME
+     plan_path = _contained_regular(plan_path, variant_dir, "RenderPlan")
+     plan = load_plan(plan_path)
+     if not isinstance(plan, RenderPlan) or plan.render_profile_id != profile_id:
+@@ -181,7 +183,7 @@ def _resolve_document_request(
+     out_root = (
+         Path(output_root).expanduser()
+         if output_root is not None
+-        else index.root / ".readio" / "voicerender"
++        else index.root / "voicerender"
+     )
+     out_root = out_root.resolve(strict=False)
+     out_variant = (out_root / variant).resolve(strict=False)

@@ -1,0 +1,106 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.4
+git_base_ref: 817587bef3fafffbe39f6b8b715720263dec50dd
+git_base_sha: 817587bef3fafffbe39f6b8b715720263dec50dd
+git_head_ref: ccd30d20fcc85c71d35c850accaf41ffdc5fc960
+git_head_sha: ccd30d20fcc85c71d35c850accaf41ffdc5fc960
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added document workspace rendering and estimation with safe SSMDDoc validation and variant-scoped outputs
+    status: accepted
+    source_refs:
+      - git:5ffdff4e822f5ea3bff212cf708a6d797029915d
+    paths:
+      - README.md
+      - tests/test_document_contract.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/document_contract.py
+      - voicerender/errors.py
+      - voicerender/estimates.py
+    sources:
+      - git:5ffdff4e822f5ea3bff212cf708a6d797029915d
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added mixed-engine RenderProfile casts with role binding and descriptive cast inspection
+    status: accepted
+    source_refs:
+      - git:efe4f37393479c1143e37f5288b8b586d3fbcc8c
+    paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_document_contract.py
+      - tests/test_profile_roles_cli.py
+      - voicerender/cli.py
+      - voicerender/document.py
+    sources:
+      - git:efe4f37393479c1143e37f5288b8b586d3fbcc8c
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    internal: true
+    summary: Added the tomlkit runtime dependency for TOML report writing
+    status: accepted
+    source_refs:
+      - git:304b84d7fca0509a1524e2d3131858740124ed1a
+    paths:
+      - .github/workflows/tests.yml
+      - pyproject.toml
+    sources:
+      - git:304b84d7fca0509a1524e2d3131858740124ed1a
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary: Improved Kokoro controls, reference cloning, PCM safety, and render failure diagnostics
+    status: accepted
+    source_refs:
+      - git:3d486d5fddcc8612430c321760e9ebd3d84607fc
+    paths:
+      - README.md
+      - docs/renderprofile.md
+      - tests/test_engine_options.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_kokoro_reference.py
+      - tests/test_renderplan_render.py
+      - tests/test_voice_clone.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/engines/kokoro.py
+      - voicerender/renderplan_render.py
+      - voicerender/voice_clone.py
+    sources:
+      - git:3d486d5fddcc8612430c321760e9ebd3d84607fc
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    internal: true
+    summary: Changed static typing for render failure diagnostics
+    status: accepted
+    source_refs:
+      - git:ccd30d20fcc85c71d35c850accaf41ffdc5fc960
+    paths:
+      - voicerender/renderplan_render.py
+    sources:
+      - git:ccd30d20fcc85c71d35c850accaf41ffdc5fc960
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

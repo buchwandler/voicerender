@@ -1,0 +1,28 @@
+ .github/workflows/tests.yml | 1 +
+ pyproject.toml              | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 3b41523..22949d5 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -101,6 +101,7 @@ jobs:
+             "pytest==8.0.0" \
+             "numpy==1.23.0" \
+             "soundfile==0.12.1" \
++            "tomlkit==0.13.3" \
+             "tomli==2.0.1" \
+             "renderplan==0.1.2" \
+             "voicefolio==0.1.1"
+diff --git a/pyproject.toml b/pyproject.toml
+index a6dda8c..1eb596f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,6 +14,7 @@ keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
+ dependencies = [
+   "numpy>=1.23",
+   "soundfile>=0.12",
++  "tomlkit>=0.13",
+   "tomli>=2; python_version < '3.11'",
+   "renderplan>=0.1.2,<0.2",
+   "voicefolio>=0.1.1,<0.2",
