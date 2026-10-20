@@ -226,7 +226,7 @@ def render_renderplan(
         for item in emphasis_items
         if policy is EmphasisPolicy.DEFER_TO_COMPOSE
     ]
-    diagnostics = {
+    diagnostics: dict[str, Any] = {
         "schema": "voicerender.render-diagnostics.v1",
         "render_plan_id": parsed_plan.plan_id or parsed_plan.computed_id(),
         "emphasis_policy": policy.value,
