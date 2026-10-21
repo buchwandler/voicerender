@@ -97,96 +97,59 @@ voicerender profile role remove printer-cast.proposed.renderprofile.toml narrato
 
 The RenderPlan schema is unchanged: plans continue to carry the same profile identity and resolved per-role bindings.
 
-## UtterPlan book variants
+## UtterPlan bundle projection
 
-[UtterPlan](https://pypi.org/project/utterplan/) can compile an SSMDBook into one
-renderer-neutral semantic plan per chapter, then use `render-book` to project
-selected saved plans for one profile identity:
+[UtterPlan](https://pypi.org/project/utterplan/) can project saved book chapter plans into one RenderPlan variant per RenderProfile. It does not call VoiceRender or preflight during projection. The collection index `renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned workspace metadata, not RenderPlan artifacts.
 
 ```bash
-utterplan compile-book "Novel.ssmdbook" --chapters 5-17
-utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
-  --profile narration.renderprofile.toml
+utterplan bundle compile Novel.ssmd-bundle --chapters 5-17
+utterplan bundle render Novel.ssmd-bundle --profile narration.renderprofile.toml
 ```
 
-The command writes to a profile-specific variant directory such as
-`Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/`. The directory contains
-a canonical `renderprofile.toml` snapshot, one ordinary `.renderplan.toml` per
-successful chapter, an UtterPlan-owned `renderplan-set.toml` collection index, and
-an invocation-level `render-report.toml`. The set index and report are workspace
-metadata—not RenderPlan contracts, RenderProfiles, or inputs to VoiceRender.
+The profile fingerprint selects a distinct variant directory containing a canonical `renderprofile.toml` snapshot, one ordinary `.renderplan.toml` per successful chapter, and the ordered set index. Different profile identities can coexist while sharing semantic plans. UtterPlan emits RenderPlans; it does not inspect engine availability, preflight, synthesize, or require VoiceRender to be installed.
 
-A different canonical profile identity selects a distinct default variant, so
-multiple voices or policies can coexist while sharing the same `utterplan/`
-semantic plans. Repeated invocations for the same profile incrementally update the
-set index. The snapshot preserves the profile used by that collection, but a later
-`utterplan render-book` invocation still takes a profile path with `--profile`.
-UtterPlan loads the shared profile and emits RenderPlans; it does not call
-VoiceRender, inspect engine availability, preflight, synthesize, or require
-VoiceRender to be installed.
+## Render an SSMD bundle
 
-## Preflight and render each plan
-
-VoiceRender consumes each chapter's ordinary RenderPlan independently. The
-collection directory does not change the single-plan execution contract; the
-`renderplan-set.toml` is not passed to these commands:
+VoiceRender detects whether the root contains a book or one document from `manifest.json`. Both kinds use the same command and require the canonical editable `.ssmd-bundle/` root:
 
 ```bash
-voicerender preflight \
-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
-  -o chapter-0005.preflight.toml
-voicerender render \
-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
-  --preflight chapter-0005.preflight.toml \
-  --out-dir renders/chapter-0005
+voicerender bundle render Novel.ssmd-bundle \
+  --variant narration--<profile-id-prefix> \
+  --chapters 5-17 --json
 ```
 
-Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference.
-
-Install the selected engine extra and make its model assets available before
-preflight/render. VoiceRender preflight measures requests but never synthesizes;
-rendering requires a matching all-`ok` report. See the
-[UtterPlan SSMDBook workflow](https://pypi.org/project/utterplan/) and the
-[RenderPlan package contract](https://pypi.org/project/renderplan/) for the
-producer/consumer boundary.
-
-## UtterPlan document workspaces
-
-UtterPlan projects the canonical document RenderPlan as `renderplan/<variant>/document.renderplan.toml`. VoiceRender's default document roots align with that handoff: it reads from `<workspace>/renderplan` and writes to `<workspace>/voicerender`. The artifact filename (`document.renderplan.toml`) is distinct from the manifest identity and rendered entity directory (`document-0001`).
+Omit `--chapters` to select all chapters. For a speech QC window, select one source chapter and one-based speech numbers. Successful WAVs accumulate in the same chapter manifest:
 
 ```bash
-ssmdconvert document convert story.ssmd.md
-utterplan compile-document story.ssmdoc
-utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
-voicerender render-document story.ssmdoc \
+voicerender bundle render Novel.ssmd-bundle \
+  --variant narration--<profile-id-prefix> --chapters 5 --speech 50-60
+voicerender bundle render Novel.ssmd-bundle \
+  --variant narration--<profile-id-prefix> --chapters 5 --speech 61-70
+voicerender bundle render Novel.ssmd-bundle \
+  --variant narration--<profile-id-prefix> --chapters 5
+```
+
+A document is one render item and accepts only `--chapters all`:
+
+```bash
+voicerender bundle render story.ssmd-bundle \
   --variant printer-cast--<profile-fingerprint>
 ```
 
-The resulting workspace is organized by planning, render variant, and rendered entity:
+VoiceRender writes below `<bundle>/voicerender/<variant>/`, preserving the existing kind-specific output layout. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots. Failures continue by default for books; `--fail-fast` skips remaining chapters. `--reset-stale` replaces stale owned output while preserving verified cache reuse. `--force` synthesizes every selected request and bypasses cache.
 
-```text
-story.ssmdoc/
-├── manifest.json
-├── document.ssmd.md
-├── utterplan/
-│   ├── document.utterplan.toml
-│   └── compile-report.toml
-├── renderplan/
-│   └── printer-cast--<profile-fingerprint>/
-│       ├── renderprofile.toml
-│       ├── document.renderplan.toml
-│       └── render-report.toml
-└── voicerender/
-    └── printer-cast--<profile-fingerprint>/
-        ├── voicerender-report.toml
-        ├── .voicerender-cache/
-        └── document-0001/
-            ├── preflight.toml
-            ├── render-manifest.toml
-            └── *.wav
+VoiceRender consumes each RenderPlan independently as well. The bundle collection directory does not change the single-plan execution contract; the set index is not passed to generic preflight or render:
+
+```bash
+voicerender preflight \
+  "Novel.ssmd-bundle/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+  -o chapter-0005.preflight.toml
+voicerender render \
+  "Novel.ssmd-bundle/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+  --preflight chapter-0005.preflight.toml --out-dir renders/chapter-0005
 ```
 
-`--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. Document estimation resolves the same input layout but does not create output directories.
+Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference. Install the selected engine extra and make its model assets available before preflight/render. See [UtterPlan](https://pypi.org/project/utterplan/) and the [RenderPlan package contract](https://pypi.org/project/renderplan/) for the producer/consumer boundary.
 
 ## Reference-voice sources
 

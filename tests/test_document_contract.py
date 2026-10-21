@@ -29,16 +29,19 @@ def _workspace(root: Path) -> Path:
     return root
 
 
-def test_load_ssmdoc_workspace_root_and_canonical_document(tmp_path: Path) -> None:
-    root = _workspace(tmp_path / "story.ssmdoc")
+def test_load_document_bundle_root_and_rejects_file_shortcut(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     index = load_document_workspace(root)
     assert index.root == root.resolve()
     assert index.document_id == "document-0001"
-    assert load_document_workspace(index.document_path) == index
+    with pytest.raises(DocumentWorkspaceError, match="canonical .ssmd-bundle"):
+        load_document_workspace(index.document_path)
 
 
 def test_rejects_wrong_format_and_traversal(tmp_path: Path) -> None:
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     manifest = json.loads((root / "manifest.json").read_text())
     manifest["document"]["path"] = "../outside.md"
     (root / "manifest.json").write_text(json.dumps(manifest))
@@ -48,13 +51,13 @@ def test_rejects_wrong_format_and_traversal(tmp_path: Path) -> None:
 
 def test_rejects_zip_input(tmp_path: Path) -> None:
     with pytest.raises(DocumentWorkspaceError):
-        load_document_workspace(tmp_path / "story.ssmdoc.zip")
+        load_document_workspace(tmp_path / "story.ssmd-bundle.zip")
 
 
 def test_document_estimate_resolves_exact_variant_without_creating_outputs(
     tmp_path: Path,
 ) -> None:
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
     profile_obj = codec.load_profile(profile)
     fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
@@ -93,7 +96,7 @@ def test_document_estimate_resolves_exact_variant_without_creating_outputs(
 def test_document_request_preserves_explicit_root_overrides(tmp_path: Path) -> None:
     from voicerender.document import _resolve_document_request
 
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
     profile_obj = codec.load_profile(profile)
     fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
@@ -132,20 +135,22 @@ def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> N
     from voicerender import DocumentRenderError
     from voicerender.document import _resolve_document_request
 
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     with pytest.raises(DocumentRenderError) as caught:
         _resolve_document_request(root, variant="not-created--000000000000")
     assert caught.value.code == "variant.not_found"
 
 
 def test_document_render_uses_preflight_and_existing_renderplan_executor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from types import SimpleNamespace
 
     import voicerender.document as document_module
 
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     profile_path = (
         Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
     )
@@ -201,6 +206,27 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
     assert calls[0]["force"] is True
     assert calls[0]["reset_stale_output"] is True
 
+    from voicerender.cli import main
+
+    exit_code = main(
+        [
+            "bundle",
+            "render",
+            str(root),
+            "--variant",
+            variant,
+            "--speech",
+            "1",
+            "--json",
+            "--no-progress",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["format"] == "voicerender-bundle-result"
+    assert payload["kind"] == "document"
+    assert payload["result"]["status"] == "partial"
+
 
 def test_document_preflight_reject_stops_before_render(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -209,7 +235,7 @@ def test_document_preflight_reject_stops_before_render(
 
     import voicerender.document as document_module
 
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     profile_path = (
         Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
     )
@@ -249,7 +275,7 @@ def test_document_render_reports_reused_complete_manifest(
 
     import voicerender.document as document_module
 
-    root = _workspace(tmp_path / "story.ssmdoc")
+    root = _workspace(tmp_path / "story.ssmd-bundle")
     profile_path = (
         Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
     )

@@ -1,4 +1,4 @@
-# VoiceRender documentation
+# VoiceRender guide
 
 VoiceRender consumes shared RenderPlan and RenderProfile contracts. See `README.md` in the repository root for installation, CLI examples, and the Python API.
 
@@ -11,62 +11,34 @@ changelog
 
 ## Engine and voice control
 
-VoiceRender owns its public engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice clone workflow, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and clone/profile preparation do not synthesize audio. See the repository README for command examples and [RenderProfile lifecycle](renderprofile.md#inspecting-and-mutating-profile-roles) for role APIs and write safety.
+VoiceRender owns engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice cloning, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and profile preparation do not synthesize audio. See [RenderProfile lifecycle](renderprofile.md) for role APIs and write safety.
 
 ## Workflow
 
-1. Create a complete-cast RenderProfile with per-role engine bindings and review its metadata (see the [RenderProfile lifecycle](renderprofile.md)).
-2. Produce RenderPlans that reference the profile identity: use UtterPlan
-   `render-plan` for one saved plan or `render-book` for selected SSMDBook
-   chapters; both emit the same shared RenderPlan contract.
+1. Create a complete-cast RenderProfile with per-role engine bindings.
+2. Produce RenderPlans that reference the profile identity.
 3. Run `voicerender preflight PLAN -o REPORT`; this measures requests and never synthesizes.
 4. Render only when the report is `ok`: `voicerender render PLAN --preflight REPORT --out-dir OUTPUT`.
-5. Verify the bundle with `voicerender inspect-manifest OUTPUT/render-manifest.toml`.
+5. Verify the result with `voicerender inspect-manifest OUTPUT/render-manifest.toml`.
 
-The RenderPlan renderer preserves request order and identity: one speech item becomes one exact request and one numbered WAV. It does not adaptively split, merge, normalize, or reorder requests. An incomplete run leaves a valid partial manifest.
+For the coordinated SSMD workflow, the packages share one command-group name and one canonical editable workspace suffix:
+
+```bash
+ssmdconvert bundle convert story.ssmd.md
+utterplan bundle compile story.ssmd-bundle
+utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
+voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
+```
+
+`manifest.json` decides whether the root holds a book or a single document. VoiceRender detects the kind automatically; the same command takes a `.ssmd-bundle/` root for either. It does not accept an inner source file or a chapter directory. Documents are one render item and require `--chapters all`; books support chapter and speech selectors. The canonical packed transport artifact is `<name>.ssmd-bundle.zip`; VoiceRender's render pipeline operates on the editable directory.
+
+For books, UtterPlan owns the `renderplan-set.toml` collection index and its per-invocation report. VoiceRender consumes the ordered set, while direct single-plan preflight and render remain available. A speech window can succeed while the whole-book manifest remains partial; later selections accumulate verified WAVs. `--fail-fast` skips remaining chapters after a failure. `--renderplan-root`, `--output-root`, and `--cache-dir` override their roots. `--reset-stale` replaces stale VoiceRender-owned output while keeping cache entries available for verified reuse; `--force` bypasses cache.
+
+VoiceRender keeps its output below `<bundle>/voicerender/<variant>/`. Existing internal layouts may differ by kind, but they are selected from the manifest, not from a command name. The generic RenderPlan renderer preserves request order and identity: one speech item becomes one exact request and one numbered WAV. It does not adaptively split, merge, normalize, or reorder requests. An incomplete run leaves a valid partial manifest.
 
 An `ok` preflight approves the exact plan under capability observed at preflight time; VoiceRender remeasures before each synthesis. Capacity drift stops that occurrence without synthesis and returns a fresh plan-matched `replan` report; session-open failure returns `reject`. Pass `--recheck-report PATH` to `voicerender render` to persist either report. VoiceRender never edits speech text or emits a child RenderPlan. Operational render results include a separate execution fingerprint with adapter/API, synthesis, voice/options, and observed-capacity facts; these facts do not affect `RenderPlan.plan_id`.
 
 The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
-
-For book-level projection, UtterPlan owns the `renderplan-set.toml` collection index
-and its per-invocation report as workspace metadata. VoiceRender's `render-book`
-command consumes the ordered set and renders its individual `.renderplan.toml` files;
-the direct single-plan preflight/render commands remain available.
-See [UtterPlan](https://pypi.org/project/utterplan/) and the shared
-[RenderPlan](https://pypi.org/project/renderplan/) package.
-
-## Book-level rendering
-
-After UtterPlan has written `renderplan-set.toml`, render the exact variant named in the set directory. By default, VoiceRender writes under `<book>/voicerender/<variant>/`, leaving the input plans under `<book>/renderplan/<variant>/`:
-
-```bash
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5-17 --json
-```
-
-Omit `--chapters` to select all indexed chapters. For a speech QC window, select one source chapter and one-based speech numbers. Whole-chapter preflight is still performed; successful selected WAVs remain in the chapter manifest and can be accumulated by later invocations:
-
-```bash
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5 --speech 50-60
-
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5 --speech 61-70
-
-# Resume the chapter to full completion using its verified partial artifacts.
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" --chapters 5
-```
-
-A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter, including execution fingerprints and the path to any fresh recheck report; each chapter directory contains its `preflight.toml`, optional `preflight-recheck.toml`, cumulative `render-manifest.toml`, and numbered WAVs. A stale persisted `ok` is invalidated only by a fresh report for the same plan and failed speech occurrence. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
-
-## Document-level rendering
-
-UtterPlan writes document RenderPlans to `<workspace>/renderplan/<variant>/document.renderplan.toml`. VoiceRender reads that direct workspace root by default and writes to `<workspace>/voicerender/<variant>/document-0001/`, with the variant report and `.voicerender-cache/` alongside the document directory. The RenderPlan filename follows the source artifact stem (`document`); `document-0001` remains the manifest identity and rendered entity directory. See the full mixed-engine cast workflow and workspace tree in [RenderProfile lifecycle](renderprofile.md#utterplan-document-workspaces).
 
 ## Engine integration
 
@@ -76,8 +48,8 @@ Pinned local and Voicefolio-managed reference sources are supported for PocketSy
 
 ## Progress, ETA, and estimates
 
-The `render`, `render-book`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
+The `render`, `bundle render`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
 
-Python render and preflight APIs accept an optional keyword-only `on_event` callback with typed `RenderEvent` snapshots. Book events aggregate speech occurrences across chapters and preserve chapter and preflight phase context. ETA uses successful synthesis timing evidence only, so it may be unavailable at startup or for engines without samples. `estimate_renderplan()` and `estimate_render_book()` expose selected work and verified output reuse without synthesizing or creating outputs; estimated seconds remain unknown unless a calibrated timing model is available.
+Python render and preflight APIs accept typed progress callbacks. Bundle rendering reports book chapter context when applicable; ETA uses successful synthesis timing evidence only and may be unavailable at startup or for engines without samples. `estimate_renderplan()` and `estimate_render_book()` expose selected work and verified output reuse without synthesizing or creating output directories. Estimated seconds remain unknown unless a calibrated timing model is available.
 
-Capacity measurements in preflight describe request fit, not synthesis latency. They are never used as a wall-clock prediction. See [Live progress and ETA in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#live-progress-eta-and-workload-estimates) for usage examples.
+Capacity measurements describe request fit, not synthesis latency. They are never used as a wall-clock prediction. See [Live progress and ETA in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#live-progress-eta-and-workload-estimates) for usage examples.

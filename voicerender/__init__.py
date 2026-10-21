@@ -16,9 +16,10 @@ from .book import (
     BookRenderRequest,
     BookRenderResult,
     ChapterRenderOutcome,
-    render_book,
 )
-from .document import DocumentRenderRequest, DocumentRenderResult, render_document
+from .bundle import BundleRenderResult, render_bundle
+from .bundle_contract import BundleContractError
+from .document import DocumentRenderRequest, DocumentRenderResult
 from .engines.api_probe import EngineApiProbe
 from .engines.assets import (
     EngineAssetManager,
@@ -152,6 +153,8 @@ __all__ = [
     "BookRenderError",
     "BookRenderRequest",
     "BookRenderResult",
+    "BundleContractError",
+    "BundleRenderResult",
     "CatalogRequest",
     "CatalogResult",
     "ChapterRenderOutcome",
@@ -253,8 +256,7 @@ __all__ = [
     "remove_model",
     "remove_profile_role",
     "render",
-    "render_book",
-    "render_document",
+    "render_bundle",
     "render_plan",
     "render_renderplan",
     "resolve_prepared_voice",

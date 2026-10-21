@@ -20,7 +20,7 @@ from .errors import VoiceRenderError
 
 
 class BookRenderError(VoiceRenderError, ValueError):
-    """A book workspace, variant, index, profile, or selector is invalid."""
+    """A book bundle, variant, index, profile, or selector is invalid."""
 
     def __init__(self, message: str, *, code: str = "workspace.invalid") -> None:
         super().__init__(message)

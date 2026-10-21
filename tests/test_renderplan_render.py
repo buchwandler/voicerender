@@ -1143,7 +1143,12 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
         plan_id=None,
     ).with_identity()
 
-    workspace = tmp_path / "integration-book"
+    workspace = tmp_path / "integration-book.ssmd-bundle"
+    workspace.mkdir()
+    (workspace / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}),
+        encoding="utf-8",
+    )
     fingerprint = profile_id.removeprefix("sha256:")[:12]
     variant = f"narration--{fingerprint}"
     variant_dir = workspace / "renderplan" / variant
@@ -1180,7 +1185,8 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
 
     def invoke(*selection: str) -> dict[str, Any]:
         args = [
-            "render-book",
+            "bundle",
+            "render",
             str(workspace),
             "--variant",
             variant,
@@ -1192,7 +1198,10 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
             "--json",
         ]
         assert main(args) == 0
-        return json.loads(capsys.readouterr().out)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["format"] == "voicerender-bundle-result"
+        assert payload["kind"] == "book"
+        return payload["result"]
 
     first = invoke("--chapters", "1", "--speech", "1")
     assert first["items"][0]["status"] == "partial"
@@ -1257,7 +1266,12 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
         plan_id=None,
     ).with_identity()
 
-    workspace = tmp_path / "replan-book"
+    workspace = tmp_path / "replan-book.ssmd-bundle"
+    workspace.mkdir()
+    (workspace / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}),
+        encoding="utf-8",
+    )
     fingerprint = profile_id.removeprefix("sha256:")[:12]
     variant = f"narration--{fingerprint}"
     variant_dir = workspace / "renderplan" / variant
@@ -1368,7 +1382,8 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
 
     exit_code = main(
         [
-            "render-book",
+            "bundle",
+            "render",
             str(workspace),
             "--variant",
             variant,
@@ -1381,6 +1396,9 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
         ]
     )
     payload = json.loads(capsys.readouterr().out)
+    assert payload["format"] == "voicerender-bundle-result"
+    assert payload["kind"] == "book"
+    payload = payload["result"]
     item = payload["items"][0]
     assert exit_code == 0
     assert item["status"] == "complete"

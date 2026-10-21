@@ -41,8 +41,8 @@ from voicerender import (
     BookRenderRequest,
     BookRenderResult,
     ChapterRenderOutcome,
-    render_book,
 )
+from voicerender.book import render_book
 from voicerender.book_contract import load_renderplan_set
 from voicerender.errors import ArtifactError
 from voicerender.events import (
@@ -100,7 +100,12 @@ def _book(
     chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1)),
     emphasis_speech: int | None = None,
 ) -> tuple[Path, str]:
-    workspace = tmp_path / "sample.ssmdbook"
+    workspace = tmp_path / "sample.ssmd-bundle"
+    workspace.mkdir(parents=True)
+    (workspace / "manifest.json").write_text(
+        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}),
+        encoding="utf-8",
+    )
     variant_name = "narration--"
     profile = _profile()
     profile_id = profile.profile_id or profile.computed_id()
@@ -483,9 +488,10 @@ def test_book_reports_pending_composition_in_result_and_human_output(
     assert report["pending_composition"] is True
     assert report["item"][0]["pending_composition"] is True
 
-    from voicerender.cli import _print_book_result
+    from voicerender.bundle import BundleRenderResult
+    from voicerender.cli import _print_bundle_result
 
-    _print_book_result(result)
+    _print_bundle_result(BundleRenderResult(kind="book", value=result))
     assert "emphasis remains pending composition" in capsys.readouterr().out
 
 
@@ -525,7 +531,7 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
         assert outcome.manifest is not None and outcome.manifest.is_file()
         assert (outcome.output_dir / "000001.wav").is_file()
     report = tomllib.loads(first.report_path.read_text(encoding="utf-8"))
-    assert report["format"] == "voicerender-book-report"
+    assert report["format"] == "voicerender-bundle-book-report"
     assert report["variant"] == variant
     assert report["requested"] == report["succeeded"] == 3
     assert report["full_chapters"] == 3
@@ -680,9 +686,10 @@ def test_book_preserves_initial_preflight_report_handoff(
     assert report["item"][0]["replan_required"] is replan_required
     assert report["item"][0]["preflight_report"] == "chapter-0005/preflight.toml"
 
-    from voicerender.cli import _print_book_result
+    from voicerender.bundle import BundleRenderResult
+    from voicerender.cli import _print_bundle_result
 
-    _print_book_result(result)
+    _print_bundle_result(BundleRenderResult(kind="book", value=result))
     label = "replan report" if replan_required else "preflight report"
     assert f"{label}: {outcome.preflight_report}" in capsys.readouterr().out
 
@@ -918,7 +925,8 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
 
     partial_code = main(
         [
-            "render-book",
+            "bundle",
+            "render",
             str(workspace),
             "--variant",
             variant,
@@ -936,16 +944,20 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
         ]
     )
     partial_payload = json.loads(capsys.readouterr().out)
+    partial_result = partial_payload["result"]
+    assert partial_payload["format"] == "voicerender-bundle-result"
+    assert partial_payload["kind"] == "book"
     assert partial_code == 0
-    assert partial_payload["partial_chapters"] == 1
-    assert partial_payload["items"][0]["status"] == "partial"
-    assert partial_payload["items"][0]["manifest_complete"] is False
+    assert partial_result["partial_chapters"] == 1
+    assert partial_result["items"][0]["status"] == "partial"
+    assert partial_result["items"][0]["manifest_complete"] is False
     assert (output_root / variant / "chapter-0005" / "000001.wav").is_file()
     assert cache_dir.is_dir()
 
     full_code = main(
         [
-            "render-book",
+            "bundle",
+            "render",
             str(workspace),
             "--variant",
             variant,
@@ -961,13 +973,14 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
     assert full_code == 0
     assert "chapter state: complete" in human_output
     assert "VoiceRender summary" in human_output
-    assert "variant:     " + variant in human_output
+    assert "variant:   " + variant in human_output
     assert len(calls["preflight"]) == 1
     assert len(calls["render"]) == 2
 
     error_code = main(
         [
-            "render-book",
+            "bundle",
+            "render",
             str(workspace),
             "--variant",
             variant,
@@ -998,13 +1011,15 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
     assert api_variant == cli_variant
 
     import voicerender.cli as cli_module
+    from voicerender import render_bundle
     from voicerender.cli import main
 
-    assert cli_module.render_book is render_book
+    assert cli_module.render_bundle is render_bundle
 
     def run_cli(*, force: bool) -> tuple[int, dict[str, Any]]:
         args = [
-            "render-book",
+            "bundle",
+            "render",
             str(cli_workspace),
             "--variant",
             cli_variant,
@@ -1024,6 +1039,9 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
     def assert_parity(
         api_result: book_module.BookRenderResult, payload: dict[str, Any]
     ) -> None:
+        assert payload["format"] == "voicerender-bundle-result"
+        assert payload["kind"] == "book"
+        payload = payload["result"]
         assert payload["variant"] == api_result.variant == api_variant
         assert payload["pending_composition"] is api_result.pending_composition is True
         assert payload["emphasis_policy"] == "defer-to-compose"
@@ -1063,14 +1081,14 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
         (False, "reused", 0, 2),
         (True, "partial", 2, 0),
     ):
-        api_result = render_book(
+        api_result = render_bundle(
             api_workspace,
             variant=api_variant,
             chapters="5",
             speech="2-3",
             force=force,
             emphasis_policy="defer-to-compose",
-        )
+        ).value
         cli_code, cli_payload = run_cli(force=force)
         assert cli_code == api_result.exit_code == 0
         assert api_result.outcomes[0].status == expected_status

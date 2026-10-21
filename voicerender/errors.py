@@ -6,7 +6,7 @@ class VoiceRenderError(Exception):
 
 
 class DocumentRenderError(VoiceRenderError, ValueError):
-    """A document workspace or document-render request is invalid."""
+    """A document bundle or document-render request is invalid."""
 
     code = "workspace.invalid"
 

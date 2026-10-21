@@ -16,14 +16,8 @@ from typing import Any, TextIO, cast
 
 from renderplan import load_manifest, load_plan
 
-from . import (
-    BookRenderError,
-    BookRenderResult,
-    __version__,
-    render_book,
-)
-from .document import _resolve_document_request
-from .document import render_document as _render_document
+from . import __version__
+from .bundle import BundleRenderResult, render_bundle
 from .engines.options import engine_option_to_dict, engine_options
 from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
 from .engines.registry import (
@@ -452,61 +446,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
     )
 
-    book_render = commands.add_parser(
-        "render-book", help="Render selected chapters from a RenderPlan variant"
+    bundle = commands.add_parser("bundle", help="Operate on an SSMD bundle")
+    bundle_commands = bundle.add_subparsers(dest="bundle_command", required=True)
+    bundle_render = bundle_commands.add_parser(
+        "render", help="Render a book or document SSMD bundle"
     )
-    book_render.add_argument(
-        "book", type=Path, help="book workspace or its chapters/ directory"
+    bundle_render.add_argument(
+        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
     )
-    book_render.add_argument(
+    bundle_render.add_argument(
         "--variant", required=True, help="exact RenderPlan variant directory name"
     )
-    book_render.add_argument("--chapters", default="all", metavar="SELECTOR")
-    book_render.add_argument("--speech", default="all", metavar="SELECTOR")
-    book_render.add_argument("--renderplan-root", type=Path)
-    book_render.add_argument("--output-root", type=Path)
-    book_render.add_argument("--cache-dir", type=Path)
-    book_render.add_argument("--force", action="store_true")
-    book_render.add_argument(
+    bundle_render.add_argument("--chapters", default="all", metavar="SELECTOR")
+    bundle_render.add_argument("--speech", default="all", metavar="SELECTOR")
+    bundle_render.add_argument("--renderplan-root", type=Path)
+    bundle_render.add_argument("--output-root", type=Path)
+    bundle_render.add_argument("--cache-dir", type=Path)
+    bundle_render.add_argument("--force", action="store_true")
+    bundle_render.add_argument(
         "--reset-stale",
         action="store_true",
-        help="Reset chapter output owned by a different RenderPlan while reusing cache entries",
+        help="Reset stale VoiceRender output while reusing cache entries",
     )
-    book_render.add_argument(
+    bundle_render.add_argument(
         "--emphasis-policy",
         choices=("reject", "defer-to-compose"),
         default="reject",
         help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
     )
-    book_render.add_argument("--fail-fast", action="store_true")
-    book_render.add_argument("--json", action="store_true")
-    _add_progress_option(book_render)
-
-    document_render = commands.add_parser(
-        "render-document",
-        help="Render one SSMDDoc RenderPlan from renderplan/<variant>",
-        description=(
-            "Reads renderplan/<variant>/document.renderplan.toml and writes "
-            "voicerender/<variant>/document-0001/ by default."
-        ),
-    )
-    document_render.add_argument(
-        "document", type=Path, help="SSMDDoc workspace or canonical document.ssmd.md"
-    )
-    document_render.add_argument(
-        "--variant", required=True, help="exact RenderPlan variant directory name"
-    )
-    document_render.add_argument("--speech", default="all", metavar="SELECTOR")
-    document_render.add_argument("--renderplan-root", type=Path)
-    document_render.add_argument("--output-root", type=Path)
-    document_render.add_argument("--cache-dir", type=Path)
-    document_render.add_argument("--force", action="store_true")
-    document_render.add_argument("--reset-stale", action="store_true")
-    document_render.add_argument(
-        "--emphasis-policy", choices=("reject", "defer-to-compose"), default="reject"
-    )
-    document_render.add_argument("--json", action="store_true")
-    _add_progress_option(document_render)
+    bundle_render.add_argument("--fail-fast", action="store_true")
+    bundle_render.add_argument("--json", action="store_true")
+    _add_progress_option(bundle_render)
     inspect = commands.add_parser(
         "inspect-manifest", help="Verify a render manifest and its WAVs"
     )
@@ -898,54 +868,95 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
     }
 
 
-def _print_book_result(result: BookRenderResult) -> None:
-    request = result.request
-    print("VoiceRender book render")
-    print(f"  workspace:   {request.workspace}")
-    print(f"  variant:     {request.variant_name}")
-    print(f"  renderplans: {request.renderplan_variant_dir}")
-    print(f"  output:      {request.output_variant_dir}")
-    print(f"  chapters:    {request.chapter_selector}")
-    print(f"  selected:    {result.requested}")
-    for outcome in result.outcomes:
-        print(f"[{outcome.index}/{result.requested}] {outcome.id}")
-        if outcome.status == "failed":
-            print("       FAILED")
-            print(
-                f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
-            )
-            if outcome.preflight_report is not None:
-                label = (
-                    "replan report" if outcome.replan_required else "preflight report"
-                )
-                print(f"       {label}: {outcome.preflight_report}")
-        elif outcome.status == "skipped":
-            print("       skipped after an earlier chapter failure")
-        else:
-            if request.speech_selector.strip().casefold() != "all":
+def _print_bundle_result(result: BundleRenderResult) -> None:
+    value: Any = result.value
+    if result.kind == "book":
+        request = value.request
+        selected = value.requested
+        output = request.output_variant_dir
+    else:
+        request = value.request
+        selected = 1
+        output = request.output_dir
+
+    print("VoiceRender bundle render")
+    print(f"  kind:      {result.kind}")
+    print(f"  workspace: {request.workspace}")
+    print(f"  variant:   {request.variant_name}")
+    print(f"  selected:  {selected}")
+    print(f"  output:    {output}")
+
+    if result.kind == "book":
+        print(f"  renderplans: {request.renderplan_variant_dir}")
+        print(f"  chapters:    {request.chapter_selector}")
+        for outcome in value.outcomes:
+            print(f"[{outcome.index}/{value.requested}] {outcome.id}")
+            if outcome.status == "failed":
+                print("       FAILED")
                 print(
-                    f"       speech: {outcome.selected_speech} of "
-                    f"{outcome.planned_speech} selected"
+                    f"       {outcome.error_code or 'render.failed'}: "
+                    f"{outcome.error_message or 'render failed'}"
                 )
-            print(f"       rendered: {outcome.rendered} new, {outcome.reused} reused")
-            state = "complete" if outcome.manifest_complete else "partial"
+                if outcome.preflight_report is not None:
+                    label = (
+                        "replan report"
+                        if outcome.replan_required
+                        else "preflight report"
+                    )
+                    print(f"       {label}: {outcome.preflight_report}")
+            elif outcome.status == "skipped":
+                print("       skipped after an earlier chapter failure")
+            else:
+                if request.speech_selector.strip().casefold() != "all":
+                    print(
+                        f"       speech: {outcome.selected_speech} of "
+                        f"{outcome.planned_speech} selected"
+                    )
+                print(
+                    f"       rendered: {outcome.rendered} new, {outcome.reused} reused"
+                )
+                state = "complete" if outcome.manifest_complete else "partial"
+                print(
+                    f"       chapter state: {state} "
+                    f"({outcome.available_speech}/{outcome.planned_speech} available)"
+                )
+                if outcome.manifest is not None:
+                    print(f"       manifest: {outcome.manifest}")
+            if outcome.pending_composition:
+                print(
+                    "       WARNING: emphasis remains pending composition; see "
+                    f"{outcome.output_dir / RENDER_DIAGNOSTICS_FILENAME}"
+                )
+        rendered = value.written
+        reused = value.reused
+        failed = value.failed
+        status = "failed" if failed else "completed"
+    else:
+        print(f"  speech:    {request.speech_selector}")
+        print(f"  status:    {value.status}")
+        print(f"  rendered:  {value.rendered}")
+        print(f"  reused:    {value.reused}")
+        print(f"  report:    {value.report_path}")
+        if value.preflight_report:
+            print(f"  preflight: {value.preflight_report}")
+        if value.error_code:
+            print(f"FAILED: {value.error_code}: {value.error_message or ''}")
+        if value.pending_composition:
             print(
-                f"       chapter state: {state} "
-                f"({outcome.available_speech}/{outcome.planned_speech} available)"
+                "WARNING: emphasis remains pending composition; see "
+                f"{output / RENDER_DIAGNOSTICS_FILENAME}"
             )
-            if outcome.manifest is not None:
-                print(f"       manifest: {outcome.manifest}")
-        if outcome.pending_composition:
-            print(
-                "       WARNING: emphasis remains pending composition; see "
-                f"{outcome.output_dir / RENDER_DIAGNOSTICS_FILENAME}"
-            )
+        rendered = value.rendered
+        reused = value.reused
+        failed = int(value.status == "failed")
+        status = value.status
+
     print("VoiceRender summary")
-    print(f"  requested: {result.requested}")
-    print(f"  complete:  {result.full_chapters}")
-    print(f"  partial:   {result.partial_chapters}")
-    print(f"  failed:    {result.failed}")
-    print(f"  skipped:   {result.skipped}")
+    print(f"  status:    {status}")
+    print(f"  selected:  {selected}")
+    print(f"  rendered:  {rendered}")
+    print(f"  reused:    {reused}")
+    print(f"  failed:    {failed}")
 
 
 def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
@@ -1870,77 +1881,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 2 if fresh is not None and fresh.status == "replan" else 1
             return 0
 
-        if args.command == "render-document":
-            progress = _progress_callback(args)
-            try:
-                request = _resolve_document_request(
-                    args.document,
-                    variant=args.variant,
-                    speech=args.speech,
-                    renderplan_root=args.renderplan_root,
-                    output_root=args.output_root,
-                    cache_dir=args.cache_dir,
-                    force=args.force,
-                    reset_stale_output=args.reset_stale,
-                    emphasis_policy=args.emphasis_policy,
-                )
-                print("VoiceRender document render", file=sys.stderr)
-                print(f"  workspace:   {request.workspace}", file=sys.stderr)
-                print(f"  document:    {request.document_id}", file=sys.stderr)
-                print(f"  variant:     {request.variant_name}", file=sys.stderr)
-                print(f"  profile-id:  {request.render_profile_id}", file=sys.stderr)
-                print(f"  renderplan:  {request.renderplan_path}", file=sys.stderr)
-                print(f"  output:      {request.output_dir}", file=sys.stderr)
-                print(f"  cache:       {request.cache_dir}", file=sys.stderr)
-                print(f"  speech:      {request.speech_selector}", file=sys.stderr)
-                result = _render_document(
-                    args.document,
-                    variant=args.variant,
-                    speech=args.speech,
-                    renderplan_root=args.renderplan_root,
-                    output_root=args.output_root,
-                    cache_dir=args.cache_dir,
-                    force=args.force,
-                    reset_stale_output=args.reset_stale,
-                    emphasis_policy=args.emphasis_policy,
-                    on_event=progress,
-                )
-            except (OSError, ValueError, TypeError) as exc:
-                payload = {
-                    "error": str(exc),
-                    "code": getattr(exc, "code", "workspace.invalid"),
-                    "exit_code": 2,
-                }
-                if args.json:
-                    print(json.dumps(payload, ensure_ascii=False, indent=2))
-                else:
-                    print(f"error: {exc}", file=sys.stderr)
-                return 2
-            finally:
-                if progress is not None:
-                    progress.finish()
-            if args.json:
-                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
-            else:
-                print("VoiceRender document summary", file=sys.stderr)
-                print(f"  status:   {result.status}", file=sys.stderr)
-                print(f"  planned:  {result.planned_speech}", file=sys.stderr)
-                print(f"  selected: {result.selected_speech}", file=sys.stderr)
-                print(f"  rendered: {result.rendered}", file=sys.stderr)
-                print(f"  reused:   {result.reused}", file=sys.stderr)
-                print(f"  report:   {result.report_path}", file=sys.stderr)
-                if result.preflight_report:
-                    print(f"  preflight: {result.preflight_report}", file=sys.stderr)
-                if result.error_code:
-                    print(f"FAILED: {result.error_code}", file=sys.stderr)
-            return result.exit_code
-
-        if args.command == "render-book":
+        if args.command == "bundle" and args.bundle_command == "render":
             progress = _progress_callback(args)
             try:
                 try:
-                    book_result = render_book(
-                        args.book,
+                    bundle_result = render_bundle(
+                        args.bundle,
                         variant=args.variant,
                         chapters=args.chapters,
                         speech=args.speech,
@@ -1948,19 +1894,20 @@ def main(argv: list[str] | None = None) -> int:
                         output_root=args.output_root,
                         cache_dir=args.cache_dir,
                         force=args.force,
-                        reset_stale_output=args.reset_stale,
-                        fail_fast=args.fail_fast,
+                        reset_stale=args.reset_stale,
                         emphasis_policy=args.emphasis_policy,
-                        on_event=progress,
+                        fail_fast=args.fail_fast,
+                        on_progress=progress,
                     )
                 finally:
                     if progress is not None:
                         progress.finish()
-            except (BookRenderError, OSError, ValueError, TypeError) as exc:
-                error_code = getattr(exc, "code", "workspace.invalid")
+            except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
                 payload = {
+                    "format": "voicerender-bundle-result",
+                    "version": 1,
                     "error": str(exc),
-                    "code": error_code,
+                    "code": getattr(exc, "code", "bundle.invalid"),
                     "exit_code": 2,
                 }
                 if args.json:
@@ -1969,10 +1916,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"error: {exc}", file=sys.stderr)
                 return 2
             if args.json:
-                print(json.dumps(book_result.to_dict(), ensure_ascii=False, indent=2))
+                print(json.dumps(bundle_result.to_dict(), ensure_ascii=False, indent=2))
             else:
-                _print_book_result(book_result)
-            return book_result.exit_code
+                _print_bundle_result(bundle_result)
+            return bundle_result.exit_code
 
         if args.command == "inspect-manifest":
             payload, valid = _inspect_manifest(args.manifest)

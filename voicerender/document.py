@@ -1,4 +1,4 @@
-"""Single-document SSMDDoc rendering on the existing RenderPlan execution path."""
+"""Document-bundle rendering on the existing RenderPlan execution path."""
 
 from __future__ import annotations
 
@@ -367,7 +367,7 @@ def render_document(
 def _write_report(result: DocumentRenderResult) -> None:
     req = result.request
     data = {
-        "format": "voicerender-document-report",
+        "format": "voicerender-bundle-document-report",
         "version": 1,
         "workspace": str(req.workspace),
         "document_id": req.document_id,

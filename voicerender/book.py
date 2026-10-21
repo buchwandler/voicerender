@@ -1282,7 +1282,7 @@ def _relative_posix(path: Path, base: Path) -> str:
 def _write_book_report(result: BookRenderResult) -> None:
     request = result.request
     payload: dict[str, Any] = {
-        "format": "voicerender-book-report",
+        "format": "voicerender-bundle-book-report",
         "version": 1,
         "variant": request.variant_name,
         "emphasis_policy": request.emphasis_policy.value,

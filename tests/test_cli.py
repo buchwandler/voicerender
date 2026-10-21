@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() -> None:
+def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None:
     root = Path(__file__).resolve().parents[1]
     root_help = subprocess.run(
         [sys.executable, "-m", "voicerender", "--help"],
@@ -23,8 +23,8 @@ def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() ->
         capture_output=True,
         text=True,
     ).stdout.casefold()
-    book_help = subprocess.run(
-        [sys.executable, "-m", "voicerender", "render-book", "--help"],
+    bundle_help = subprocess.run(
+        [sys.executable, "-m", "voicerender", "bundle", "render", "--help"],
         cwd=root,
         check=True,
         capture_output=True,
@@ -33,17 +33,17 @@ def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() ->
 
     assert "preflight" in root_help
     assert "renderplan" in root_help
-    assert "render-book" in root_help
+    assert "bundle" in root_help
     assert "utterplan" not in root_help
     assert "--preflight" in render_help
     assert "--out-dir" in render_help
     assert "--voice" not in render_help
     assert "--take" not in render_help
     assert "--profile" not in render_help
-    assert "--variant" in book_help
-    assert "--chapters" in book_help
-    assert "--speech" in book_help
-    assert "utterplan" not in book_help
+    assert "--variant" in bundle_help
+    assert "--chapters" in bundle_help
+    assert "--speech" in bundle_help
+    assert "utterplan" not in bundle_help
 
 
 def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
@@ -64,8 +64,8 @@ import voicerender.book
 import voicerender.cli
 assert callable(voicerender.preflight_render_plan)
 assert callable(voicerender.render_renderplan)
-args = voicerender.cli.build_parser().parse_args(['render-book', 'book', '--variant', 'variant'])
-assert args.command == 'render-book'
+args = voicerender.cli.build_parser().parse_args(['bundle', 'render', 'book.ssmd-bundle', '--variant', 'variant'])
+assert args.command == 'bundle' and args.bundle_command == 'render'
 assert not any(name.split('.', 1)[0].casefold() == 'utterplan' for name in sys.modules)
 assert not any(name.startswith('voicerender.inputs.utterplan') for name in sys.modules)
 """
@@ -135,7 +135,7 @@ def test_cli_emphasis_policy_defaults_to_reject_and_can_defer() -> None:
             "--out-dir",
             "rendered",
         ],
-        ["render-book", "book", "--variant", "narration"],
+        ["bundle", "render", "book.ssmd-bundle", "--variant", "narration"],
     )
     for command in commands:
         assert parser.parse_args(command).emphasis_policy == "reject"
@@ -865,7 +865,7 @@ def test_preflight_cli_json_auto_and_disabled_progress_are_silent(
     assert callbacks == [False, False]
 
 
-@pytest.mark.parametrize("command", ["render", "render-book"])
+@pytest.mark.parametrize("command", ["render", "bundle"])
 def test_render_command_progress_callbacks_keep_json_stdout_clean(
     command: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -926,14 +926,15 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
         ]
     else:
 
-        def fake_render_book(*_args, on_event, **_kwargs):
-            event_callback(on_event, "book")
+        def fake_render_bundle(*_args, on_progress, **_kwargs):
+            event_callback(on_progress, "book")
             return SimpleNamespace(to_dict=lambda: {"items": []}, exit_code=0)
 
-        monkeypatch.setattr(cli, "render_book", fake_render_book)
+        monkeypatch.setattr(cli, "render_bundle", fake_render_bundle)
         args = [
-            "render-book",
-            str(tmp_path / "book"),
+            "bundle",
+            "render",
+            str(tmp_path / "book.ssmd-bundle"),
             "--variant",
             "narration",
             "--json",
@@ -944,4 +945,4 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
     stdout = capsys.readouterr().out
     assert isinstance(__import__("json").loads(stdout), dict)
     assert "progress 50.0%" in stderr.getvalue()
-    assert "\r" not in stderr.getvalue() and "\x1b" not in stderr.getvalue()
+    assert "\\r" not in stderr.getvalue() and "\\x1b" not in stderr.getvalue()

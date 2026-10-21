@@ -76,7 +76,7 @@ Install the selected engine extra and make its model assets available before pre
 
 ### Deferred emphasis
 
-VoiceRender does not apply emphasis during speech synthesis and does not advertise `emphasis` as a native Piper feature. By default, emphasis is rejected. An orchestration pipeline that declares the `audiocompose.emphasis.gain.v1` handler must select `--emphasis-policy defer-to-compose` for **both** preflight and render (or for `render-book`):
+VoiceRender does not apply emphasis during speech synthesis and does not advertise `emphasis` as a native Piper feature. By default, emphasis is rejected. An orchestration pipeline that declares the `audiocompose.emphasis.gain.v1` handler must select `--emphasis-policy defer-to-compose` for **both** preflight and render (or for `bundle render`):
 
 ```bash
 voicerender preflight chapter.renderplan.toml \
@@ -88,7 +88,7 @@ voicerender render chapter.renderplan.toml \
 
 The accepted emphasis parameters are `{}` or one of `{ "level": "reduced" }`, `{ "level": "moderate" }`, or `{ "level": "strong" }`; unknown keys, types, and invalid ranges are rejected. Other unsupported controls remain fail-closed. VoiceRender sends the original text to the engine without an emphasis option, preserves the original controls and identities in the RenderPlan, and leaves control interpretation—including overlapping emphasis—to AudioCompose.
 
-Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `render-book` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
+Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `bundle render` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
 The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
 
 Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
@@ -264,90 +264,38 @@ voicerender profile create \
 
 The new profile pins the copied WAV on that machine. Do not reuse the creator's local profile or source sidecar unchanged, because their absolute WAV path is machine-specific. PocketSynth consumes the pinned WAV and does not need or import Qwen3Synth; Qwen provenance is not an execution dependency. See the [RenderProfile lifecycle](docs/renderprofile.md) for source and portability details.
 
-## SSMDBook RenderPlan collections from UtterPlan
+## Unified SSMD bundle rendering
 
-For a book, [UtterPlan](https://pypi.org/project/utterplan/) can project already-saved
-chapter plans into one RenderPlan variant per RenderProfile. It does not call
-VoiceRender or preflight during projection. The collection index
-`renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned
-workspace metadata, not RenderPlan artifacts. VoiceRender can consume the ordered index through `render-book`; the direct single-plan workflow remains available.
+The canonical editable SSMD workspace is `<name>.ssmd-bundle/`. Its `manifest.json` declares whether it contains a book or one document; VoiceRender reads that authoritative format and dispatches to the matching existing RenderPlan renderer. Book and document rendering use the same command and require the bundle root, never an inner file or subdirectory.
+
+The coordinated pipeline uses the `bundle` command group at every stage:
 
 ```bash
-utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
-  --profile narration.renderprofile.toml
-
-voicerender preflight \
-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
-  -o chapter-0005.preflight.toml
-voicerender render \
-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
-  --preflight chapter-0005.preflight.toml \
-  --out-dir renders/chapter-0005
+ssmdconvert bundle convert story.ssmd.md
+utterplan bundle compile story.ssmd-bundle
+utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
+voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
 ```
 
-Repeat the ordinary preflight/render flow for each selected plan. Different profile
-identities produce distinct UtterPlan variant directories, while each individual
-RenderPlan retains the same shared contract and exact request semantics.
-
-### Render the variant with VoiceRender
-
-Render the chapters from the ordered set directly. The variant value is the exact directory name created by UtterPlan, including its profile fingerprint:
+For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
 
 ```bash
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5-17 \
-  --cache-dir .voicerender-cache \
-  --json
+voicerender bundle render Novel.ssmd-bundle \
+  --variant narration--<profile-id-prefix> \
+  --chapters 5-17 --cache-dir .voicerender-cache --json
 ```
 
-Omit `--chapters` to select every chapter. For speech QC, select exactly one source chapter and a one-based range of RenderPlan speech numbers; whole-chapter preflight still runs, but only the selected speech is synthesized:
+Omit `--chapters` to select all chapters. A speech QC window selects one source chapter and a one-based speech range; verified WAVs accumulate into the same chapter manifest. `--fail-fast` skips remaining chapters after a failure. `--renderplan-root`, `--output-root`, and `--cache-dir` override their roots. `--reset-stale` replaces stale VoiceRender-owned output while keeping cache entries available for verified reuse; `--force` synthesizes every selected request and bypasses cache.
+
+A document is one render item and accepts only `--chapters all`:
 
 ```bash
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5 --speech 50-60
-
-# A later window adds verified WAVs to the same chapter manifest.
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5 --speech 61-70
-
-# Omit --speech to finish the chapter, reusing valid artifacts from both windows.
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" --chapters 5
+voicerender bundle render story.ssmd-bundle \
+  --variant printer-cast--<profile-fingerprint> \
+  --speech 1-20 --reset-stale
 ```
 
-A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, and `--json` support alternate roots and automation. `--reset-stale` lets a rerun accept output whose manifest belongs to a different RenderPlan: it removes only VoiceRender-owned chapter artifacts and keeps the external cache available for verified exact-request reuse. `--force` is stronger: it synthesizes every selected request and bypasses cache.
-
-When a chapter fails with `preflight.replan`, VoiceRender stops before synthesizing requests under that plan and exposes the persisted report path. The chapter outcome includes `preflight_report` and `replan_required`; runtime immediate rechecks point to `preflight-recheck.toml` (also available as the compatibility field `recheck_report`). The JSON output and `voicerender-report.toml` include these fields, and human output prints the report path. Use the report with your planning tool to activate a child RenderPlan, then rerun VoiceRender with `--reset-stale`:
-
-```bash
-voicerender render-book "Novel.ssmdbook" \
-  --variant "narration--<profile-id-prefix>" \
-  --chapters 5 --reset-stale
-```
-
-The reset does not delete `.voicerender-cache`; unchanged exact renderer requests can be restored from verified cache entries, while new child requests are synthesized normally. `render`/`render-book` and the `render_renderplan()`/`render_book()` APIs accept `reset_stale_output=True`. VoiceRender reports the replan handoff but does not invoke the planner or generate child plans.
-
-By default, output is kept separate from the RenderPlan inputs:
-
-```text
-Novel.ssmdbook/
-├── renderplan/<variant>/                 # input plans and renderplan-set.toml
-└── voicerender/<variant>/
-    ├── voicerender-report.toml            # atomic book-level outcomes
-    ├── .voicerender-cache/
-    └── chapter-0005/
-        ├── preflight.toml                 # whole-chapter preflight
-        ├── preflight-recheck.toml           # runtime immediate capacity recheck, if any
-        ├── render-manifest.toml            # cumulative verified artifacts
-        ├── render-diagnostics.json          # deferred controls, if any, remain pending composition
-        ├── 000001.wav
-        └── ...
-```
-
-The chapter directories use the set's chapter IDs, while `--chapters` selects by source chapter number. The exact variant name is retained under both roots. Existing manual `preflight`/`render` commands above remain available for individual plans.
+For either kind, VoiceRender stores output below `<bundle>/voicerender/<variant>/`. The existing internal book and document layouts remain kind-specific, including their reports and manifest locations. Generic `voicerender preflight` and `voicerender render` remain available for individual RenderPlans.
 
 ## Python API
 
@@ -369,12 +317,12 @@ if report.status == "ok":
 
 ### Live progress, ETA, and workload estimates
 
-`render`, `render-book`, and `preflight` accept `--progress` and `--no-progress`. By default progress is enabled only for interactive stderr and non-JSON output. `--progress` forces it (including with `--json`), but progress always stays on stderr; JSON stdout remains a single unchanged result. Forced redirected output uses throttled newline records without ANSI escapes or carriage returns. Use `--no-progress` to disable it.
+`render`, `bundle render`, and `preflight` accept `--progress` and `--no-progress`. By default progress is enabled only for interactive stderr and non-JSON output. `--progress` forces it (including with `--json`), but progress always stays on stderr; JSON stdout remains a single unchanged result. Forced redirected output uses throttled newline records without ANSI escapes or carriage returns. Use `--no-progress` to disable it.
 
 Python callers can subscribe to typed events during rendering and preflight. Events carry progress counts, phase/chapter context, elapsed time, and an ETA when synthesis timing evidence is available:
 
-```python
-from voicerender import RenderEvent, RenderEventKind, render_book
+````python
+from voicerender import RenderEvent, RenderEventKind, render_bundle
 
 
 def on_event(event: RenderEvent) -> None:
@@ -382,10 +330,9 @@ def on_event(event: RenderEvent) -> None:
         print(event.progress, event.eta_seconds, event.eta_confidence)
 
 
-result = render_book(
-    "Novel.ssmdbook", variant="narration--<profile-id>", on_event=on_event
+result = render_bundle(
+    "Novel.ssmd-bundle", variant="narration--<profile-id>", on_progress=on_event
 )
-```
 
 The keyword-only `on_event` callback is also available on `preflight_render_plan()`, `render_renderplan()`, and the legacy `render()`/`render_plan()` APIs. Preflight events report required-occurrence work, but its capacity measurements are not synthesis timing and do not produce an ETA.
 
@@ -398,7 +345,7 @@ estimate = estimate_renderplan(plan, output_dir="renders/narration")
 print(
     estimate.selected_count, estimate.known_output_reuse_count, estimate.pending_count
 )
-```
+````
 
 Preflight capacity values describe whether a request fits the engine's limits; they are not wall-clock predictions and are never converted into duration estimates.
 
@@ -427,44 +374,6 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
 - **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
 - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
-
-## SSMDDoc document workspaces
-
-For one editable SSMDDoc, convert and compile the source, then let UtterPlan project a RenderPlan for the complete RenderProfile cast described above. VoiceRender consumes the exact projected variant:
-
-```bash
-ssmdconvert document convert story.ssmd.md
-utterplan compile-document story.ssmdoc
-utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
-voicerender render-document story.ssmdoc \
-  --variant printer-cast--<profile-fingerprint>
-```
-
-The current workspace contract keeps the UtterPlan document artifact filename distinct from the stable manifest identity and rendered output directory:
-
-```text
-story.ssmdoc/
-├── manifest.json
-├── document.ssmd.md
-├── utterplan/
-│   ├── document.utterplan.toml
-│   └── compile-report.toml
-├── renderplan/
-│   └── printer-cast--<profile-fingerprint>/
-│       ├── renderprofile.toml
-│       ├── document.renderplan.toml
-│       └── render-report.toml
-└── voicerender/
-    └── printer-cast--<profile-fingerprint>/
-        ├── voicerender-report.toml
-        ├── .voicerender-cache/
-        └── document-0001/
-            ├── preflight.toml
-            ├── render-manifest.toml
-            └── *.wav
-```
-
-By default, VoiceRender reads from `<workspace>/renderplan/<variant>/document.renderplan.toml` and writes per-document output under `<workspace>/voicerender/<variant>/document-0001/`; the cache and variant report are siblings of the document directory. `--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
 
 ## Tests
 

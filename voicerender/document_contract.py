@@ -1,4 +1,4 @@
-"""Minimal, dependency-free SSMDDoc v1 workspace identity reader."""
+"""Minimal, dependency-free document-bundle identity validation."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ DOCUMENT_FORMAT = "ssmdconvert.document"
 
 
 class DocumentWorkspaceError(DocumentRenderError):
-    """The input is not a safe, valid SSMDDoc v1 workspace."""
+    """The input is not a safe, valid document bundle."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,23 +27,19 @@ class DocumentWorkspaceIndex:
 
 
 def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
-    """Resolve a workspace root or its canonical document file without parsing SSMD."""
+    """Validate document-specific identity fields within a canonical bundle root."""
     input_path = Path(value).expanduser()
-    if input_path.suffix.lower() == ".zip" or input_path.name.lower().endswith(
-        ".ssmdoc.zip"
-    ):
-        raise DocumentWorkspaceError("ZIP bundles are not accepted by render-document")
-    try:
-        input_path = input_path.resolve(strict=True)
-        root = (
-            input_path.parent
-            if input_path.is_file() and input_path.name == "document.ssmd.md"
-            else input_path
+    if not input_path.name.endswith(".ssmd-bundle"):
+        raise DocumentWorkspaceError(
+            "document bundle input must be the canonical .ssmd-bundle directory root"
         )
-        root = root.resolve(strict=True)
+    if input_path.is_symlink():
+        raise DocumentWorkspaceError("document bundle root must not be a symlink")
+    try:
+        root = input_path.resolve(strict=True)
         if not root.is_dir():
             raise DocumentWorkspaceError(
-                "document workspace input is not a directory or canonical document"
+                "document bundle input is not a directory root"
             )
         manifest = root / "manifest.json"
         if manifest.is_symlink():
@@ -60,19 +56,22 @@ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
     except DocumentWorkspaceError:
         raise
     except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError) as exc:
-        raise DocumentWorkspaceError(f"cannot read SSMDDoc workspace: {exc}") from exc
+        raise DocumentWorkspaceError(f"cannot read document bundle: {exc}") from exc
     if not isinstance(data, dict):
         raise DocumentWorkspaceError("manifest root must be a JSON object")
     if (
         data.get("format") != DOCUMENT_FORMAT
+        or type(data.get("schema_version")) is not int
         or data.get("schema_version") != 1
         or data.get("ssmd_version") != "0.9"
     ):
-        raise DocumentWorkspaceError("unsupported SSMDDoc manifest format or version")
+        raise DocumentWorkspaceError(
+            "unsupported document bundle manifest format or version"
+        )
     document = data.get("document")
     if not isinstance(document, dict) or document.get("id") != "document-0001":
         raise DocumentWorkspaceError(
-            "manifest document must have canonical id document-0001"
+            "document bundle manifest must have canonical id document-0001"
         )
     relative = document.get("path")
     if (
@@ -82,7 +81,7 @@ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
         or "\\" in relative
         or re.match(r"^[A-Za-z]:", relative)
     ):
-        raise DocumentWorkspaceError("manifest document path is unsafe")
+        raise DocumentWorkspaceError("document bundle manifest path is unsafe")
     posix = PurePosixPath(relative)
     if (
         posix.is_absolute()
@@ -90,10 +89,12 @@ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
         or posix.as_posix() != relative
     ):
         raise DocumentWorkspaceError(
-            "manifest document path must be normalized and relative"
+            "document bundle manifest path must be normalized and relative"
         )
     if relative != "document.ssmd.md":
-        raise DocumentWorkspaceError("schema v1 document path must be document.ssmd.md")
+        raise DocumentWorkspaceError(
+            "schema v1 document bundle path must be document.ssmd.md"
+        )
     document_path = root / relative
     if document_path.is_symlink():
         raise DocumentWorkspaceError(

@@ -25,6 +25,8 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
         "VoiceCloneRequest",
         "VoiceDescriptor",
         "VoiceKind",
+        "BundleContractError",
+        "BundleRenderResult",
         "clone_voice_profile",
         "create_voice_source",
         "engine_options",
@@ -50,6 +52,10 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
 
     assert expected.issubset(set(voicerender.__all__))
     assert all(hasattr(voicerender, name) for name in expected)
+
+    assert callable(voicerender.render_bundle)
+    assert not hasattr(voicerender, "render" + "_book")
+    assert not hasattr(voicerender, "render" + "_document")
 
 
 def test_progress_types_and_event_dispatch_are_public_and_typed() -> None:

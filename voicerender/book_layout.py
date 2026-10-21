@@ -10,14 +10,18 @@ from .book_contract import BookRenderError
 
 def resolve_workspace(workspace: str | Path) -> Path:
     path = Path(workspace).expanduser()
+    if not path.name.endswith(".ssmd-bundle"):
+        raise BookRenderError(
+            "book bundle input must be the canonical .ssmd-bundle directory root"
+        )
+    if path.is_symlink():
+        raise BookRenderError("book bundle root must not be a symlink")
     try:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise BookRenderError(f"cannot resolve book workspace {path}: {exc}") from exc
+        raise BookRenderError(f"cannot resolve book bundle {path}: {exc}") from exc
     if not resolved.is_dir():
-        raise BookRenderError(f"book workspace is not a directory: {resolved}")
-    if resolved.name == "chapters":
-        resolved = resolved.parent
+        raise BookRenderError(f"book bundle is not a directory: {resolved}")
     return resolved
 
 
