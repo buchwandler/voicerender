@@ -1,0 +1,45 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 986,
+      "deletions": 494,
+      "patch_file": "0ab4075.patch",
+      "patch_sha256": "8520cace5e55bf6dca426daf4da6cc524ddcffdc3a24f6fa780039e24e99e0f5",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "docs/renderprofile.md",
+        "tests/test_bundle_contract.py",
+        "tests/test_bundle_render.py",
+        "tests/test_cli.py",
+        "tests/test_control_surface_exports.py",
+        "tests/test_document_contract.py",
+        "tests/test_render_book.py",
+        "tests/test_renderplan_render.py",
+        "tests/wheel_smoke.py",
+        "voicerender/__init__.py",
+        "voicerender/book.py",
+        "voicerender/book_contract.py",
+        "voicerender/book_layout.py",
+        "voicerender/bundle.py",
+        "voicerender/bundle_contract.py",
+        "voicerender/cli.py",
+        "voicerender/document.py",
+        "voicerender/document_contract.py",
+        "voicerender/errors.py"
+      ],
+      "sha": "0ab40750b3ede2e90e62b643c33aedc8687bf1b0",
+      "short_sha": "0ab4075",
+      "source_ref": "git:0ab40750b3ede2e90e62b643c33aedc8687bf1b0"
+    }
+  ],
+  "git_base_ref": "fdaaa999eb67c26010092ee4d1770b0136a760d6",
+  "git_base_sha": "fdaaa999eb67c26010092ee4d1770b0136a760d6",
+  "git_head_ref": "0ab40750b3ede2e90e62b643c33aedc8687bf1b0",
+  "git_head_sha": "0ab40750b3ede2e90e62b643c33aedc8687bf1b0",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.2.5",
+  "schema_version": 1
+}

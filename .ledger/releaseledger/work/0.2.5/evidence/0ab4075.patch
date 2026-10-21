@@ -1,0 +1,2227 @@
+ README.md                             | 141 +++--------------
+ docs/index.md                         |  64 +++-----
+ docs/renderprofile.md                 | 103 ++++--------
+ tests/test_bundle_contract.py         | 150 ++++++++++++++++++
+ tests/test_bundle_render.py           | 268 +++++++++++++++++++++++++++++++
+ tests/test_cli.py                     |  37 ++---
+ tests/test_control_surface_exports.py |   6 +
+ tests/test_document_contract.py       |  50 ++++--
+ tests/test_render_book.py             |  54 ++++---
+ tests/test_renderplan_render.py       |  28 +++-
+ tests/wheel_smoke.py                  |  15 +-
+ voicerender/__init__.py               |  10 +-
+ voicerender/book.py                   |   2 +-
+ voicerender/book_contract.py          |   2 +-
+ voicerender/book_layout.py            |  12 +-
+ voicerender/bundle.py                 |  87 +++++++++++
+ voicerender/bundle_contract.py        | 115 ++++++++++++++
+ voicerender/cli.py                    | 287 ++++++++++++++--------------------
+ voicerender/document.py               |   4 +-
+ voicerender/document_contract.py      |  43 ++---
+ voicerender/errors.py                 |   2 +-
+ 21 files changed, 986 insertions(+), 494 deletions(-)
+
+diff --git a/README.md b/README.md
+index a93e918..ed8b92f 100644
+--- a/README.md
++++ b/README.md
+@@ -76,7 +76,7 @@ Install the selected engine extra and make its model assets available before pre
+
+ ### Deferred emphasis
+
+-VoiceRender does not apply emphasis during speech synthesis and does not advertise `emphasis` as a native Piper feature. By default, emphasis is rejected. An orchestration pipeline that declares the `audiocompose.emphasis.gain.v1` handler must select `--emphasis-policy defer-to-compose` for **both** preflight and render (or for `render-book`):
++VoiceRender does not apply emphasis during speech synthesis and does not advertise `emphasis` as a native Piper feature. By default, emphasis is rejected. An orchestration pipeline that declares the `audiocompose.emphasis.gain.v1` handler must select `--emphasis-policy defer-to-compose` for **both** preflight and render (or for `bundle render`):
+
+ ```bash
+ voicerender preflight chapter.renderplan.toml \
+@@ -88,7 +88,7 @@ voicerender render chapter.renderplan.toml \
+
+ The accepted emphasis parameters are `{}` or one of `{ "level": "reduced" }`, `{ "level": "moderate" }`, or `{ "level": "strong" }`; unknown keys, types, and invalid ranges are rejected. Other unsupported controls remain fail-closed. VoiceRender sends the original text to the engine without an emphasis option, preserves the original controls and identities in the RenderPlan, and leaves control interpretation—including overlapping emphasis—to AudioCompose.
+
+-Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `render-book` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
++Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `bundle render` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
+ The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
+
+ Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
+@@ -264,90 +264,38 @@ voicerender profile create \
+
+ The new profile pins the copied WAV on that machine. Do not reuse the creator's local profile or source sidecar unchanged, because their absolute WAV path is machine-specific. PocketSynth consumes the pinned WAV and does not need or import Qwen3Synth; Qwen provenance is not an execution dependency. See the [RenderProfile lifecycle](docs/renderprofile.md) for source and portability details.
+
+-## SSMDBook RenderPlan collections from UtterPlan
++## Unified SSMD bundle rendering
+
+-For a book, [UtterPlan](https://pypi.org/project/utterplan/) can project already-saved
+-chapter plans into one RenderPlan variant per RenderProfile. It does not call
+-VoiceRender or preflight during projection. The collection index
+-`renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned
+-workspace metadata, not RenderPlan artifacts. VoiceRender can consume the ordered index through `render-book`; the direct single-plan workflow remains available.
++The canonical editable SSMD workspace is `<name>.ssmd-bundle/`. Its `manifest.json` declares whether it contains a book or one document; VoiceRender reads that authoritative format and dispatches to the matching existing RenderPlan renderer. Book and document rendering use the same command and require the bundle root, never an inner file or subdirectory.
+
+-```bash
+-utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
+-  --profile narration.renderprofile.toml
+-
+-voicerender preflight \
+-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+-  -o chapter-0005.preflight.toml
+-voicerender render \
+-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+-  --preflight chapter-0005.preflight.toml \
+-  --out-dir renders/chapter-0005
+-```
+-
+-Repeat the ordinary preflight/render flow for each selected plan. Different profile
+-identities produce distinct UtterPlan variant directories, while each individual
+-RenderPlan retains the same shared contract and exact request semantics.
+-
+-### Render the variant with VoiceRender
+-
+-Render the chapters from the ordered set directly. The variant value is the exact directory name created by UtterPlan, including its profile fingerprint:
++The coordinated pipeline uses the `bundle` command group at every stage:
+
+ ```bash
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5-17 \
+-  --cache-dir .voicerender-cache \
+-  --json
++ssmdconvert bundle convert story.ssmd.md
++utterplan bundle compile story.ssmd-bundle
++utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
++voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
+ ```
+
+-Omit `--chapters` to select every chapter. For speech QC, select exactly one source chapter and a one-based range of RenderPlan speech numbers; whole-chapter preflight still runs, but only the selected speech is synthesized:
++For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
+
+ ```bash
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5 --speech 50-60
+-
+-# A later window adds verified WAVs to the same chapter manifest.
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5 --speech 61-70
+-
+-# Omit --speech to finish the chapter, reusing valid artifacts from both windows.
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" --chapters 5
++voicerender bundle render Novel.ssmd-bundle \
++  --variant narration--<profile-id-prefix> \
++  --chapters 5-17 --cache-dir .voicerender-cache --json
+ ```
+
+-A successful speech window exits 0 even though its chapter manifest is intentionally incomplete; subsequent selections accumulate into that manifest. Chapter failures do not stop later chapters by default; use `--fail-fast` to skip the remainder. `--renderplan-root`, `--output-root`, `--cache-dir`, and `--json` support alternate roots and automation. `--reset-stale` lets a rerun accept output whose manifest belongs to a different RenderPlan: it removes only VoiceRender-owned chapter artifacts and keeps the external cache available for verified exact-request reuse. `--force` is stronger: it synthesizes every selected request and bypasses cache.
++Omit `--chapters` to select all chapters. A speech QC window selects one source chapter and a one-based speech range; verified WAVs accumulate into the same chapter manifest. `--fail-fast` skips remaining chapters after a failure. `--renderplan-root`, `--output-root`, and `--cache-dir` override their roots. `--reset-stale` replaces stale VoiceRender-owned output while keeping cache entries available for verified reuse; `--force` synthesizes every selected request and bypasses cache.
+
+-When a chapter fails with `preflight.replan`, VoiceRender stops before synthesizing requests under that plan and exposes the persisted report path. The chapter outcome includes `preflight_report` and `replan_required`; runtime immediate rechecks point to `preflight-recheck.toml` (also available as the compatibility field `recheck_report`). The JSON output and `voicerender-report.toml` include these fields, and human output prints the report path. Use the report with your planning tool to activate a child RenderPlan, then rerun VoiceRender with `--reset-stale`:
++A document is one render item and accepts only `--chapters all`:
+
+ ```bash
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5 --reset-stale
++voicerender bundle render story.ssmd-bundle \
++  --variant printer-cast--<profile-fingerprint> \
++  --speech 1-20 --reset-stale
+ ```
+
+-The reset does not delete `.voicerender-cache`; unchanged exact renderer requests can be restored from verified cache entries, while new child requests are synthesized normally. `render`/`render-book` and the `render_renderplan()`/`render_book()` APIs accept `reset_stale_output=True`. VoiceRender reports the replan handoff but does not invoke the planner or generate child plans.
+-
+-By default, output is kept separate from the RenderPlan inputs:
+-
+-```text
+-Novel.ssmdbook/
+-├── renderplan/<variant>/                 # input plans and renderplan-set.toml
+-└── voicerender/<variant>/
+-    ├── voicerender-report.toml            # atomic book-level outcomes
+-    ├── .voicerender-cache/
+-    └── chapter-0005/
+-        ├── preflight.toml                 # whole-chapter preflight
+-        ├── preflight-recheck.toml           # runtime immediate capacity recheck, if any
+-        ├── render-manifest.toml            # cumulative verified artifacts
+-        ├── render-diagnostics.json          # deferred controls, if any, remain pending composition
+-        ├── 000001.wav
+-        └── ...
+-```
+-
+-The chapter directories use the set's chapter IDs, while `--chapters` selects by source chapter number. The exact variant name is retained under both roots. Existing manual `preflight`/`render` commands above remain available for individual plans.
++For either kind, VoiceRender stores output below `<bundle>/voicerender/<variant>/`. The existing internal book and document layouts remain kind-specific, including their reports and manifest locations. Generic `voicerender preflight` and `voicerender render` remain available for individual RenderPlans.
+
+ ## Python API
+
+@@ -369,12 +317,12 @@ if report.status == "ok":
+
+ ### Live progress, ETA, and workload estimates
+
+-`render`, `render-book`, and `preflight` accept `--progress` and `--no-progress`. By default progress is enabled only for interactive stderr and non-JSON output. `--progress` forces it (including with `--json`), but progress always stays on stderr; JSON stdout remains a single unchanged result. Forced redirected output uses throttled newline records without ANSI escapes or carriage returns. Use `--no-progress` to disable it.
++`render`, `bundle render`, and `preflight` accept `--progress` and `--no-progress`. By default progress is enabled only for interactive stderr and non-JSON output. `--progress` forces it (including with `--json`), but progress always stays on stderr; JSON stdout remains a single unchanged result. Forced redirected output uses throttled newline records without ANSI escapes or carriage returns. Use `--no-progress` to disable it.
+
+ Python callers can subscribe to typed events during rendering and preflight. Events carry progress counts, phase/chapter context, elapsed time, and an ETA when synthesis timing evidence is available:
+
+-```python
+-from voicerender import RenderEvent, RenderEventKind, render_book
++````python
++from voicerender import RenderEvent, RenderEventKind, render_bundle
+
+
+ def on_event(event: RenderEvent) -> None:
+@@ -382,10 +330,9 @@ def on_event(event: RenderEvent) -> None:
+         print(event.progress, event.eta_seconds, event.eta_confidence)
+
+
+-result = render_book(
+-    "Novel.ssmdbook", variant="narration--<profile-id>", on_event=on_event
++result = render_bundle(
++    "Novel.ssmd-bundle", variant="narration--<profile-id>", on_progress=on_event
+ )
+-```
+
+ The keyword-only `on_event` callback is also available on `preflight_render_plan()`, `render_renderplan()`, and the legacy `render()`/`render_plan()` APIs. Preflight events report required-occurrence work, but its capacity measurements are not synthesis timing and do not produce an ETA.
+
+@@ -398,7 +345,7 @@ estimate = estimate_renderplan(plan, output_dir="renders/narration")
+ print(
+     estimate.selected_count, estimate.known_output_reuse_count, estimate.pending_count
+ )
+-```
++````
+
+ Preflight capacity values describe whether a request fits the engine's limits; they are not wall-clock predictions and are never converted into duration estimates.
+
+@@ -428,44 +375,6 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
+ - **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
+ - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
+
+-## SSMDDoc document workspaces
+-
+-For one editable SSMDDoc, convert and compile the source, then let UtterPlan project a RenderPlan for the complete RenderProfile cast described above. VoiceRender consumes the exact projected variant:
+-
+-```bash
+-ssmdconvert document convert story.ssmd.md
+-utterplan compile-document story.ssmdoc
+-utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
+-voicerender render-document story.ssmdoc \
+-  --variant printer-cast--<profile-fingerprint>
+-```
+-
+-The current workspace contract keeps the UtterPlan document artifact filename distinct from the stable manifest identity and rendered output directory:
+-
+-```text
+-story.ssmdoc/
+-├── manifest.json
+-├── document.ssmd.md
+-├── utterplan/
+-│   ├── document.utterplan.toml
+-│   └── compile-report.toml
+-├── renderplan/
+-│   └── printer-cast--<profile-fingerprint>/
+-│       ├── renderprofile.toml
+-│       ├── document.renderplan.toml
+-│       └── render-report.toml
+-└── voicerender/
+-    └── printer-cast--<profile-fingerprint>/
+-        ├── voicerender-report.toml
+-        ├── .voicerender-cache/
+-        └── document-0001/
+-            ├── preflight.toml
+-            ├── render-manifest.toml
+-            └── *.wav
+-```
+-
+-By default, VoiceRender reads from `<workspace>/renderplan/<variant>/document.renderplan.toml` and writes per-document output under `<workspace>/voicerender/<variant>/document-0001/`; the cache and variant report are siblings of the document directory. `--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. VoiceRender consumes only the selected RenderPlan and does not parse UtterPlan files, invoke either planner/converter, or detect source freshness. After editing `document.ssmd.md`, re-run `compile-document` and UtterPlan `render-document`; use VoiceRender `--reset-stale` to replace stale owned audio while preserving the sibling cache.
+-
+ ## Tests
+
+ ```bash
+diff --git a/docs/index.md b/docs/index.md
+index d340dc0..63ac3a9 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -1,4 +1,4 @@
+-# VoiceRender documentation
++# VoiceRender guide
+
+ VoiceRender consumes shared RenderPlan and RenderProfile contracts. See `README.md` in the repository root for installation, CLI examples, and the Python API.
+
+@@ -11,62 +11,34 @@ changelog
+
+ ## Engine and voice control
+
+-VoiceRender owns its public engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice clone workflow, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and clone/profile preparation do not synthesize audio. See the repository README for command examples and [RenderProfile lifecycle](renderprofile.md#inspecting-and-mutating-profile-roles) for role APIs and write safety.
++VoiceRender owns engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice cloning, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and profile preparation do not synthesize audio. See [RenderProfile lifecycle](renderprofile.md) for role APIs and write safety.
+
+ ## Workflow
+
+-1. Create a complete-cast RenderProfile with per-role engine bindings and review its metadata (see the [RenderProfile lifecycle](renderprofile.md)).
+-2. Produce RenderPlans that reference the profile identity: use UtterPlan
+-   `render-plan` for one saved plan or `render-book` for selected SSMDBook
+-   chapters; both emit the same shared RenderPlan contract.
++1. Create a complete-cast RenderProfile with per-role engine bindings.
++2. Produce RenderPlans that reference the profile identity.
+ 3. Run `voicerender preflight PLAN -o REPORT`; this measures requests and never synthesizes.
+ 4. Render only when the report is `ok`: `voicerender render PLAN --preflight REPORT --out-dir OUTPUT`.
+-5. Verify the bundle with `voicerender inspect-manifest OUTPUT/render-manifest.toml`.
++5. Verify the result with `voicerender inspect-manifest OUTPUT/render-manifest.toml`.
+
+-The RenderPlan renderer preserves request order and identity: one speech item becomes one exact request and one numbered WAV. It does not adaptively split, merge, normalize, or reorder requests. An incomplete run leaves a valid partial manifest.
+-
+-An `ok` preflight approves the exact plan under capability observed at preflight time; VoiceRender remeasures before each synthesis. Capacity drift stops that occurrence without synthesis and returns a fresh plan-matched `replan` report; session-open failure returns `reject`. Pass `--recheck-report PATH` to `voicerender render` to persist either report. VoiceRender never edits speech text or emits a child RenderPlan. Operational render results include a separate execution fingerprint with adapter/API, synthesis, voice/options, and observed-capacity facts; these facts do not affect `RenderPlan.plan_id`.
+-
+-The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
+-
+-For book-level projection, UtterPlan owns the `renderplan-set.toml` collection index
+-and its per-invocation report as workspace metadata. VoiceRender's `render-book`
+-command consumes the ordered set and renders its individual `.renderplan.toml` files;
+-the direct single-plan preflight/render commands remain available.
+-See [UtterPlan](https://pypi.org/project/utterplan/) and the shared
+-[RenderPlan](https://pypi.org/project/renderplan/) package.
+-
+-## Book-level rendering
+-
+-After UtterPlan has written `renderplan-set.toml`, render the exact variant named in the set directory. By default, VoiceRender writes under `<book>/voicerender/<variant>/`, leaving the input plans under `<book>/renderplan/<variant>/`:
++For the coordinated SSMD workflow, the packages share one command-group name and one canonical editable workspace suffix:
+
+ ```bash
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5-17 --json
++ssmdconvert bundle convert story.ssmd.md
++utterplan bundle compile story.ssmd-bundle
++utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
++voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
+ ```
+
+-Omit `--chapters` to select all indexed chapters. For a speech QC window, select one source chapter and one-based speech numbers. Whole-chapter preflight is still performed; successful selected WAVs remain in the chapter manifest and can be accumulated by later invocations:
++`manifest.json` decides whether the root holds a book or a single document. VoiceRender detects the kind automatically; the same command takes a `.ssmd-bundle/` root for either. It does not accept an inner source file or a chapter directory. Documents are one render item and require `--chapters all`; books support chapter and speech selectors. The canonical packed transport artifact is `<name>.ssmd-bundle.zip`; VoiceRender's render pipeline operates on the editable directory.
+
+-```bash
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5 --speech 50-60
+-
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" \
+-  --chapters 5 --speech 61-70
+-
+-# Resume the chapter to full completion using its verified partial artifacts.
+-voicerender render-book "Novel.ssmdbook" \
+-  --variant "narration--<profile-id-prefix>" --chapters 5
+-```
++For books, UtterPlan owns the `renderplan-set.toml` collection index and its per-invocation report. VoiceRender consumes the ordered set, while direct single-plan preflight and render remain available. A speech window can succeed while the whole-book manifest remains partial; later selections accumulate verified WAVs. `--fail-fast` skips remaining chapters after a failure. `--renderplan-root`, `--output-root`, and `--cache-dir` override their roots. `--reset-stale` replaces stale VoiceRender-owned output while keeping cache entries available for verified reuse; `--force` bypasses cache.
+
+-A speech window can succeed (exit 0) while the whole-chapter manifest remains partial. The atomic `voicerender-report.toml` records each selected chapter, including execution fingerprints and the path to any fresh recheck report; each chapter directory contains its `preflight.toml`, optional `preflight-recheck.toml`, cumulative `render-manifest.toml`, and numbered WAVs. A stale persisted `ok` is invalidated only by a fresh report for the same plan and failed speech occurrence. The variant directory name is preserved exactly. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots; failures continue by default, or use `--fail-fast` to skip remaining chapters.
++VoiceRender keeps its output below `<bundle>/voicerender/<variant>/`. Existing internal layouts may differ by kind, but they are selected from the manifest, not from a command name. The generic RenderPlan renderer preserves request order and identity: one speech item becomes one exact request and one numbered WAV. It does not adaptively split, merge, normalize, or reorder requests. An incomplete run leaves a valid partial manifest.
+
+-## Document-level rendering
++An `ok` preflight approves the exact plan under capability observed at preflight time; VoiceRender remeasures before each synthesis. Capacity drift stops that occurrence without synthesis and returns a fresh plan-matched `replan` report; session-open failure returns `reject`. Pass `--recheck-report PATH` to `voicerender render` to persist either report. VoiceRender never edits speech text or emits a child RenderPlan. Operational render results include a separate execution fingerprint with adapter/API, synthesis, voice/options, and observed-capacity facts; these facts do not affect `RenderPlan.plan_id`.
+
+-UtterPlan writes document RenderPlans to `<workspace>/renderplan/<variant>/document.renderplan.toml`. VoiceRender reads that direct workspace root by default and writes to `<workspace>/voicerender/<variant>/document-0001/`, with the variant report and `.voicerender-cache/` alongside the document directory. The RenderPlan filename follows the source artifact stem (`document`); `document-0001` remains the manifest identity and rendered entity directory. See the full mixed-engine cast workflow and workspace tree in [RenderProfile lifecycle](renderprofile.md#utterplan-document-workspaces).
++The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
+
+ ## Engine integration
+
+@@ -76,8 +48,8 @@ Pinned local and Voicefolio-managed reference sources are supported for PocketSy
+
+ ## Progress, ETA, and estimates
+
+-The `render`, `render-book`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
++The `render`, `bundle render`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
+
+-Python render and preflight APIs accept an optional keyword-only `on_event` callback with typed `RenderEvent` snapshots. Book events aggregate speech occurrences across chapters and preserve chapter and preflight phase context. ETA uses successful synthesis timing evidence only, so it may be unavailable at startup or for engines without samples. `estimate_renderplan()` and `estimate_render_book()` expose selected work and verified output reuse without synthesizing or creating outputs; estimated seconds remain unknown unless a calibrated timing model is available.
++Python render and preflight APIs accept typed progress callbacks. Bundle rendering reports book chapter context when applicable; ETA uses successful synthesis timing evidence only and may be unavailable at startup or for engines without samples. `estimate_renderplan()` and `estimate_render_book()` expose selected work and verified output reuse without synthesizing or creating output directories. Estimated seconds remain unknown unless a calibrated timing model is available.
+
+-Capacity measurements in preflight describe request fit, not synthesis latency. They are never used as a wall-clock prediction. See [Live progress and ETA in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#live-progress-eta-and-workload-estimates) for usage examples.
++Capacity measurements describe request fit, not synthesis latency. They are never used as a wall-clock prediction. See [Live progress and ETA in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#live-progress-eta-and-workload-estimates) for usage examples.
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 5fa0d1b..c0752f1 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -97,96 +97,59 @@ voicerender profile role remove printer-cast.proposed.renderprofile.toml narrato
+
+ The RenderPlan schema is unchanged: plans continue to carry the same profile identity and resolved per-role bindings.
+
+-## UtterPlan book variants
++## UtterPlan bundle projection
+
+-[UtterPlan](https://pypi.org/project/utterplan/) can compile an SSMDBook into one
+-renderer-neutral semantic plan per chapter, then use `render-book` to project
+-selected saved plans for one profile identity:
++[UtterPlan](https://pypi.org/project/utterplan/) can project saved book chapter plans into one RenderPlan variant per RenderProfile. It does not call VoiceRender or preflight during projection. The collection index `renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned workspace metadata, not RenderPlan artifacts.
+
+ ```bash
+-utterplan compile-book "Novel.ssmdbook" --chapters 5-17
+-utterplan render-book "Novel.ssmdbook" --chapters 5-17 \
+-  --profile narration.renderprofile.toml
++utterplan bundle compile Novel.ssmd-bundle --chapters 5-17
++utterplan bundle render Novel.ssmd-bundle --profile narration.renderprofile.toml
+ ```
+
+-The command writes to a profile-specific variant directory such as
+-`Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/`. The directory contains
+-a canonical `renderprofile.toml` snapshot, one ordinary `.renderplan.toml` per
+-successful chapter, an UtterPlan-owned `renderplan-set.toml` collection index, and
+-an invocation-level `render-report.toml`. The set index and report are workspace
+-metadata—not RenderPlan contracts, RenderProfiles, or inputs to VoiceRender.
++The profile fingerprint selects a distinct variant directory containing a canonical `renderprofile.toml` snapshot, one ordinary `.renderplan.toml` per successful chapter, and the ordered set index. Different profile identities can coexist while sharing semantic plans. UtterPlan emits RenderPlans; it does not inspect engine availability, preflight, synthesize, or require VoiceRender to be installed.
+
+-A different canonical profile identity selects a distinct default variant, so
+-multiple voices or policies can coexist while sharing the same `utterplan/`
+-semantic plans. Repeated invocations for the same profile incrementally update the
+-set index. The snapshot preserves the profile used by that collection, but a later
+-`utterplan render-book` invocation still takes a profile path with `--profile`.
+-UtterPlan loads the shared profile and emits RenderPlans; it does not call
+-VoiceRender, inspect engine availability, preflight, synthesize, or require
+-VoiceRender to be installed.
++## Render an SSMD bundle
+
+-## Preflight and render each plan
+-
+-VoiceRender consumes each chapter's ordinary RenderPlan independently. The
+-collection directory does not change the single-plan execution contract; the
+-`renderplan-set.toml` is not passed to these commands:
++VoiceRender detects whether the root contains a book or one document from `manifest.json`. Both kinds use the same command and require the canonical editable `.ssmd-bundle/` root:
+
+ ```bash
+-voicerender preflight \
+-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+-  -o chapter-0005.preflight.toml
+-voicerender render \
+-  "Novel.ssmdbook/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
+-  --preflight chapter-0005.preflight.toml \
+-  --out-dir renders/chapter-0005
++voicerender bundle render Novel.ssmd-bundle \
++  --variant narration--<profile-id-prefix> \
++  --chapters 5-17 --json
+ ```
+
+-Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference.
++Omit `--chapters` to select all chapters. For a speech QC window, select one source chapter and one-based speech numbers. Successful WAVs accumulate in the same chapter manifest:
+
+-Install the selected engine extra and make its model assets available before
+-preflight/render. VoiceRender preflight measures requests but never synthesizes;
+-rendering requires a matching all-`ok` report. See the
+-[UtterPlan SSMDBook workflow](https://pypi.org/project/utterplan/) and the
+-[RenderPlan package contract](https://pypi.org/project/renderplan/) for the
+-producer/consumer boundary.
+-
+-## UtterPlan document workspaces
++```bash
++voicerender bundle render Novel.ssmd-bundle \
++  --variant narration--<profile-id-prefix> --chapters 5 --speech 50-60
++voicerender bundle render Novel.ssmd-bundle \
++  --variant narration--<profile-id-prefix> --chapters 5 --speech 61-70
++voicerender bundle render Novel.ssmd-bundle \
++  --variant narration--<profile-id-prefix> --chapters 5
++```
+
+-UtterPlan projects the canonical document RenderPlan as `renderplan/<variant>/document.renderplan.toml`. VoiceRender's default document roots align with that handoff: it reads from `<workspace>/renderplan` and writes to `<workspace>/voicerender`. The artifact filename (`document.renderplan.toml`) is distinct from the manifest identity and rendered entity directory (`document-0001`).
++A document is one render item and accepts only `--chapters all`:
+
+ ```bash
+-ssmdconvert document convert story.ssmd.md
+-utterplan compile-document story.ssmdoc
+-utterplan render-document story.ssmdoc --profile printer-cast.renderprofile.toml
+-voicerender render-document story.ssmdoc \
++voicerender bundle render story.ssmd-bundle \
+   --variant printer-cast--<profile-fingerprint>
+ ```
+
+-The resulting workspace is organized by planning, render variant, and rendered entity:
+-
+-```text
+-story.ssmdoc/
+-├── manifest.json
+-├── document.ssmd.md
+-├── utterplan/
+-│   ├── document.utterplan.toml
+-│   └── compile-report.toml
+-├── renderplan/
+-│   └── printer-cast--<profile-fingerprint>/
+-│       ├── renderprofile.toml
+-│       ├── document.renderplan.toml
+-│       └── render-report.toml
+-└── voicerender/
+-    └── printer-cast--<profile-fingerprint>/
+-        ├── voicerender-report.toml
+-        ├── .voicerender-cache/
+-        └── document-0001/
+-            ├── preflight.toml
+-            ├── render-manifest.toml
+-            └── *.wav
++VoiceRender writes below `<bundle>/voicerender/<variant>/`, preserving the existing kind-specific output layout. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots. Failures continue by default for books; `--fail-fast` skips remaining chapters. `--reset-stale` replaces stale owned output while preserving verified cache reuse. `--force` synthesizes every selected request and bypasses cache.
++
++VoiceRender consumes each RenderPlan independently as well. The bundle collection directory does not change the single-plan execution contract; the set index is not passed to generic preflight or render:
++
++```bash
++voicerender preflight \
++  "Novel.ssmd-bundle/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
++  -o chapter-0005.preflight.toml
++voicerender render \
++  "Novel.ssmd-bundle/renderplan/narration--<profile-id-prefix>/chapter-0005.renderplan.toml" \
++  --preflight chapter-0005.preflight.toml --out-dir renders/chapter-0005
+ ```
+
+-`--renderplan-root`, `--output-root`, and `--cache-dir` remain explicit overrides. Document estimation resolves the same input layout but does not create output directories.
++Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference. Install the selected engine extra and make its model assets available before preflight/render. See [UtterPlan](https://pypi.org/project/utterplan/) and the [RenderPlan package contract](https://pypi.org/project/renderplan/) for the producer/consumer boundary.
+
+ ## Reference-voice sources
+
+diff --git a/tests/test_bundle_contract.py b/tests/test_bundle_contract.py
+new file mode 100644
+index 0000000..c46c25e
+--- /dev/null
++++ b/tests/test_bundle_contract.py
+@@ -0,0 +1,150 @@
++"""Tests for safe, manifest-driven SSMD bundle identity resolution."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from voicerender.bundle_contract import (
++    MAX_MANIFEST_BYTES,
++    BundleContractError,
++    BundleIdentity,
++    load_bundle_identity,
++)
++
++
++def _bundle(
++    root: Path,
++    *,
++    bundle_format: str = "ssmdconvert.book",
++    schema_version: object = 1,
++) -> Path:
++    root.mkdir(parents=True)
++    (root / "manifest.json").write_text(
++        json.dumps({"format": bundle_format, "schema_version": schema_version}),
++        encoding="utf-8",
++    )
++    return root
++
++
++@pytest.mark.parametrize(
++    ("bundle_format", "kind"),
++    [
++        ("ssmdconvert.book", "book"),
++        ("ssmdconvert.document", "document"),
++    ],
++)
++def test_loads_supported_bundle_identity(
++    tmp_path: Path, bundle_format: str, kind: str
++) -> None:
++    root = _bundle(tmp_path / "sample.ssmd-bundle", bundle_format=bundle_format)
++
++    identity = load_bundle_identity(root)
++
++    assert identity == BundleIdentity(
++        root=root.resolve(),
++        manifest_path=(root / "manifest.json").resolve(),
++        kind=kind,  # type: ignore[arg-type]
++    )
++
++
++@pytest.mark.parametrize("name", ["workspace", "book.ssmd-bundle/chapters"])
++def test_rejects_noncanonical_root_shape(tmp_path: Path, name: str) -> None:
++    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
++        load_bundle_identity(tmp_path / name)
++
++
++def test_rejects_document_file_and_zip_shortcuts(tmp_path: Path) -> None:
++    root = tmp_path / "sample.ssmd-bundle"
++    root.mkdir()
++    document = root / "document.ssmd.md"
++    document.write_text("Hello.", encoding="utf-8")
++
++    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
++        load_bundle_identity(document)
++    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
++        load_bundle_identity(tmp_path / "sample.ssmd-bundle.zip")
++
++
++def test_rejects_symlink_root(tmp_path: Path) -> None:
++    target = _bundle(tmp_path / "target.ssmd-bundle")
++    link = tmp_path / "link.ssmd-bundle"
++    try:
++        link.symlink_to(target, target_is_directory=True)
++    except (NotImplementedError, OSError) as exc:
++        pytest.skip(f"directory symlinks are unavailable: {exc}")
++
++    with pytest.raises(BundleContractError, match="root must not be a symlink"):
++        load_bundle_identity(link)
++
++
++def test_rejects_non_directory_canonical_path(tmp_path: Path) -> None:
++    path = tmp_path / "sample.ssmd-bundle"
++    path.write_text("not a directory", encoding="utf-8")
++
++    with pytest.raises(BundleContractError, match="not a directory"):
++        load_bundle_identity(path)
++
++
++@pytest.mark.parametrize(
++    ("bundle_format", "schema_version", "message"),
++    [
++        ("unknown.format", 1, "unsupported SSMD bundle format"),
++        ("ssmdconvert.book", 2, "schema_version 2"),
++        ("ssmdconvert.document", True, "schema_version True"),
++    ],
++)
++def test_rejects_unsupported_manifest_identity(
++    tmp_path: Path, bundle_format: str, schema_version: object, message: str
++) -> None:
++    root = _bundle(
++        tmp_path / "sample.ssmd-bundle",
++        bundle_format=bundle_format,
++        schema_version=schema_version,
++    )
++
++    with pytest.raises(BundleContractError, match=message) as caught:
++        load_bundle_identity(root)
++    assert caught.value.code == "bundle.unsupported"
++
++
++def test_rejects_non_object_and_malformed_manifest(tmp_path: Path) -> None:
++    root = tmp_path / "sample.ssmd-bundle"
++    root.mkdir()
++    manifest = root / "manifest.json"
++    manifest.write_text("[]", encoding="utf-8")
++    with pytest.raises(BundleContractError, match="must be a JSON object"):
++        load_bundle_identity(root)
++
++    manifest.write_text("{", encoding="utf-8")
++    with pytest.raises(BundleContractError, match="cannot read SSMD bundle manifest"):
++        load_bundle_identity(root)
++
++
++def test_rejects_oversized_and_symlink_manifest(tmp_path: Path) -> None:
++    root = tmp_path / "sample.ssmd-bundle"
++    root.mkdir()
++    manifest = root / "manifest.json"
++    manifest.write_bytes(b" " * (MAX_MANIFEST_BYTES + 1))
++    with pytest.raises(BundleContractError, match="size limit"):
++        load_bundle_identity(root)
++
++    outside = tmp_path / "manifest.json"
++    outside.write_text('{"format":"ssmdconvert.book","schema_version":1}')
++    manifest.unlink()
++    try:
++        manifest.symlink_to(outside)
++    except (NotImplementedError, OSError) as exc:
++        pytest.skip(f"file symlinks are unavailable: {exc}")
++    with pytest.raises(BundleContractError, match="must not be a symlink"):
++        load_bundle_identity(root)
++
++
++def test_rejects_missing_manifest(tmp_path: Path) -> None:
++    root = tmp_path / "sample.ssmd-bundle"
++    root.mkdir()
++
++    with pytest.raises(BundleContractError, match="missing or unreadable"):
++        load_bundle_identity(root)
+diff --git a/tests/test_bundle_render.py b/tests/test_bundle_render.py
+new file mode 100644
+index 0000000..bf06220
+--- /dev/null
++++ b/tests/test_bundle_render.py
+@@ -0,0 +1,268 @@
++"""Tests for the unified bundle rendering facade."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from types import SimpleNamespace
++from typing import Any
++
++import pytest
++
++import voicerender.bundle as bundle_module
++
++
++def _bundle(root: Path, bundle_format: str) -> Path:
++    root.mkdir(parents=True)
++    (root / "manifest.json").write_text(
++        json.dumps({"format": bundle_format, "schema_version": 1}), encoding="utf-8"
++    )
++    return root
++
++
++def _result(exit_code: int = 0) -> SimpleNamespace:
++    return SimpleNamespace(
++        exit_code=exit_code,
++        to_dict=lambda: {"status": "complete", "exit_code": exit_code},
++    )
++
++
++def test_render_bundle_dispatches_book_options_and_wraps_result(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    root = _bundle(tmp_path / "book.ssmd-bundle", "ssmdconvert.book")
++    calls: dict[str, Any] = {}
++    rendered = _result(exit_code=1)
++    progress = lambda _event: None
++
++    def fake_render_book(path: Path, **kwargs: Any) -> SimpleNamespace:
++        calls["path"] = path
++        calls["kwargs"] = kwargs
++        return rendered
++
++    monkeypatch.setattr(bundle_module, "render_book", fake_render_book)
++    monkeypatch.setattr(
++        bundle_module,
++        "render_document",
++        lambda *_args, **_kwargs: pytest.fail("book bundle dispatched as document"),
++    )
++
++    result = bundle_module.render_bundle(
++        root,
++        variant="narration--abc",
++        chapters="2-4",
++        speech="1,3",
++        renderplan_root="renderplans",
++        output_root="outputs",
++        cache_dir="cache",
++        force=True,
++        reset_stale=True,
++        emphasis_policy="defer-to-compose",
++        fail_fast=True,
++        on_progress=progress,
++    )
++
++    assert result.kind == "book"
++    assert result.value is rendered
++    assert result.exit_code == 1
++    assert result.to_dict() == {
++        "format": "voicerender-bundle-result",
++        "version": 1,
++        "kind": "book",
++        "result": {"status": "complete", "exit_code": 1},
++    }
++    assert calls == {
++        "path": root.resolve(),
++        "kwargs": {
++            "variant": "narration--abc",
++            "chapters": "2-4",
++            "speech": "1,3",
++            "renderplan_root": "renderplans",
++            "output_root": "outputs",
++            "cache_dir": "cache",
++            "force": True,
++            "reset_stale_output": True,
++            "fail_fast": True,
++            "emphasis_policy": bundle_module.EmphasisPolicy.DEFER_TO_COMPOSE,
++            "on_event": progress,
++        },
++    }
++
++
++def test_render_bundle_dispatches_document_and_ignores_fail_fast(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    root = _bundle(tmp_path / "document.ssmd-bundle", "ssmdconvert.document")
++    calls: dict[str, Any] = {}
++    rendered = _result()
++    progress = lambda _event: None
++
++    def fake_render_document(path: Path, **kwargs: Any) -> SimpleNamespace:
++        calls["path"] = path
++        calls["kwargs"] = kwargs
++        return rendered
++
++    monkeypatch.setattr(
++        bundle_module,
++        "render_book",
++        lambda *_args, **_kwargs: pytest.fail("document bundle dispatched as book"),
++    )
++    monkeypatch.setattr(bundle_module, "render_document", fake_render_document)
++
++    result = bundle_module.render_bundle(
++        root,
++        variant="narration--abc",
++        chapters=" ALL ",
++        speech="3-5",
++        reset_stale=True,
++        fail_fast=True,
++        on_progress=progress,
++    )
++
++    assert result.kind == "document"
++    assert result.value is rendered
++    assert calls == {
++        "path": root.resolve(),
++        "kwargs": {
++            "variant": "narration--abc",
++            "speech": "3-5",
++            "renderplan_root": None,
++            "output_root": None,
++            "cache_dir": None,
++            "force": False,
++            "reset_stale_output": True,
++            "emphasis_policy": bundle_module.EmphasisPolicy.REJECT,
++            "on_event": progress,
++        },
++    }
++
++
++def test_document_bundle_rejects_chapter_selection(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    root = _bundle(tmp_path / "document.ssmd-bundle", "ssmdconvert.document")
++    monkeypatch.setattr(
++        bundle_module,
++        "render_document",
++        lambda *_args, **_kwargs: pytest.fail("invalid selection reached renderer"),
++    )
++
++    with pytest.raises(ValueError, match="--chapters must be 'all'"):
++        bundle_module.render_bundle(root, variant="narration--abc", chapters="1")
++
++
++def test_bundle_render_parser_and_removed_commands(
++    capsys: pytest.CaptureFixture[str],
++) -> None:
++    from voicerender.cli import build_parser
++
++    parser = build_parser()
++    args = parser.parse_args(
++        ["bundle", "render", "sample.ssmd-bundle", "--variant", "v"]
++    )
++    assert args.command == "bundle"
++    assert args.bundle_command == "render"
++    assert args.chapters == args.speech == "all"
++    for removed in ("render" + "-book", "render" + "-document"):
++        with pytest.raises(SystemExit):
++            parser.parse_args([removed, "sample.ssmd-bundle", "--variant", "v"])
++    with pytest.raises(SystemExit) as help_result:
++        parser.parse_args(["bundle", "render", "--help"])
++    assert help_result.value.code == 0
++    help_output = capsys.readouterr().out
++    assert "--variant" in help_output
++    assert "--chapters" in help_output
++
++
++def test_bundle_cli_emits_neutral_json(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    from voicerender import cli
++
++    result = SimpleNamespace(
++        exit_code=0,
++        to_dict=lambda: {
++            "format": "voicerender-bundle-result",
++            "version": 1,
++            "kind": "book",
++            "result": {"selected": 2},
++        },
++    )
++    calls: dict[str, Any] = {}
++
++    def fake_render_bundle(bundle: Path, **kwargs: Any) -> SimpleNamespace:
++        calls["bundle"] = bundle
++        calls["kwargs"] = kwargs
++        return result
++
++    monkeypatch.setattr(cli, "render_bundle", fake_render_bundle)
++    exit_code = cli.main(
++        [
++            "bundle",
++            "render",
++            "sample.ssmd-bundle",
++            "--variant",
++            "narration--abc",
++            "--chapters",
++            "2-3",
++            "--fail-fast",
++            "--json",
++            "--no-progress",
++        ]
++    )
++
++    assert exit_code == 0
++    assert calls["bundle"] == Path("sample.ssmd-bundle")
++    assert calls["kwargs"]["chapters"] == "2-3"
++    assert calls["kwargs"]["fail_fast"] is True
++    payload = json.loads(capsys.readouterr().out)
++    assert payload == result.to_dict()
++
++
++def test_bundle_cli_prints_neutral_human_summary(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    from voicerender import cli
++
++    request = SimpleNamespace(
++        workspace=Path("story.ssmd-bundle"),
++        variant_name="narration--abc",
++        output_dir=Path("voice/narration--abc/document-0001"),
++        speech_selector="all",
++        report_path=Path("voice/report.toml"),
++        preflight_report=None,
++        error_code=None,
++        pending_composition=False,
++    )
++    value = SimpleNamespace(
++        request=request,
++        status="complete",
++        report_path=Path("voice/report.toml"),
++        rendered=1,
++        reused=0,
++        error_code=None,
++        error_message=None,
++        preflight_report=None,
++        pending_composition=False,
++    )
++    result = SimpleNamespace(kind="document", value=value, exit_code=0)
++    monkeypatch.setattr(cli, "render_bundle", lambda *_args, **_kwargs: result)
++
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "render",
++                "story.ssmd-bundle",
++                "--variant",
++                "narration--abc",
++                "--no-progress",
++            ]
++        )
++        == 0
++    )
++    output = capsys.readouterr().out
++    assert "VoiceRender bundle render" in output
++    assert "kind:      document" in output
++    assert "workspace: story.ssmd-bundle" in output
++    assert "selected:  1" in output
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index da1b2f2..af88f8b 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -7,7 +7,7 @@ from pathlib import Path
+ import pytest
+
+
+-def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() -> None:
++def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None:
+     root = Path(__file__).resolve().parents[1]
+     root_help = subprocess.run(
+         [sys.executable, "-m", "voicerender", "--help"],
+@@ -23,8 +23,8 @@ def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() ->
+         capture_output=True,
+         text=True,
+     ).stdout.casefold()
+-    book_help = subprocess.run(
+-        [sys.executable, "-m", "voicerender", "render-book", "--help"],
++    bundle_help = subprocess.run(
++        [sys.executable, "-m", "voicerender", "bundle", "render", "--help"],
+         cwd=root,
+         check=True,
+         capture_output=True,
+@@ -33,17 +33,17 @@ def test_primary_help_is_renderplan_centered_and_has_no_legacy_render_flags() ->
+
+     assert "preflight" in root_help
+     assert "renderplan" in root_help
+-    assert "render-book" in root_help
++    assert "bundle" in root_help
+     assert "utterplan" not in root_help
+     assert "--preflight" in render_help
+     assert "--out-dir" in render_help
+     assert "--voice" not in render_help
+     assert "--take" not in render_help
+     assert "--profile" not in render_help
+-    assert "--variant" in book_help
+-    assert "--chapters" in book_help
+-    assert "--speech" in book_help
+-    assert "utterplan" not in book_help
++    assert "--variant" in bundle_help
++    assert "--chapters" in bundle_help
++    assert "--speech" in bundle_help
++    assert "utterplan" not in bundle_help
+
+
+ def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
+@@ -64,8 +64,8 @@ import voicerender.book
+ import voicerender.cli
+ assert callable(voicerender.preflight_render_plan)
+ assert callable(voicerender.render_renderplan)
+-args = voicerender.cli.build_parser().parse_args(['render-book', 'book', '--variant', 'variant'])
+-assert args.command == 'render-book'
++args = voicerender.cli.build_parser().parse_args(['bundle', 'render', 'book.ssmd-bundle', '--variant', 'variant'])
++assert args.command == 'bundle' and args.bundle_command == 'render'
+ assert not any(name.split('.', 1)[0].casefold() == 'utterplan' for name in sys.modules)
+ assert not any(name.startswith('voicerender.inputs.utterplan') for name in sys.modules)
+ """
+@@ -135,7 +135,7 @@ def test_cli_emphasis_policy_defaults_to_reject_and_can_defer() -> None:
+             "--out-dir",
+             "rendered",
+         ],
+-        ["render-book", "book", "--variant", "narration"],
++        ["bundle", "render", "book.ssmd-bundle", "--variant", "narration"],
+     )
+     for command in commands:
+         assert parser.parse_args(command).emphasis_policy == "reject"
+@@ -865,7 +865,7 @@ def test_preflight_cli_json_auto_and_disabled_progress_are_silent(
+     assert callbacks == [False, False]
+
+
+-@pytest.mark.parametrize("command", ["render", "render-book"])
++@pytest.mark.parametrize("command", ["render", "bundle"])
+ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+     command: str,
+     monkeypatch: pytest.MonkeyPatch,
+@@ -926,14 +926,15 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+         ]
+     else:
+
+-        def fake_render_book(*_args, on_event, **_kwargs):
+-            event_callback(on_event, "book")
++        def fake_render_bundle(*_args, on_progress, **_kwargs):
++            event_callback(on_progress, "book")
+             return SimpleNamespace(to_dict=lambda: {"items": []}, exit_code=0)
+
+-        monkeypatch.setattr(cli, "render_book", fake_render_book)
++        monkeypatch.setattr(cli, "render_bundle", fake_render_bundle)
+         args = [
+-            "render-book",
+-            str(tmp_path / "book"),
++            "bundle",
++            "render",
++            str(tmp_path / "book.ssmd-bundle"),
+             "--variant",
+             "narration",
+             "--json",
+@@ -944,4 +945,4 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+     stdout = capsys.readouterr().out
+     assert isinstance(__import__("json").loads(stdout), dict)
+     assert "progress 50.0%" in stderr.getvalue()
+-    assert "\r" not in stderr.getvalue() and "\x1b" not in stderr.getvalue()
++    assert "\\r" not in stderr.getvalue() and "\\x1b" not in stderr.getvalue()
+diff --git a/tests/test_control_surface_exports.py b/tests/test_control_surface_exports.py
+index 9831b9d..2e23b57 100644
+--- a/tests/test_control_surface_exports.py
++++ b/tests/test_control_surface_exports.py
+@@ -25,6 +25,8 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
+         "VoiceCloneRequest",
+         "VoiceDescriptor",
+         "VoiceKind",
++        "BundleContractError",
++        "BundleRenderResult",
+         "clone_voice_profile",
+         "create_voice_source",
+         "engine_options",
+@@ -51,6 +53,10 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
+     assert expected.issubset(set(voicerender.__all__))
+     assert all(hasattr(voicerender, name) for name in expected)
+
++    assert callable(voicerender.render_bundle)
++    assert not hasattr(voicerender, "render" + "_book")
++    assert not hasattr(voicerender, "render" + "_document")
++
+
+ def test_progress_types_and_event_dispatch_are_public_and_typed() -> None:
+     assert hasattr(voicerender, "RenderProgress")
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index 16b0f6c..218985e 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -29,16 +29,19 @@ def _workspace(root: Path) -> Path:
+     return root
+
+
+-def test_load_ssmdoc_workspace_root_and_canonical_document(tmp_path: Path) -> None:
+-    root = _workspace(tmp_path / "story.ssmdoc")
++def test_load_document_bundle_root_and_rejects_file_shortcut(
++    tmp_path: Path,
++) -> None:
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     index = load_document_workspace(root)
+     assert index.root == root.resolve()
+     assert index.document_id == "document-0001"
+-    assert load_document_workspace(index.document_path) == index
++    with pytest.raises(DocumentWorkspaceError, match="canonical .ssmd-bundle"):
++        load_document_workspace(index.document_path)
+
+
+ def test_rejects_wrong_format_and_traversal(tmp_path: Path) -> None:
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     manifest = json.loads((root / "manifest.json").read_text())
+     manifest["document"]["path"] = "../outside.md"
+     (root / "manifest.json").write_text(json.dumps(manifest))
+@@ -48,13 +51,13 @@ def test_rejects_wrong_format_and_traversal(tmp_path: Path) -> None:
+
+ def test_rejects_zip_input(tmp_path: Path) -> None:
+     with pytest.raises(DocumentWorkspaceError):
+-        load_document_workspace(tmp_path / "story.ssmdoc.zip")
++        load_document_workspace(tmp_path / "story.ssmd-bundle.zip")
+
+
+ def test_document_estimate_resolves_exact_variant_without_creating_outputs(
+     tmp_path: Path,
+ ) -> None:
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+     profile_obj = codec.load_profile(profile)
+     fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
+@@ -93,7 +96,7 @@ def test_document_estimate_resolves_exact_variant_without_creating_outputs(
+ def test_document_request_preserves_explicit_root_overrides(tmp_path: Path) -> None:
+     from voicerender.document import _resolve_document_request
+
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+     profile_obj = codec.load_profile(profile)
+     fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
+@@ -132,20 +135,22 @@ def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> N
+     from voicerender import DocumentRenderError
+     from voicerender.document import _resolve_document_request
+
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     with pytest.raises(DocumentRenderError) as caught:
+         _resolve_document_request(root, variant="not-created--000000000000")
+     assert caught.value.code == "variant.not_found"
+
+
+ def test_document_render_uses_preflight_and_existing_renderplan_executor(
+-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    capsys: pytest.CaptureFixture[str],
+ ) -> None:
+     from types import SimpleNamespace
+
+     import voicerender.document as document_module
+
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     profile_path = (
+         Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+     )
+@@ -201,6 +206,27 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
+     assert calls[0]["force"] is True
+     assert calls[0]["reset_stale_output"] is True
+
++    from voicerender.cli import main
++
++    exit_code = main(
++        [
++            "bundle",
++            "render",
++            str(root),
++            "--variant",
++            variant,
++            "--speech",
++            "1",
++            "--json",
++            "--no-progress",
++        ]
++    )
++    payload = json.loads(capsys.readouterr().out)
++    assert exit_code == 0
++    assert payload["format"] == "voicerender-bundle-result"
++    assert payload["kind"] == "document"
++    assert payload["result"]["status"] == "partial"
++
+
+ def test_document_preflight_reject_stops_before_render(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@@ -209,7 +235,7 @@ def test_document_preflight_reject_stops_before_render(
+
+     import voicerender.document as document_module
+
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     profile_path = (
+         Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+     )
+@@ -249,7 +275,7 @@ def test_document_render_reports_reused_complete_manifest(
+
+     import voicerender.document as document_module
+
+-    root = _workspace(tmp_path / "story.ssmdoc")
++    root = _workspace(tmp_path / "story.ssmd-bundle")
+     profile_path = (
+         Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+     )
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index 95cea4d..e02ecb7 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -41,8 +41,8 @@ from voicerender import (
+     BookRenderRequest,
+     BookRenderResult,
+     ChapterRenderOutcome,
+-    render_book,
+ )
++from voicerender.book import render_book
+ from voicerender.book_contract import load_renderplan_set
+ from voicerender.errors import ArtifactError
+ from voicerender.events import (
+@@ -100,7 +100,12 @@ def _book(
+     chapters: tuple[tuple[int, int], ...] = ((7, 2), (5, 3), (8, 1)),
+     emphasis_speech: int | None = None,
+ ) -> tuple[Path, str]:
+-    workspace = tmp_path / "sample.ssmdbook"
++    workspace = tmp_path / "sample.ssmd-bundle"
++    workspace.mkdir(parents=True)
++    (workspace / "manifest.json").write_text(
++        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}),
++        encoding="utf-8",
++    )
+     variant_name = "narration--"
+     profile = _profile()
+     profile_id = profile.profile_id or profile.computed_id()
+@@ -483,9 +488,10 @@ def test_book_reports_pending_composition_in_result_and_human_output(
+     assert report["pending_composition"] is True
+     assert report["item"][0]["pending_composition"] is True
+
+-    from voicerender.cli import _print_book_result
++    from voicerender.bundle import BundleRenderResult
++    from voicerender.cli import _print_bundle_result
+
+-    _print_book_result(result)
++    _print_bundle_result(BundleRenderResult(kind="book", value=result))
+     assert "emphasis remains pending composition" in capsys.readouterr().out
+
+
+@@ -525,7 +531,7 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
+         assert outcome.manifest is not None and outcome.manifest.is_file()
+         assert (outcome.output_dir / "000001.wav").is_file()
+     report = tomllib.loads(first.report_path.read_text(encoding="utf-8"))
+-    assert report["format"] == "voicerender-book-report"
++    assert report["format"] == "voicerender-bundle-book-report"
+     assert report["variant"] == variant
+     assert report["requested"] == report["succeeded"] == 3
+     assert report["full_chapters"] == 3
+@@ -680,9 +686,10 @@ def test_book_preserves_initial_preflight_report_handoff(
+     assert report["item"][0]["replan_required"] is replan_required
+     assert report["item"][0]["preflight_report"] == "chapter-0005/preflight.toml"
+
+-    from voicerender.cli import _print_book_result
++    from voicerender.bundle import BundleRenderResult
++    from voicerender.cli import _print_bundle_result
+
+-    _print_book_result(result)
++    _print_bundle_result(BundleRenderResult(kind="book", value=result))
+     label = "replan report" if replan_required else "preflight report"
+     assert f"{label}: {outcome.preflight_report}" in capsys.readouterr().out
+
+@@ -918,7 +925,8 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
+
+     partial_code = main(
+         [
+-            "render-book",
++            "bundle",
++            "render",
+             str(workspace),
+             "--variant",
+             variant,
+@@ -936,16 +944,20 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
+         ]
+     )
+     partial_payload = json.loads(capsys.readouterr().out)
++    partial_result = partial_payload["result"]
++    assert partial_payload["format"] == "voicerender-bundle-result"
++    assert partial_payload["kind"] == "book"
+     assert partial_code == 0
+-    assert partial_payload["partial_chapters"] == 1
+-    assert partial_payload["items"][0]["status"] == "partial"
+-    assert partial_payload["items"][0]["manifest_complete"] is False
++    assert partial_result["partial_chapters"] == 1
++    assert partial_result["items"][0]["status"] == "partial"
++    assert partial_result["items"][0]["manifest_complete"] is False
+     assert (output_root / variant / "chapter-0005" / "000001.wav").is_file()
+     assert cache_dir.is_dir()
+
+     full_code = main(
+         [
+-            "render-book",
++            "bundle",
++            "render",
+             str(workspace),
+             "--variant",
+             variant,
+@@ -961,13 +973,14 @@ def test_render_book_cli_json_qc_then_human_completion_and_json_error(
+     assert full_code == 0
+     assert "chapter state: complete" in human_output
+     assert "VoiceRender summary" in human_output
+-    assert "variant:     " + variant in human_output
++    assert "variant:   " + variant in human_output
+     assert len(calls["preflight"]) == 1
+     assert len(calls["render"]) == 2
+
+     error_code = main(
+         [
+-            "render-book",
++            "bundle",
++            "render",
+             str(workspace),
+             "--variant",
+             variant,
+@@ -998,13 +1011,15 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
+     assert api_variant == cli_variant
+
+     import voicerender.cli as cli_module
++    from voicerender import render_bundle
+     from voicerender.cli import main
+
+-    assert cli_module.render_book is render_book
++    assert cli_module.render_bundle is render_bundle
+
+     def run_cli(*, force: bool) -> tuple[int, dict[str, Any]]:
+         args = [
+-            "render-book",
++            "bundle",
++            "render",
+             str(cli_workspace),
+             "--variant",
+             cli_variant,
+@@ -1024,6 +1039,9 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
+     def assert_parity(
+         api_result: book_module.BookRenderResult, payload: dict[str, Any]
+     ) -> None:
++        assert payload["format"] == "voicerender-bundle-result"
++        assert payload["kind"] == "book"
++        payload = payload["result"]
+         assert payload["variant"] == api_result.variant == api_variant
+         assert payload["pending_composition"] is api_result.pending_composition is True
+         assert payload["emphasis_policy"] == "defer-to-compose"
+@@ -1063,14 +1081,14 @@ def test_public_api_and_render_book_cli_have_behavioral_parity(
+         (False, "reused", 0, 2),
+         (True, "partial", 2, 0),
+     ):
+-        api_result = render_book(
++        api_result = render_bundle(
+             api_workspace,
+             variant=api_variant,
+             chapters="5",
+             speech="2-3",
+             force=force,
+             emphasis_policy="defer-to-compose",
+-        )
++        ).value
+         cli_code, cli_payload = run_cli(force=force)
+         assert cli_code == api_result.exit_code == 0
+         assert api_result.outcomes[0].status == expected_status
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 705656e..4b3517b 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -1143,7 +1143,12 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
+         plan_id=None,
+     ).with_identity()
+
+-    workspace = tmp_path / "integration-book"
++    workspace = tmp_path / "integration-book.ssmd-bundle"
++    workspace.mkdir()
++    (workspace / "manifest.json").write_text(
++        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}),
++        encoding="utf-8",
++    )
+     fingerprint = profile_id.removeprefix("sha256:")[:12]
+     variant = f"narration--{fingerprint}"
+     variant_dir = workspace / "renderplan" / variant
+@@ -1180,7 +1185,8 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
+
+     def invoke(*selection: str) -> dict[str, Any]:
+         args = [
+-            "render-book",
++            "bundle",
++            "render",
+             str(workspace),
+             "--variant",
+             variant,
+@@ -1192,7 +1198,10 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
+             "--json",
+         ]
+         assert main(args) == 0
+-        return json.loads(capsys.readouterr().out)
++        payload = json.loads(capsys.readouterr().out)
++        assert payload["format"] == "voicerender-bundle-result"
++        assert payload["kind"] == "book"
++        return payload["result"]
+
+     first = invoke("--chapters", "1", "--speech", "1")
+     assert first["items"][0]["status"] == "partial"
+@@ -1257,7 +1266,12 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
+         plan_id=None,
+     ).with_identity()
+
+-    workspace = tmp_path / "replan-book"
++    workspace = tmp_path / "replan-book.ssmd-bundle"
++    workspace.mkdir()
++    (workspace / "manifest.json").write_text(
++        json.dumps({"format": "ssmdconvert.book", "schema_version": 1}),
++        encoding="utf-8",
++    )
+     fingerprint = profile_id.removeprefix("sha256:")[:12]
+     variant = f"narration--{fingerprint}"
+     variant_dir = workspace / "renderplan" / variant
+@@ -1368,7 +1382,8 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
+
+     exit_code = main(
+         [
+-            "render-book",
++            "bundle",
++            "render",
+             str(workspace),
+             "--variant",
+             variant,
+@@ -1381,6 +1396,9 @@ def test_render_book_replans_then_activates_child_with_cache_reuse(
+         ]
+     )
+     payload = json.loads(capsys.readouterr().out)
++    assert payload["format"] == "voicerender-bundle-result"
++    assert payload["kind"] == "book"
++    payload = payload["result"]
+     item = payload["items"][0]
+     assert exit_code == 0
+     assert item["status"] == "complete"
+diff --git a/tests/wheel_smoke.py b/tests/wheel_smoke.py
+index 48ede20..f8f41b2 100644
+--- a/tests/wheel_smoke.py
++++ b/tests/wheel_smoke.py
+@@ -18,7 +18,7 @@ from voicerender import (
+     BookRenderRequest,
+     BookRenderResult,
+     ChapterRenderOutcome,
+-    render_book,
++    render_bundle,
+ )
+ from voicerender.engines.api_probe import EngineApiProbe
+ from voicerender.engines.base import (
+@@ -206,6 +206,7 @@ def main() -> None:
+     work = Path.cwd() / "voicerender-wheel-smoke"
+     shutil.rmtree(work, ignore_errors=True)
+
++    work.mkdir(parents=True)
+     assert BookRenderError.__module__ == "voicerender.book_contract"
+     assert (
+         BookRenderRequest.__module__
+@@ -213,14 +214,18 @@ def main() -> None:
+         == ChapterRenderOutcome.__module__
+         == "voicerender.book"
+     )
+-    book_workspace = work / "book-workspace"
+-    (book_workspace / "renderplan").mkdir(parents=True)
++    book_workspace = work / "book.ssmd-bundle"
++    book_workspace.mkdir()
++    (book_workspace / "manifest.json").write_text(
++        '{"format":"ssmdconvert.book","schema_version":1}', encoding="utf-8"
++    )
++    (book_workspace / "renderplan").mkdir()
+     try:
+-        render_book(book_workspace, variant="missing")
++        render_bundle(book_workspace, variant="missing")
+     except BookRenderError as exc:
+         assert exc.code == "variant.not_found"
+     else:
+-        raise AssertionError("render_book accepted a missing variant")
++        raise AssertionError("render_bundle accepted a missing variant")
+     report = preflight_render_plan(plan, work / "preflight.toml")
+     assert report.status == "ok"
+     result = render_renderplan(
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index bc6f611..825e879 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -16,9 +16,10 @@ from .book import (
+     BookRenderRequest,
+     BookRenderResult,
+     ChapterRenderOutcome,
+-    render_book,
+ )
+-from .document import DocumentRenderRequest, DocumentRenderResult, render_document
++from .bundle import BundleRenderResult, render_bundle
++from .bundle_contract import BundleContractError
++from .document import DocumentRenderRequest, DocumentRenderResult
+ from .engines.api_probe import EngineApiProbe
+ from .engines.assets import (
+     EngineAssetManager,
+@@ -152,6 +153,8 @@ __all__ = [
+     "BookRenderError",
+     "BookRenderRequest",
+     "BookRenderResult",
++    "BundleContractError",
++    "BundleRenderResult",
+     "CatalogRequest",
+     "CatalogResult",
+     "ChapterRenderOutcome",
+@@ -253,8 +256,7 @@ __all__ = [
+     "remove_model",
+     "remove_profile_role",
+     "render",
+-    "render_book",
+-    "render_document",
++    "render_bundle",
+     "render_plan",
+     "render_renderplan",
+     "resolve_prepared_voice",
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 8276ae0..ea9f6bb 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -1282,7 +1282,7 @@ def _relative_posix(path: Path, base: Path) -> str:
+ def _write_book_report(result: BookRenderResult) -> None:
+     request = result.request
+     payload: dict[str, Any] = {
+-        "format": "voicerender-book-report",
++        "format": "voicerender-bundle-book-report",
+         "version": 1,
+         "variant": request.variant_name,
+         "emphasis_policy": request.emphasis_policy.value,
+diff --git a/voicerender/book_contract.py b/voicerender/book_contract.py
+index 6bc3781..552d1c9 100644
+--- a/voicerender/book_contract.py
++++ b/voicerender/book_contract.py
+@@ -20,7 +20,7 @@ from .errors import VoiceRenderError
+
+
+ class BookRenderError(VoiceRenderError, ValueError):
+-    """A book workspace, variant, index, profile, or selector is invalid."""
++    """A book bundle, variant, index, profile, or selector is invalid."""
+
+     def __init__(self, message: str, *, code: str = "workspace.invalid") -> None:
+         super().__init__(message)
+diff --git a/voicerender/book_layout.py b/voicerender/book_layout.py
+index afc345c..7bc9a10 100644
+--- a/voicerender/book_layout.py
++++ b/voicerender/book_layout.py
+@@ -10,14 +10,18 @@ from .book_contract import BookRenderError
+
+ def resolve_workspace(workspace: str | Path) -> Path:
+     path = Path(workspace).expanduser()
++    if not path.name.endswith(".ssmd-bundle"):
++        raise BookRenderError(
++            "book bundle input must be the canonical .ssmd-bundle directory root"
++        )
++    if path.is_symlink():
++        raise BookRenderError("book bundle root must not be a symlink")
+     try:
+         resolved = path.resolve(strict=True)
+     except (OSError, RuntimeError) as exc:
+-        raise BookRenderError(f"cannot resolve book workspace {path}: {exc}") from exc
++        raise BookRenderError(f"cannot resolve book bundle {path}: {exc}") from exc
+     if not resolved.is_dir():
+-        raise BookRenderError(f"book workspace is not a directory: {resolved}")
+-    if resolved.name == "chapters":
+-        resolved = resolved.parent
++        raise BookRenderError(f"book bundle is not a directory: {resolved}")
+     return resolved
+
+
+diff --git a/voicerender/bundle.py b/voicerender/bundle.py
+new file mode 100644
+index 0000000..c3b441b
+--- /dev/null
++++ b/voicerender/bundle.py
+@@ -0,0 +1,87 @@
++"""Unified public rendering facade for SSMD bundles."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Literal
++
++from .book import BookRenderResult, render_book
++from .bundle_contract import BundleKind, load_bundle_identity
++from .document import DocumentRenderResult, render_document
++from .events import RenderEventCallback
++from .renderplan_input import EmphasisPolicy
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRenderResult:
++    """Kind-tagged result returned by :func:`render_bundle`."""
++
++    kind: BundleKind
++    value: BookRenderResult | DocumentRenderResult
++
++    @property
++    def exit_code(self) -> int:
++        return self.value.exit_code
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "format": "voicerender-bundle-result",
++            "version": 1,
++            "kind": self.kind,
++            "result": self.value.to_dict(),
++        }
++
++
++def render_bundle(
++    bundle: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    reset_stale: bool = False,
++    emphasis_policy: Literal["reject", "defer-to-compose"] = "reject",
++    fail_fast: bool = False,
++    on_progress: RenderEventCallback | None = None,
++) -> BundleRenderResult:
++    """Render one canonical bundle root, dispatching by its manifest identity."""
++    identity = load_bundle_identity(bundle)
++    if identity.kind == "book":
++        book_result = render_book(
++            identity.root,
++            variant=variant,
++            chapters=chapters,
++            speech=speech,
++            renderplan_root=renderplan_root,
++            output_root=output_root,
++            cache_dir=cache_dir,
++            force=force,
++            reset_stale_output=reset_stale,
++            fail_fast=fail_fast,
++            emphasis_policy=EmphasisPolicy(emphasis_policy),
++            on_event=on_progress,
++        )
++        return BundleRenderResult(kind=identity.kind, value=book_result)
++
++    if chapters.strip().casefold() != "all":
++        raise ValueError("--chapters must be 'all' for a document bundle")
++    document_result = render_document(
++        identity.root,
++        variant=variant,
++        speech=speech,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++        cache_dir=cache_dir,
++        force=force,
++        reset_stale_output=reset_stale,
++        emphasis_policy=EmphasisPolicy(emphasis_policy),
++        on_event=on_progress,
++    )
++    return BundleRenderResult(kind=identity.kind, value=document_result)
++
++
++__all__ = ["BundleRenderResult", "render_bundle"]
+diff --git a/voicerender/bundle_contract.py b/voicerender/bundle_contract.py
+new file mode 100644
+index 0000000..d1fb773
+--- /dev/null
++++ b/voicerender/bundle_contract.py
+@@ -0,0 +1,115 @@
++"""Safe identity reader for canonical SSMD bundle roots."""
++
++from __future__ import annotations
++
++import json
++import stat
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Literal
++
++from .errors import VoiceRenderError
++
++MAX_MANIFEST_BYTES = 2 * 1024 * 1024
++BOOK_FORMAT = "ssmdconvert.book"
++DOCUMENT_FORMAT = "ssmdconvert.document"
++
++BundleKind = Literal["book", "document"]
++
++
++class BundleContractError(VoiceRenderError, ValueError):
++    """An input is not a safe, supported SSMD bundle root."""
++
++    def __init__(self, message: str, *, code: str = "bundle.invalid") -> None:
++        super().__init__(message)
++        self.message = message
++        self.code = code
++
++
++@dataclass(frozen=True, slots=True)
++class BundleIdentity:
++    root: Path
++    manifest_path: Path
++    kind: BundleKind
++
++
++def load_bundle_identity(path: str | Path) -> BundleIdentity:
++    """Read only the bounded, authoritative identity fields of a bundle manifest."""
++    input_path = Path(path).expanduser()
++    if not input_path.name.endswith(".ssmd-bundle"):
++        raise BundleContractError(
++            "bundle input must be the canonical .ssmd-bundle directory root"
++        )
++    if input_path.is_symlink():
++        raise BundleContractError("SSMD bundle root must not be a symlink")
++
++    try:
++        root = input_path.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise BundleContractError(
++            f"cannot resolve SSMD bundle root {input_path}: {exc}"
++        ) from exc
++    if not root.is_dir():
++        raise BundleContractError(f"SSMD bundle root is not a directory: {root}")
++
++    manifest_path = root / "manifest.json"
++    if manifest_path.is_symlink():
++        raise BundleContractError("SSMD bundle manifest.json must not be a symlink")
++    try:
++        manifest_stat = manifest_path.lstat()
++    except OSError as exc:
++        raise BundleContractError(
++            f"SSMD bundle manifest.json is missing or unreadable: {manifest_path}"
++        ) from exc
++    if not stat.S_ISREG(manifest_stat.st_mode):
++        raise BundleContractError(
++            f"SSMD bundle manifest.json must be a regular file: {manifest_path}"
++        )
++    if manifest_stat.st_size > MAX_MANIFEST_BYTES:
++        raise BundleContractError(
++            f"SSMD bundle manifest.json exceeds the {MAX_MANIFEST_BYTES}-byte size limit"
++        )
++
++    try:
++        raw = manifest_path.read_bytes()
++        if len(raw) > MAX_MANIFEST_BYTES:
++            raise BundleContractError(
++                f"SSMD bundle manifest.json exceeds the {MAX_MANIFEST_BYTES}-byte size limit"
++            )
++        data: Any = json.loads(raw.decode("utf-8", errors="strict"))
++    except BundleContractError:
++        raise
++    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
++        raise BundleContractError(
++            f"cannot read SSMD bundle manifest.json: {exc}"
++        ) from exc
++    if not isinstance(data, dict):
++        raise BundleContractError("SSMD bundle manifest root must be a JSON object")
++
++    bundle_format = data.get("format")
++    if bundle_format not in (BOOK_FORMAT, DOCUMENT_FORMAT):
++        raise BundleContractError(
++            f"unsupported SSMD bundle format {bundle_format!r}; expected "
++            f"{BOOK_FORMAT!r} or {DOCUMENT_FORMAT!r}",
++            code="bundle.unsupported",
++        )
++    schema_version = data.get("schema_version")
++    if type(schema_version) is not int or schema_version != 1:
++        raise BundleContractError(
++            f"unsupported SSMD bundle schema_version {schema_version!r}; expected 1",
++            code="bundle.unsupported",
++        )
++
++    kind: BundleKind = "book" if bundle_format == BOOK_FORMAT else "document"
++    return BundleIdentity(root=root, manifest_path=manifest_path, kind=kind)
++
++
++__all__ = [
++    "BOOK_FORMAT",
++    "DOCUMENT_FORMAT",
++    "MAX_MANIFEST_BYTES",
++    "BundleContractError",
++    "BundleIdentity",
++    "BundleKind",
++    "load_bundle_identity",
++]
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 600f248..88e415d 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -16,14 +16,8 @@ from typing import Any, TextIO, cast
+
+ from renderplan import load_manifest, load_plan
+
+-from . import (
+-    BookRenderError,
+-    BookRenderResult,
+-    __version__,
+-    render_book,
+-)
+-from .document import _resolve_document_request
+-from .document import render_document as _render_document
++from . import __version__
++from .bundle import BundleRenderResult, render_bundle
+ from .engines.options import engine_option_to_dict, engine_options
+ from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
+ from .engines.registry import (
+@@ -452,61 +446,37 @@ def build_parser() -> argparse.ArgumentParser:
+         help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
+     )
+
+-    book_render = commands.add_parser(
+-        "render-book", help="Render selected chapters from a RenderPlan variant"
++    bundle = commands.add_parser("bundle", help="Operate on an SSMD bundle")
++    bundle_commands = bundle.add_subparsers(dest="bundle_command", required=True)
++    bundle_render = bundle_commands.add_parser(
++        "render", help="Render a book or document SSMD bundle"
+     )
+-    book_render.add_argument(
+-        "book", type=Path, help="book workspace or its chapters/ directory"
++    bundle_render.add_argument(
++        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
+     )
+-    book_render.add_argument(
++    bundle_render.add_argument(
+         "--variant", required=True, help="exact RenderPlan variant directory name"
+     )
+-    book_render.add_argument("--chapters", default="all", metavar="SELECTOR")
+-    book_render.add_argument("--speech", default="all", metavar="SELECTOR")
+-    book_render.add_argument("--renderplan-root", type=Path)
+-    book_render.add_argument("--output-root", type=Path)
+-    book_render.add_argument("--cache-dir", type=Path)
+-    book_render.add_argument("--force", action="store_true")
+-    book_render.add_argument(
++    bundle_render.add_argument("--chapters", default="all", metavar="SELECTOR")
++    bundle_render.add_argument("--speech", default="all", metavar="SELECTOR")
++    bundle_render.add_argument("--renderplan-root", type=Path)
++    bundle_render.add_argument("--output-root", type=Path)
++    bundle_render.add_argument("--cache-dir", type=Path)
++    bundle_render.add_argument("--force", action="store_true")
++    bundle_render.add_argument(
+         "--reset-stale",
+         action="store_true",
+-        help="Reset chapter output owned by a different RenderPlan while reusing cache entries",
++        help="Reset stale VoiceRender output while reusing cache entries",
+     )
+-    book_render.add_argument(
++    bundle_render.add_argument(
+         "--emphasis-policy",
+         choices=("reject", "defer-to-compose"),
+         default="reject",
+         help="Reject emphasis by default, or defer it to a declared AudioCompose handler",
+     )
+-    book_render.add_argument("--fail-fast", action="store_true")
+-    book_render.add_argument("--json", action="store_true")
+-    _add_progress_option(book_render)
+-
+-    document_render = commands.add_parser(
+-        "render-document",
+-        help="Render one SSMDDoc RenderPlan from renderplan/<variant>",
+-        description=(
+-            "Reads renderplan/<variant>/document.renderplan.toml and writes "
+-            "voicerender/<variant>/document-0001/ by default."
+-        ),
+-    )
+-    document_render.add_argument(
+-        "document", type=Path, help="SSMDDoc workspace or canonical document.ssmd.md"
+-    )
+-    document_render.add_argument(
+-        "--variant", required=True, help="exact RenderPlan variant directory name"
+-    )
+-    document_render.add_argument("--speech", default="all", metavar="SELECTOR")
+-    document_render.add_argument("--renderplan-root", type=Path)
+-    document_render.add_argument("--output-root", type=Path)
+-    document_render.add_argument("--cache-dir", type=Path)
+-    document_render.add_argument("--force", action="store_true")
+-    document_render.add_argument("--reset-stale", action="store_true")
+-    document_render.add_argument(
+-        "--emphasis-policy", choices=("reject", "defer-to-compose"), default="reject"
+-    )
+-    document_render.add_argument("--json", action="store_true")
+-    _add_progress_option(document_render)
++    bundle_render.add_argument("--fail-fast", action="store_true")
++    bundle_render.add_argument("--json", action="store_true")
++    _add_progress_option(bundle_render)
+     inspect = commands.add_parser(
+         "inspect-manifest", help="Verify a render manifest and its WAVs"
+     )
+@@ -898,54 +868,95 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
+     }
+
+
+-def _print_book_result(result: BookRenderResult) -> None:
+-    request = result.request
+-    print("VoiceRender book render")
+-    print(f"  workspace:   {request.workspace}")
+-    print(f"  variant:     {request.variant_name}")
+-    print(f"  renderplans: {request.renderplan_variant_dir}")
+-    print(f"  output:      {request.output_variant_dir}")
+-    print(f"  chapters:    {request.chapter_selector}")
+-    print(f"  selected:    {result.requested}")
+-    for outcome in result.outcomes:
+-        print(f"[{outcome.index}/{result.requested}] {outcome.id}")
+-        if outcome.status == "failed":
+-            print("       FAILED")
+-            print(
+-                f"       {outcome.error_code or 'render.failed'}: {outcome.error_message or 'render failed'}"
+-            )
+-            if outcome.preflight_report is not None:
+-                label = (
+-                    "replan report" if outcome.replan_required else "preflight report"
++def _print_bundle_result(result: BundleRenderResult) -> None:
++    value: Any = result.value
++    if result.kind == "book":
++        request = value.request
++        selected = value.requested
++        output = request.output_variant_dir
++    else:
++        request = value.request
++        selected = 1
++        output = request.output_dir
++
++    print("VoiceRender bundle render")
++    print(f"  kind:      {result.kind}")
++    print(f"  workspace: {request.workspace}")
++    print(f"  variant:   {request.variant_name}")
++    print(f"  selected:  {selected}")
++    print(f"  output:    {output}")
++
++    if result.kind == "book":
++        print(f"  renderplans: {request.renderplan_variant_dir}")
++        print(f"  chapters:    {request.chapter_selector}")
++        for outcome in value.outcomes:
++            print(f"[{outcome.index}/{value.requested}] {outcome.id}")
++            if outcome.status == "failed":
++                print("       FAILED")
++                print(
++                    f"       {outcome.error_code or 'render.failed'}: "
++                    f"{outcome.error_message or 'render failed'}"
+                 )
+-                print(f"       {label}: {outcome.preflight_report}")
+-        elif outcome.status == "skipped":
+-            print("       skipped after an earlier chapter failure")
+-        else:
+-            if request.speech_selector.strip().casefold() != "all":
++                if outcome.preflight_report is not None:
++                    label = (
++                        "replan report"
++                        if outcome.replan_required
++                        else "preflight report"
++                    )
++                    print(f"       {label}: {outcome.preflight_report}")
++            elif outcome.status == "skipped":
++                print("       skipped after an earlier chapter failure")
++            else:
++                if request.speech_selector.strip().casefold() != "all":
++                    print(
++                        f"       speech: {outcome.selected_speech} of "
++                        f"{outcome.planned_speech} selected"
++                    )
+                 print(
+-                    f"       speech: {outcome.selected_speech} of "
+-                    f"{outcome.planned_speech} selected"
++                    f"       rendered: {outcome.rendered} new, {outcome.reused} reused"
+                 )
+-            print(f"       rendered: {outcome.rendered} new, {outcome.reused} reused")
+-            state = "complete" if outcome.manifest_complete else "partial"
+-            print(
+-                f"       chapter state: {state} "
+-                f"({outcome.available_speech}/{outcome.planned_speech} available)"
+-            )
+-            if outcome.manifest is not None:
+-                print(f"       manifest: {outcome.manifest}")
+-        if outcome.pending_composition:
++                state = "complete" if outcome.manifest_complete else "partial"
++                print(
++                    f"       chapter state: {state} "
++                    f"({outcome.available_speech}/{outcome.planned_speech} available)"
++                )
++                if outcome.manifest is not None:
++                    print(f"       manifest: {outcome.manifest}")
++            if outcome.pending_composition:
++                print(
++                    "       WARNING: emphasis remains pending composition; see "
++                    f"{outcome.output_dir / RENDER_DIAGNOSTICS_FILENAME}"
++                )
++        rendered = value.written
++        reused = value.reused
++        failed = value.failed
++        status = "failed" if failed else "completed"
++    else:
++        print(f"  speech:    {request.speech_selector}")
++        print(f"  status:    {value.status}")
++        print(f"  rendered:  {value.rendered}")
++        print(f"  reused:    {value.reused}")
++        print(f"  report:    {value.report_path}")
++        if value.preflight_report:
++            print(f"  preflight: {value.preflight_report}")
++        if value.error_code:
++            print(f"FAILED: {value.error_code}: {value.error_message or ''}")
++        if value.pending_composition:
+             print(
+-                "       WARNING: emphasis remains pending composition; see "
+-                f"{outcome.output_dir / RENDER_DIAGNOSTICS_FILENAME}"
++                "WARNING: emphasis remains pending composition; see "
++                f"{output / RENDER_DIAGNOSTICS_FILENAME}"
+             )
++        rendered = value.rendered
++        reused = value.reused
++        failed = int(value.status == "failed")
++        status = value.status
++
+     print("VoiceRender summary")
+-    print(f"  requested: {result.requested}")
+-    print(f"  complete:  {result.full_chapters}")
+-    print(f"  partial:   {result.partial_chapters}")
+-    print(f"  failed:    {result.failed}")
+-    print(f"  skipped:   {result.skipped}")
++    print(f"  status:    {status}")
++    print(f"  selected:  {selected}")
++    print(f"  rendered:  {rendered}")
++    print(f"  reused:    {reused}")
++    print(f"  failed:    {failed}")
+
+
+ def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
+@@ -1870,77 +1881,12 @@ def main(argv: list[str] | None = None) -> int:
+                 return 2 if fresh is not None and fresh.status == "replan" else 1
+             return 0
+
+-        if args.command == "render-document":
+-            progress = _progress_callback(args)
+-            try:
+-                request = _resolve_document_request(
+-                    args.document,
+-                    variant=args.variant,
+-                    speech=args.speech,
+-                    renderplan_root=args.renderplan_root,
+-                    output_root=args.output_root,
+-                    cache_dir=args.cache_dir,
+-                    force=args.force,
+-                    reset_stale_output=args.reset_stale,
+-                    emphasis_policy=args.emphasis_policy,
+-                )
+-                print("VoiceRender document render", file=sys.stderr)
+-                print(f"  workspace:   {request.workspace}", file=sys.stderr)
+-                print(f"  document:    {request.document_id}", file=sys.stderr)
+-                print(f"  variant:     {request.variant_name}", file=sys.stderr)
+-                print(f"  profile-id:  {request.render_profile_id}", file=sys.stderr)
+-                print(f"  renderplan:  {request.renderplan_path}", file=sys.stderr)
+-                print(f"  output:      {request.output_dir}", file=sys.stderr)
+-                print(f"  cache:       {request.cache_dir}", file=sys.stderr)
+-                print(f"  speech:      {request.speech_selector}", file=sys.stderr)
+-                result = _render_document(
+-                    args.document,
+-                    variant=args.variant,
+-                    speech=args.speech,
+-                    renderplan_root=args.renderplan_root,
+-                    output_root=args.output_root,
+-                    cache_dir=args.cache_dir,
+-                    force=args.force,
+-                    reset_stale_output=args.reset_stale,
+-                    emphasis_policy=args.emphasis_policy,
+-                    on_event=progress,
+-                )
+-            except (OSError, ValueError, TypeError) as exc:
+-                payload = {
+-                    "error": str(exc),
+-                    "code": getattr(exc, "code", "workspace.invalid"),
+-                    "exit_code": 2,
+-                }
+-                if args.json:
+-                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+-                else:
+-                    print(f"error: {exc}", file=sys.stderr)
+-                return 2
+-            finally:
+-                if progress is not None:
+-                    progress.finish()
+-            if args.json:
+-                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+-            else:
+-                print("VoiceRender document summary", file=sys.stderr)
+-                print(f"  status:   {result.status}", file=sys.stderr)
+-                print(f"  planned:  {result.planned_speech}", file=sys.stderr)
+-                print(f"  selected: {result.selected_speech}", file=sys.stderr)
+-                print(f"  rendered: {result.rendered}", file=sys.stderr)
+-                print(f"  reused:   {result.reused}", file=sys.stderr)
+-                print(f"  report:   {result.report_path}", file=sys.stderr)
+-                if result.preflight_report:
+-                    print(f"  preflight: {result.preflight_report}", file=sys.stderr)
+-                if result.error_code:
+-                    print(f"FAILED: {result.error_code}", file=sys.stderr)
+-            return result.exit_code
+-
+-        if args.command == "render-book":
++        if args.command == "bundle" and args.bundle_command == "render":
+             progress = _progress_callback(args)
+             try:
+                 try:
+-                    book_result = render_book(
+-                        args.book,
++                    bundle_result = render_bundle(
++                        args.bundle,
+                         variant=args.variant,
+                         chapters=args.chapters,
+                         speech=args.speech,
+@@ -1948,19 +1894,20 @@ def main(argv: list[str] | None = None) -> int:
+                         output_root=args.output_root,
+                         cache_dir=args.cache_dir,
+                         force=args.force,
+-                        reset_stale_output=args.reset_stale,
+-                        fail_fast=args.fail_fast,
++                        reset_stale=args.reset_stale,
+                         emphasis_policy=args.emphasis_policy,
+-                        on_event=progress,
++                        fail_fast=args.fail_fast,
++                        on_progress=progress,
+                     )
+                 finally:
+                     if progress is not None:
+                         progress.finish()
+-            except (BookRenderError, OSError, ValueError, TypeError) as exc:
+-                error_code = getattr(exc, "code", "workspace.invalid")
++            except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
+                 payload = {
++                    "format": "voicerender-bundle-result",
++                    "version": 1,
+                     "error": str(exc),
+-                    "code": error_code,
++                    "code": getattr(exc, "code", "bundle.invalid"),
+                     "exit_code": 2,
+                 }
+                 if args.json:
+@@ -1969,10 +1916,10 @@ def main(argv: list[str] | None = None) -> int:
+                     print(f"error: {exc}", file=sys.stderr)
+                 return 2
+             if args.json:
+-                print(json.dumps(book_result.to_dict(), ensure_ascii=False, indent=2))
++                print(json.dumps(bundle_result.to_dict(), ensure_ascii=False, indent=2))
+             else:
+-                _print_book_result(book_result)
+-            return book_result.exit_code
++                _print_bundle_result(bundle_result)
++            return bundle_result.exit_code
+
+         if args.command == "inspect-manifest":
+             payload, valid = _inspect_manifest(args.manifest)
+diff --git a/voicerender/document.py b/voicerender/document.py
+index 19d98d1..3036139 100644
+--- a/voicerender/document.py
++++ b/voicerender/document.py
+@@ -1,4 +1,4 @@
+-"""Single-document SSMDDoc rendering on the existing RenderPlan execution path."""
++"""Document-bundle rendering on the existing RenderPlan execution path."""
+
+ from __future__ import annotations
+
+@@ -367,7 +367,7 @@ def render_document(
+ def _write_report(result: DocumentRenderResult) -> None:
+     req = result.request
+     data = {
+-        "format": "voicerender-document-report",
++        "format": "voicerender-bundle-document-report",
+         "version": 1,
+         "workspace": str(req.workspace),
+         "document_id": req.document_id,
+diff --git a/voicerender/document_contract.py b/voicerender/document_contract.py
+index d39a473..c08363f 100644
+--- a/voicerender/document_contract.py
++++ b/voicerender/document_contract.py
+@@ -1,4 +1,4 @@
+-"""Minimal, dependency-free SSMDDoc v1 workspace identity reader."""
++"""Minimal, dependency-free document-bundle identity validation."""
+
+ from __future__ import annotations
+
+@@ -15,7 +15,7 @@ DOCUMENT_FORMAT = "ssmdconvert.document"
+
+
+ class DocumentWorkspaceError(DocumentRenderError):
+-    """The input is not a safe, valid SSMDDoc v1 workspace."""
++    """The input is not a safe, valid document bundle."""
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -27,23 +27,19 @@ class DocumentWorkspaceIndex:
+
+
+ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
+-    """Resolve a workspace root or its canonical document file without parsing SSMD."""
++    """Validate document-specific identity fields within a canonical bundle root."""
+     input_path = Path(value).expanduser()
+-    if input_path.suffix.lower() == ".zip" or input_path.name.lower().endswith(
+-        ".ssmdoc.zip"
+-    ):
+-        raise DocumentWorkspaceError("ZIP bundles are not accepted by render-document")
+-    try:
+-        input_path = input_path.resolve(strict=True)
+-        root = (
+-            input_path.parent
+-            if input_path.is_file() and input_path.name == "document.ssmd.md"
+-            else input_path
++    if not input_path.name.endswith(".ssmd-bundle"):
++        raise DocumentWorkspaceError(
++            "document bundle input must be the canonical .ssmd-bundle directory root"
+         )
+-        root = root.resolve(strict=True)
++    if input_path.is_symlink():
++        raise DocumentWorkspaceError("document bundle root must not be a symlink")
++    try:
++        root = input_path.resolve(strict=True)
+         if not root.is_dir():
+             raise DocumentWorkspaceError(
+-                "document workspace input is not a directory or canonical document"
++                "document bundle input is not a directory root"
+             )
+         manifest = root / "manifest.json"
+         if manifest.is_symlink():
+@@ -60,19 +56,22 @@ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
+     except DocumentWorkspaceError:
+         raise
+     except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError) as exc:
+-        raise DocumentWorkspaceError(f"cannot read SSMDDoc workspace: {exc}") from exc
++        raise DocumentWorkspaceError(f"cannot read document bundle: {exc}") from exc
+     if not isinstance(data, dict):
+         raise DocumentWorkspaceError("manifest root must be a JSON object")
+     if (
+         data.get("format") != DOCUMENT_FORMAT
++        or type(data.get("schema_version")) is not int
+         or data.get("schema_version") != 1
+         or data.get("ssmd_version") != "0.9"
+     ):
+-        raise DocumentWorkspaceError("unsupported SSMDDoc manifest format or version")
++        raise DocumentWorkspaceError(
++            "unsupported document bundle manifest format or version"
++        )
+     document = data.get("document")
+     if not isinstance(document, dict) or document.get("id") != "document-0001":
+         raise DocumentWorkspaceError(
+-            "manifest document must have canonical id document-0001"
++            "document bundle manifest must have canonical id document-0001"
+         )
+     relative = document.get("path")
+     if (
+@@ -82,7 +81,7 @@ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
+         or "\\" in relative
+         or re.match(r"^[A-Za-z]:", relative)
+     ):
+-        raise DocumentWorkspaceError("manifest document path is unsafe")
++        raise DocumentWorkspaceError("document bundle manifest path is unsafe")
+     posix = PurePosixPath(relative)
+     if (
+         posix.is_absolute()
+@@ -90,10 +89,12 @@ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
+         or posix.as_posix() != relative
+     ):
+         raise DocumentWorkspaceError(
+-            "manifest document path must be normalized and relative"
++            "document bundle manifest path must be normalized and relative"
+         )
+     if relative != "document.ssmd.md":
+-        raise DocumentWorkspaceError("schema v1 document path must be document.ssmd.md")
++        raise DocumentWorkspaceError(
++            "schema v1 document bundle path must be document.ssmd.md"
++        )
+     document_path = root / relative
+     if document_path.is_symlink():
+         raise DocumentWorkspaceError(
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+index e9f6916..fe5e30f 100644
+--- a/voicerender/errors.py
++++ b/voicerender/errors.py
+@@ -6,7 +6,7 @@ class VoiceRenderError(Exception):
+
+
+ class DocumentRenderError(VoiceRenderError, ValueError):
+-    """A document workspace or document-render request is invalid."""
++    """A document bundle or document-render request is invalid."""
+
+     code = "workspace.invalid"

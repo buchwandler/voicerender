@@ -1,0 +1,49 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: 0.2.5
+git_base_ref: v0.2.4
+git_base_sha: fdaaa999eb67c26010092ee4d1770b0136a760d6
+git_head_ref: HEAD
+git_head_sha: 0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+git_range: fdaaa999eb67c26010092ee4d1770b0136a760d6..0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+commit_count: 1
+rows:
+  - sha: 0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+    source_ref: git:0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+    short_sha: 0ab4075
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_contract.py
+      - tests/test_bundle_render.py
+      - tests/test_cli.py
+      - tests/test_control_surface_exports.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/book_contract.py
+      - voicerender/book_layout.py
+      - voicerender/bundle.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/document_contract.py
+      - voicerender/errors.py
+    stats:
+      files_changed: 21
+      insertions: 986
+      deletions: 494
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: remove ssmdbook and ssmdoc and introduce ssmd bundle support"

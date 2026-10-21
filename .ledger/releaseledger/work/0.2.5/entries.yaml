@@ -1,0 +1,44 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.5
+git_base_ref: fdaaa999eb67c26010092ee4d1770b0136a760d6
+git_base_sha: fdaaa999eb67c26010092ee4d1770b0136a760d6
+git_head_ref: 0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+git_head_sha: 0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+include_merges: nontrivial
+entries:
+  - kind: changed
+    summary: "Changed separate book/document rendering to manifest-driven SSMD bundle rendering with a unified bundle API"
+    breaking: true
+    source_refs:
+      - git:0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+    paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_contract.py
+      - tests/test_bundle_render.py
+      - tests/test_cli.py
+      - tests/test_control_surface_exports.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/book_contract.py
+      - voicerender/book_layout.py
+      - voicerender/bundle.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/document_contract.py
+      - voicerender/errors.py
+    sources:
+      - git:0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

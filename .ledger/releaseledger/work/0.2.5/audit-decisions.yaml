@@ -1,0 +1,32 @@
+rows:
+  - sha: 0ab40750b3ede2e90e62b643c33aedc8687bf1b0
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_contract.py
+      - tests/test_bundle_render.py
+      - tests/test_cli.py
+      - tests/test_control_surface_exports.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/wheel_smoke.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/book_contract.py
+      - voicerender/book_layout.py
+      - voicerender/bundle.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/document_contract.py
+      - voicerender/errors.py
+    observed_behavior: "Introduced a manifest-driven SSMD bundle contract and unified bundle rendering facade for book and document workflows; replaced legacy render command paths, added canonical .ssmd-bundle validation, and updated reports, CLI output, public exports, and integration coverage."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
