@@ -125,6 +125,7 @@ from .runtime import (
     onnx_runtime_status,
     set_onnx_runtime_providers,
 )
+from .variants import BundleVariant, BundleVariantsResult, list_bundle_variants
 from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_source_codec import load_voice_source, save_voice_source
 from .voice_sources import (
@@ -163,6 +164,8 @@ __all__ = [
     "BookRenderResult",
     "BundleContractError",
     "BundleRenderResult",
+    "BundleVariant",
+    "BundleVariantsResult",
     "CatalogRequest",
     "CatalogResult",
     "ChapterRenderOutcome",
@@ -250,6 +253,7 @@ __all__ = [
     "estimate_renderplan",
     "inspect_voice",
     "install_model",
+    "list_bundle_variants",
     "list_engines",
     "list_models",
     "list_profile_roles",

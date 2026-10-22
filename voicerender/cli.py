@@ -77,6 +77,7 @@ from .runtime import (
     set_onnx_runtime_providers,
 )
 from .storage import install_file_no_replace, wav_info
+from .variants import BundleVariantsResult, list_bundle_variants
 from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_design import Qwen3VoiceDesignRecipe, design_qwen3_reference
 from .voice_source_codec import load_voice_source, save_voice_source
@@ -271,7 +272,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     profile_create.add_argument("--offline", action="store_true")
     profile_create.add_argument("--refresh", action="store_true")
-    profile_create.add_argument("-o", "--output", required=True, type=Path)
+    profile_create.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="output profile path (normalizes to the .renderprofile.toml suffix)",
+    )
     profile_create.add_argument("--json", action="store_true")
 
     profile_validate = profile_commands.add_parser(
@@ -504,6 +511,20 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_render.add_argument("--fail-fast", action="store_true")
     bundle_render.add_argument("--json", action="store_true")
     _add_progress_option(bundle_render)
+
+    bundle_variants = bundle_commands.add_parser(
+        "variants",
+        help="Discover existing RenderPlan variants and their render state",
+        description=(
+            "List direct RenderPlan variant directories without rendering or modifying the bundle."
+        ),
+    )
+    bundle_variants.add_argument(
+        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
+    )
+    bundle_variants.add_argument("--renderplan-root", type=Path)
+    bundle_variants.add_argument("--output-root", type=Path)
+    bundle_variants.add_argument("--json", action="store_true")
     inspect = commands.add_parser(
         "inspect-manifest", help="Verify a render manifest and its WAVs"
     )
@@ -811,6 +832,17 @@ def _profile_role_voice_source(args: argparse.Namespace) -> dict[str, Any] | Non
     return None
 
 
+def normalize_renderprofile_output_path(path: Path) -> Path:
+    """Return the CLI profile-create destination with its canonical suffix."""
+    suffix = ".renderprofile.toml"
+    name = path.name
+    if name.casefold().endswith(suffix):
+        return path
+    if name.casefold().endswith(".toml"):
+        name = name[: -len(".toml")]
+    return path.with_name(f"{name}{suffix}")
+
+
 def _profile_mutation_destination(args: argparse.Namespace) -> Path:
     if args.in_place:
         return cast(Path, args.profile)
@@ -893,6 +925,53 @@ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
         ),
         "error": result.error,
     }
+
+
+def _print_bundle_variants(result: BundleVariantsResult) -> None:
+    print("VoiceRender bundle variants")
+    print(f"  bundle:       {result.bundle}")
+    print(f"  kind:         {result.kind}")
+    print(f"  renderplans:  {result.renderplan_root}")
+    print(f"  output:       {result.output_root}")
+    print(f"  variants:     {len(result.variants)}")
+    if not result.variants:
+        print("No RenderPlan variants found.")
+        return
+
+    print()
+    print(
+        "VARIANT                          PLAN      RENDER       STATE        PROGRESS          COMPOSITION"
+    )
+    for variant in result.variants:
+        progress = (
+            f"{variant.completed_units}/{variant.total_units} {variant.unit_kind}"
+            if variant.total_units
+            else "n/a"
+        )
+        composition = (
+            "pending"
+            if variant.pending_composition is True
+            else "none"
+            if variant.pending_composition is False
+            else "n/a"
+        )
+        print(
+            f"{variant.name:<32} {variant.plan_status:<9} "
+            f"{variant.render_status:<12} {variant.state:<12} "
+            f"{progress:<17} {composition}"
+        )
+        if variant.validation_error:
+            print(f"  Invalid variant: {variant.name}")
+            print(f"    error: {variant.validation_error}")
+        if variant.error_code or variant.error_message:
+            error = ": ".join(
+                value for value in (variant.error_code, variant.error_message) if value
+            )
+            print(f"  Last render error: {error}")
+        if variant.output_error:
+            print(f"  Output metadata warning: {variant.output_error}")
+        if variant.report_path:
+            print(f"  report: {variant.report_path}")
 
 
 def _print_bundle_result(result: BundleRenderResult) -> None:
@@ -1790,6 +1869,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "profile":
             if args.profile_command == "create":
+                output_path = normalize_renderprofile_output_path(args.output)
                 profile_options = _json_options(args.option)
                 input_paths = (
                     args.reference_wav,
@@ -1797,7 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.voice_source,
                 )
                 if any(
-                    path is not None and args.output.resolve() == path.resolve()
+                    path is not None and output_path.resolve() == path.resolve()
                     for path in input_paths
                 ):
                     raise ValueError(
@@ -1829,7 +1909,7 @@ def main(argv: list[str] | None = None) -> int:
                     offline=args.offline,
                     refresh=args.refresh,
                 )
-                output = save_render_profile(profile, args.output)
+                output = save_render_profile(profile, output_path)
                 payload = {"profile_id": profile.profile_id, "path": str(output)}
             elif args.profile_command == "validate":
                 profile = validate_render_profile(load_render_profile(args.profile))
@@ -2077,6 +2157,18 @@ def main(argv: list[str] | None = None) -> int:
                 _print_bundle_result(bundle_result)
             return bundle_result.exit_code
 
+        if args.command == "bundle" and args.bundle_command == "variants":
+            listing = list_bundle_variants(
+                args.bundle,
+                renderplan_root=args.renderplan_root,
+                output_root=args.output_root,
+            )
+            if args.json:
+                print(json.dumps(listing.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                _print_bundle_variants(listing)
+            return 0
+
         if args.command == "inspect-manifest":
             payload, valid = _inspect_manifest(args.manifest)
             if args.json:
@@ -2093,6 +2185,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if valid else 1
 
     except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
+        if (
+            getattr(args, "json", False)
+            and args.command == "bundle"
+            and args.bundle_command == "variants"
+        ):
+            error_code = getattr(exc, "code", None)
+            payload = {
+                "format": "voicerender-bundle-variants",
+                "version": 1,
+                "error": str(exc),
+                "error_code": error_code
+                if isinstance(error_code, str)
+                else "bundle.invalid",
+                "exit_code": 2,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 2
         if getattr(args, "json", False) and args.command == "render":
             error_code = getattr(exc, "code", None)
             payload = {

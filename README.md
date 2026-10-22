@@ -57,6 +57,15 @@ voicerender profile create \
 voicerender profile validate narration.renderprofile.toml
 ```
 
+`profile create` normalizes its destination to the canonical `.renderprofile.toml` suffix. For example:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target v1.0 --voice af_heart --language en-us \
+  -o profile1
+# Writes profile1.renderprofile.toml
+```
+
 Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires that engine's SDK; it does not perform model inference.
 
 The created `profile_id` must be used by the planner when it emits a RenderPlan. For a complete serialized example, the checked-in plan and profile below already share an identity:
@@ -297,8 +306,12 @@ The coordinated pipeline uses the `bundle` command group at every stage:
 ssmdconvert bundle convert story.ssmd.md
 utterplan bundle compile story.ssmd-bundle
 utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
+voicerender bundle variants story.ssmd-bundle
+# Choose the exact existing variant basename from its state/progress listing:
 voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
 ```
+
+`bundle variants` is read-only discovery: it validates existing book or document plans and reports their render state without compiling variants or synthesizing speech. UtterPlan remains responsible for producing RenderPlan variants.
 
 For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
 

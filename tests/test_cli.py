@@ -30,6 +30,13 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
         capture_output=True,
         text=True,
     ).stdout.casefold()
+    variants_help = subprocess.run(
+        [sys.executable, "-m", "voicerender", "bundle", "variants", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.casefold()
 
     assert "preflight" in root_help
     assert "renderplan" in root_help
@@ -44,6 +51,10 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
     assert "--chapters" in bundle_help
     assert "--speech" in bundle_help
     assert "utterplan" not in bundle_help
+
+    assert "--renderplan-root" in variants_help
+    assert "--output-root" in variants_help
+    assert "--json" in variants_help
 
 
 def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
@@ -64,8 +75,13 @@ import voicerender.book
 import voicerender.cli
 assert callable(voicerender.preflight_render_plan)
 assert callable(voicerender.render_renderplan)
+assert callable(voicerender.list_bundle_variants)
+assert voicerender.BundleVariant is not None
+assert voicerender.BundleVariantsResult is not None
 args = voicerender.cli.build_parser().parse_args(['bundle', 'render', 'book.ssmd-bundle', '--variant', 'variant'])
 assert args.command == 'bundle' and args.bundle_command == 'render'
+args = voicerender.cli.build_parser().parse_args(['bundle', 'variants', 'book.ssmd-bundle', '--json'])
+assert args.command == 'bundle' and args.bundle_command == 'variants'
 assert not any(name.split('.', 1)[0].casefold() == 'utterplan' for name in sys.modules)
 assert not any(name.startswith('voicerender.inputs.utterplan') for name in sys.modules)
 """
@@ -370,6 +386,9 @@ def test_cli_profile_create_preserves_source_sidecar_and_rejects_output_collisio
     assert result == 0
     assert captured["voice_source"] == load_voice_source(sidecar) == source
 
+    collision_source = tmp_path / "designed.voice-source.renderprofile.toml"
+    collision_source.write_bytes(sidecar.read_bytes())
+
     result = cli.main(
         [
             "profile",
@@ -381,9 +400,9 @@ def test_cli_profile_create_preserves_source_sidecar_and_rejects_output_collisio
             "--language",
             "en-US",
             "--voice-source",
-            str(sidecar),
+            str(collision_source),
             "--output",
-            str(sidecar),
+            str(collision_source),
         ]
     )
     assert result == 1
@@ -946,3 +965,205 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
     assert isinstance(__import__("json").loads(stdout), dict)
     assert "progress 50.0%" in stderr.getvalue()
     assert "\\r" not in stderr.getvalue() and "\\x1b" not in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("supplied", "expected", "json_output"),
+    [
+        ("profile1", "profile1.renderprofile.toml", True),
+        (
+            "profile1.renderprofile.toml",
+            "profile1.renderprofile.toml",
+            False,
+        ),
+        ("profile1.toml", "profile1.renderprofile.toml", True),
+        ("profiles/profile1", "profiles/profile1.renderprofile.toml", False),
+    ],
+)
+def test_cli_profile_create_normalizes_output_path(
+    monkeypatch, tmp_path: Path, capsys, supplied: str, expected: str, json_output: bool
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    destinations: list[Path] = []
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **_kwargs: SimpleNamespace(profile_id="profile-1"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "save_render_profile",
+        lambda _profile, path: destinations.append(path) or path,
+    )
+
+    args = [
+        "profile",
+        "create",
+        "--engine",
+        "kokoro",
+        "--target",
+        "v1.0",
+        "--voice",
+        "af_heart",
+        "--language",
+        "en-us",
+        "-o",
+        supplied,
+    ]
+    if json_output:
+        args.append("--json")
+
+    assert cli.main(args) == 0
+    destination = Path(expected)
+    assert destinations == [destination]
+    stdout = capsys.readouterr().out
+    if json_output:
+        assert json.loads(stdout)["path"] == str(destination)
+    else:
+        assert str(destination) in stdout
+
+
+def test_profile_output_normalizer_is_idempotent_and_case_insensitive() -> None:
+    from voicerender.cli import normalize_renderprofile_output_path
+
+    normalized = normalize_renderprofile_output_path(Path("profiles/Profile1"))
+    assert normalized == Path("profiles/Profile1.renderprofile.toml")
+    assert normalize_renderprofile_output_path(normalized) == normalized
+    uppercase = Path("PROFILE.RENDERPROFILE.TOML")
+    assert normalize_renderprofile_output_path(uppercase) == uppercase
+
+
+def test_cli_profile_create_prevents_overwriting_voice_source_after_normalization(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from voicerender import cli
+
+    source = tmp_path / "profile.renderprofile.toml"
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **_kwargs: pytest.fail(
+            "profile creation must reject the collision first"
+        ),
+    )
+    assert (
+        cli.main(
+            [
+                "profile",
+                "create",
+                "--engine",
+                "kokoro",
+                "--target",
+                "v1.0",
+                "--reference-wav",
+                str(source),
+                "--language",
+                "en-us",
+                "-o",
+                str(tmp_path / "profile"),
+            ]
+        )
+        == 1
+    )
+    assert "must not overwrite a voice-source input" in capsys.readouterr().err
+
+
+def test_bundle_variants_cli_json_human_and_root_overrides(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from voicerender import cli
+    from voicerender.variants import BundleVariant, BundleVariantsResult
+
+    bundle = tmp_path / "story.ssmd-bundle"
+    renderplans = tmp_path / "plans"
+    output = tmp_path / "output"
+    variant = BundleVariant(
+        name="narration--a1b2c3d4e5f6",
+        profile_id="sha256:profile",
+        plan_status="valid",
+        validation_error=None,
+        render_status="partial",
+        state="partial",
+        unit_kind="chapters",
+        completed_units=1,
+        total_units=2,
+        planned_speech=13,
+        available_speech=5,
+        pending_composition=True,
+        report_path=None,
+    )
+    listing = BundleVariantsResult(
+        bundle=bundle,
+        kind="book",
+        renderplan_root=renderplans,
+        output_root=output,
+        variants=(variant,),
+    )
+    calls: list[tuple[Path, dict[str, Path | None]]] = []
+
+    def fake_list(path, *, renderplan_root=None, output_root=None):
+        calls.append(
+            (path, {"renderplan_root": renderplan_root, "output_root": output_root})
+        )
+        return listing
+
+    monkeypatch.setattr(cli, "list_bundle_variants", fake_list)
+    assert (
+        cli.main(
+            [
+                "bundle",
+                "variants",
+                str(bundle),
+                "--renderplan-root",
+                str(renderplans),
+                "--output-root",
+                str(output),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["format"] == "voicerender-bundle-variants"
+    assert payload["version"] == 1
+    assert payload["variants"][0]["name"] == variant.name
+    assert calls[-1] == (
+        bundle,
+        {"renderplan_root": renderplans, "output_root": output},
+    )
+
+    assert cli.main(["bundle", "variants", str(bundle)]) == 0
+    human = capsys.readouterr().out
+    assert variant.name in human
+    assert "valid" in human and "partial" in human
+    assert "1/2 chapters" in human
+    assert "pending" in human
+
+
+def test_bundle_variants_empty_state_and_bundle_errors_are_json(
+    tmp_path: Path, capsys
+) -> None:
+    import json
+
+    from voicerender import cli
+
+    bundle = tmp_path / "empty.ssmd-bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(
+        '{"format":"ssmdconvert.book","schema_version":1}', encoding="utf-8"
+    )
+    empty = cli.main(["bundle", "variants", str(bundle)])
+    assert empty == 0
+    assert "No RenderPlan variants found" in capsys.readouterr().out
+
+    missing = tmp_path / "missing.ssmd-bundle"
+    assert cli.main(["bundle", "variants", str(missing), "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["format"] == "voicerender-bundle-variants"
+    assert payload["version"] == 1
+    assert payload["error"]
+    assert payload["exit_code"] == 2

@@ -17,6 +17,20 @@ voicerender profile create \
 voicerender profile validate narration.renderprofile.toml
 ```
 
+`profile create` writes user-owned profiles with the canonical `.renderprofile.toml`
+suffix. The CLI adds the suffix when omitted and replaces a plain `.toml` ending;
+normalization is idempotent and preserves the parent directory:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target v1.0 --voice af_heart --language en-us \
+  -o profile1
+# Writes profile1.renderprofile.toml
+```
+
+This CLI behavior does not change `save_render_profile()` or the explicit path
+semantics of `profile validate`, `inspect`, `show`, and `refresh`. The snapshot
+inside a generated RenderPlan variant remains `renderprofile.toml`.
 A profile has a canonical `profile_id`; RenderPlans carry that identity and copy
 the resolved role bindings needed to execute without reopening the profile.
 Refreshing engine metadata writes a proposal rather than overwriting user policy:

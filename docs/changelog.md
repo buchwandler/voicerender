@@ -49,6 +49,11 @@
 - Added optional Qwen3Synth support for VoiceDesign references, prepared voice profiles, and Qwen Base rendering
 - Added KittenSynth model-token capacity metadata and preflight-aware request handling
 - Added typed progress, evidence-based ETA, and workload estimates
+- Added read-only RenderPlan variant discovery for book and document bundles
+
+### Changed
+
+- Normalized profile create destinations to the canonical .renderprofile.toml suffix
 
 ### Fixed
 
