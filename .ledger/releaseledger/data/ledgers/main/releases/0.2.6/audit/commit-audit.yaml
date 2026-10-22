@@ -1,0 +1,220 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.2.6
+git_base_ref: v0.2.5
+git_base_sha: 23b84f88fdf7bd101fbd8f2b0986004483a8d63b
+git_head_ref: HEAD
+git_head_sha: ade44bcbbcc223db372f6e7821d133b1777b1048
+git_range: 23b84f88fdf7bd101fbd8f2b0986004483a8d63b..ade44bcbbcc223db372f6e7821d133b1777b1048
+commit_count: 6
+rows:
+  - sha: fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d
+    source_ref: git:fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d
+    short_sha: fdfe8ca
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_runtime.py
+      - tests/test_runtime_cli.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/runtime.py
+    stats:
+      files_changed: 9
+      insertions: 809
+      deletions: 0
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_runtime.py
+      - tests/test_runtime_cli.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/runtime.py
+    observed_behavior:
+      Added public ONNX Runtime status inspection and saved provider-policy
+      controls for future compatible sessions, with package and CLI support.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: onnx runtime policy"
+    target_entry_id: entry-0001
+    notes: Reviewed implementation, CLI behavior, documentation, and tests.
+  - sha: 9a323b21cc87657ece1aa324ccf84ca1cdb1ef34
+    source_ref: git:9a323b21cc87657ece1aa324ccf84ca1cdb1ef34
+    short_sha: 9a323b2
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0007.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0008.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - docs/renderprofile.md
+      - tests/test_cli.py
+      - tests/test_variants.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/variants.py
+    stats:
+      files_changed: 12
+      insertions: 1563
+      deletions: 7
+    inspected: true
+    inspected_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0007.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0008.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - docs/renderprofile.md
+      - tests/test_cli.py
+      - tests/test_variants.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/variants.py
+    observed_behavior:
+      Added read-only bundle variant discovery with plan validation
+      and render-state reporting, and normalized profile-create output names to the
+      canonical suffix.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: variant detection and output ending completion"
+    target_entry_id: entry-0002
+    notes:
+      Reviewed implementation, documentation, and tests; releaseledger metadata
+      changes are incidental to the public feature.
+  - sha: 5d929c9e092cd142238cc05a91b237dd00a65cd8
+    source_ref: git:5d929c9e092cd142238cc05a91b237dd00a65cd8
+    short_sha: 5d929c9
+    changed_paths:
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_qwen3synth_engine.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/qwen3synth.py
+    stats:
+      files_changed: 5
+      insertions: 141
+      deletions: 15
+    inspected: true
+    inspected_paths:
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_qwen3synth_engine.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/qwen3synth.py
+    observed_behavior:
+      Fixed voice-level option normalization so omitted gain settings
+      remain absent, and preserved Qwen3 seed options only when explicitly set.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: kokoro gain setting"
+    target_entry_id: entry-0003
+    notes: Reviewed engine changes and regression tests.
+  - sha: 4ab4750c673eadbd57ca91a42099fa87f13797cb
+    source_ref: git:4ab4750c673eadbd57ca91a42099fa87f13797cb
+    short_sha: 4ab4750
+    changed_paths:
+      - README.md
+      - tests/test_bundle_contract.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - voicerender/book_layout.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document_contract.py
+    stats:
+      files_changed: 9
+      insertions: 194
+      deletions: 16
+    inspected: true
+    inspected_paths:
+      - README.md
+      - tests/test_bundle_contract.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - voicerender/book_layout.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document_contract.py
+    observed_behavior:
+      Fixed bundle-root validation for paths and aliases that resolve
+      to canonical .ssmd-bundle directories while retaining rejection of inner paths
+      and unsafe roots.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: bundle dir detection"
+    target_entry_id: entry-0004
+    notes: Reviewed path-validation changes, CLI help, and regression tests.
+  - sha: bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f
+    source_ref: git:bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f
+    short_sha: bc7551a
+    changed_paths:
+      - voicerender/cli.py
+    stats:
+      files_changed: 1
+      insertions: 9
+      deletions: 6
+    inspected: true
+    inspected_paths:
+      - voicerender/cli.py
+    observed_behavior:
+      Made runtime status and distribution paths use stable POSIX separators
+      in human and JSON CLI output.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: cli"
+    target_entry_id: entry-0005
+    notes: Reviewed the CLI serialization change.
+  - sha: ade44bcbbcc223db372f6e7821d133b1777b1048
+    source_ref: git:ade44bcbbcc223db372f6e7821d133b1777b1048
+    short_sha: ade44bc
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - voicerender/__init__.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+    stats:
+      files_changed: 7
+      insertions: 1298
+      deletions: 28
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - voicerender/__init__.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+    observed_behavior:
+      Added state-aware batch rendering for SSMD bundle variants, selecting
+      incomplete valid variants, skipping completed ones by default, reporting invalid
+      variants, and supporting forced reruns.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: render all variants at once cmd added"
+    target_entry_id: entry-0006
+    notes:
+      Reviewed batch orchestration, CLI behavior, documentation, and comprehensive
+      tests.

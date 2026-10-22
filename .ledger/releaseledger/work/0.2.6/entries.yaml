@@ -1,0 +1,126 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.6
+git_base_ref: 23b84f88fdf7bd101fbd8f2b0986004483a8d63b
+git_base_sha: 23b84f88fdf7bd101fbd8f2b0986004483a8d63b
+git_head_ref: ade44bcbbcc223db372f6e7821d133b1777b1048
+git_head_sha: ade44bcbbcc223db372f6e7821d133b1777b1048
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added ONNX Runtime status inspection and saved provider-policy controls for future compatible sessions
+    status: accepted
+    source_refs:
+      - git:fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d
+    paths:
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_runtime.py
+      - tests/test_runtime_cli.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/runtime.py
+    sources:
+      - git:fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added read-only bundle variant discovery with render-state reporting and canonical profile-create output normalization
+    status: accepted
+    source_refs:
+      - git:9a323b21cc87657ece1aa324ccf84ca1cdb1ef34
+    paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0007.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0008.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - docs/renderprofile.md
+      - tests/test_cli.py
+      - tests/test_variants.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/variants.py
+    sources:
+      - git:9a323b21cc87657ece1aa324ccf84ca1cdb1ef34
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: Fixed voice-level option normalization and preserved Qwen3 seed options only when explicitly set
+    status: accepted
+    source_refs:
+      - git:5d929c9e092cd142238cc05a91b237dd00a65cd8
+    paths:
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_qwen3synth_engine.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/qwen3synth.py
+    sources:
+      - git:5d929c9e092cd142238cc05a91b237dd00a65cd8
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: Fixed bundle-root validation for paths that resolve to canonical .ssmd-bundle directories
+    status: accepted
+    source_refs:
+      - git:4ab4750c673eadbd57ca91a42099fa87f13797cb
+    paths:
+      - README.md
+      - tests/test_bundle_contract.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - voicerender/book_layout.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document_contract.py
+    sources:
+      - git:4ab4750c673eadbd57ca91a42099fa87f13797cb
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: Fixed runtime status and distribution paths for stable cross-platform CLI output
+    status: accepted
+    source_refs:
+      - git:bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f
+    paths:
+      - voicerender/cli.py
+    sources:
+      - git:bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added state-aware batch rendering for incomplete SSMD bundle variants with progress and forced reruns
+    status: accepted
+    source_refs:
+      - git:ade44bcbbcc223db372f6e7821d133b1777b1048
+    paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - voicerender/__init__.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+    sources:
+      - git:ade44bcbbcc223db372f6e7821d133b1777b1048
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

@@ -1,0 +1,104 @@
+rows:
+  - sha: fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_runtime.py
+      - tests/test_runtime_cli.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/errors.py
+      - voicerender/runtime.py
+    observed_behavior: Added public ONNX Runtime status inspection and saved provider-policy controls for future compatible sessions, with package and CLI support.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed implementation, CLI behavior, documentation, and tests.
+    stale: false
+  - sha: 9a323b21cc87657ece1aa324ccf84ca1cdb1ef34
+    inspected: true
+    inspected_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0007.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0008.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - docs/renderprofile.md
+      - tests/test_cli.py
+      - tests/test_variants.py
+      - voicerender/__init__.py
+      - voicerender/cli.py
+      - voicerender/variants.py
+    observed_behavior: Added read-only bundle variant discovery with plan validation and render-state reporting, and normalized profile-create output names to the canonical suffix.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed implementation, documentation, and tests; releaseledger metadata changes are incidental to the public feature.
+    stale: false
+  - sha: 5d929c9e092cd142238cc05a91b237dd00a65cd8
+    inspected: true
+    inspected_paths:
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_qwen3synth_engine.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/qwen3synth.py
+    observed_behavior: Fixed voice-level option normalization so omitted gain settings remain absent, and preserved Qwen3 seed options only when explicitly set.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed engine changes and regression tests.
+    stale: false
+  - sha: 4ab4750c673eadbd57ca91a42099fa87f13797cb
+    inspected: true
+    inspected_paths:
+      - README.md
+      - tests/test_bundle_contract.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - voicerender/book_layout.py
+      - voicerender/bundle_contract.py
+      - voicerender/cli.py
+      - voicerender/document_contract.py
+    observed_behavior: Fixed bundle-root validation for paths and aliases that resolve to canonical .ssmd-bundle directories while retaining rejection of inner paths and unsafe roots.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed path-validation changes, CLI help, and regression tests.
+    stale: false
+  - sha: bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f
+    inspected: true
+    inspected_paths:
+      - voicerender/cli.py
+    observed_behavior: Made runtime status and distribution paths use stable POSIX separators in human and JSON CLI output.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed the CLI serialization change.
+    stale: false
+  - sha: ade44bcbbcc223db372f6e7821d133b1777b1048
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - voicerender/__init__.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+    observed_behavior: Added state-aware batch rendering for SSMD bundle variants, selecting incomplete valid variants, skipping completed ones by default, reporting invalid variants, and supporting forced reruns.
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: Reviewed batch orchestration, CLI behavior, documentation, and comprehensive tests.
+    stale: false

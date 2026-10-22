@@ -1,0 +1,362 @@
+ README.md                        |  9 ++++++++
+ tests/test_bundle_contract.py    | 34 +++++++++++++++++++++++++++++++
+ tests/test_cli.py                | 35 ++++++++++++++++++++++++++++++++
+ tests/test_document_contract.py  | 44 ++++++++++++++++++++++++++++++++++++++++
+ tests/test_render_book.py        | 35 ++++++++++++++++++++++++++++++++
+ voicerender/book_layout.py       | 12 +++++++----
+ voicerender/bundle_contract.py   | 12 +++++++----
+ voicerender/cli.py               | 12 ++++++++---
+ voicerender/document_contract.py | 17 +++++++++++-----
+ 9 files changed, 194 insertions(+), 16 deletions(-)
+
+diff --git a/README.md b/README.md
+index 8eea3a5..9918ca7 100644
+--- a/README.md
++++ b/README.md
+@@ -311,6 +311,15 @@ voicerender bundle variants story.ssmd-bundle
+ voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
+ ```
+
++Bundle path arguments are resolved before their canonical root name is checked, so aliases such as `.` and `./` work when they resolve exactly to a `<name>.ssmd-bundle/` root:
++
++```bash
++cd story.ssmd-bundle
++voicerender bundle variants .
++```
++
++The path must resolve to the bundle root itself; VoiceRender does not search parent directories, and a `renderplan/` directory, source file, chapter directory, or other inner path is not a bundle root. The bundle root identifies the workspace and bundle kind. `--renderplan-root` only relocates the directory containing RenderPlan variant directories; it does not replace the bundle argument. Each variant directory is a direct child of that RenderPlan root.
++
+ `bundle variants` is read-only discovery: it validates existing book or document plans and reports their render state without compiling variants or synthesizing speech. UtterPlan remains responsible for producing RenderPlan variants.
+
+ For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
+diff --git a/tests/test_bundle_contract.py b/tests/test_bundle_contract.py
+index c46c25e..e1879fd 100644
+--- a/tests/test_bundle_contract.py
++++ b/tests/test_bundle_contract.py
+@@ -50,12 +50,46 @@ def test_loads_supported_bundle_identity(
+     )
+
+
++@pytest.mark.parametrize(
++    ("working_directory", "path"),
++    [("root", "."), ("root", "./"), ("child", "..")],
++)
++def test_bundle_identity_accepts_aliases_resolving_to_canonical_root(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    working_directory: str,
++    path: str,
++) -> None:
++    root = _bundle(tmp_path / "story.ssmd-bundle")
++    child = root / "child"
++    child.mkdir()
++    monkeypatch.chdir(root if working_directory == "root" else child)
++
++    identity = load_bundle_identity(path)
++
++    assert identity.root == root.resolve()
++
++
+ @pytest.mark.parametrize("name", ["workspace", "book.ssmd-bundle/chapters"])
+ def test_rejects_noncanonical_root_shape(tmp_path: Path, name: str) -> None:
+     with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
+         load_bundle_identity(tmp_path / name)
+
+
++def test_rejects_existing_noncanonical_directories_even_with_manifest(
++    tmp_path: Path,
++) -> None:
++    workspace = _bundle(tmp_path / "workspace")
++    bundle = _bundle(tmp_path / "story.ssmd-bundle")
++    renderplan_root = bundle / "renderplan"
++    renderplan_root.mkdir()
++
++    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
++        load_bundle_identity(workspace)
++    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
++        load_bundle_identity(renderplan_root)
++
++
+ def test_rejects_document_file_and_zip_shortcuts(tmp_path: Path) -> None:
+     root = tmp_path / "sample.ssmd-bundle"
+     root.mkdir()
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index d831a1e..4f55676 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -37,6 +37,8 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
+         capture_output=True,
+         text=True,
+     ).stdout.casefold()
++    bundle_help = " ".join(bundle_help.split())
++    variants_help = " ".join(variants_help.split())
+
+     assert "preflight" in root_help
+     assert "renderplan" in root_help
+@@ -56,6 +58,14 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
+     assert "--output-root" in variants_help
+     assert "--json" in variants_help
+
++    assert "path resolving to a canonical name.ssmd-bundle directory" in bundle_help
++    assert "path resolving to a canonical name.ssmd-bundle directory" in variants_help
++    assert "positional path must resolve to the bundle root" in variants_help
++    assert (
++        "--renderplan-root only overrides where variant directories are read from"
++        in variants_help
++    )
++
+
+ def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
+     root = Path(__file__).resolve().parents[1]
+@@ -1262,3 +1272,28 @@ def test_bundle_variants_empty_state_and_bundle_errors_are_json(
+     assert payload["version"] == 1
+     assert payload["error"]
+     assert payload["exit_code"] == 2
++
++
++def test_bundle_variants_accepts_current_directory_bundle_alias(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    capsys: pytest.CaptureFixture[str],
++) -> None:
++    from voicerender import cli
++
++    bundle = tmp_path / "story.ssmd-bundle"
++    bundle.mkdir()
++    (bundle / "manifest.json").write_text(
++        '{"format":"ssmdconvert.book","schema_version":1}', encoding="utf-8"
++    )
++    monkeypatch.chdir(bundle)
++
++    assert cli.main(["bundle", "variants", "."]) == 0
++    assert "No RenderPlan variants found" in capsys.readouterr().out
++
++    from voicerender import render_bundle
++    from voicerender.book_contract import BookRenderError
++
++    with pytest.raises(BookRenderError) as caught:
++        render_bundle(".", variant="missing")
++    assert caught.value.code == "variant.not_found"
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index 218985e..c1dab82 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -29,6 +29,50 @@ def _workspace(root: Path) -> Path:
+     return root
+
+
++@pytest.mark.parametrize(
++    ("working_directory", "path"),
++    [("root", "."), ("root", "./"), ("child", "..")],
++)
++def test_document_workspace_and_render_apis_accept_root_aliases(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    working_directory: str,
++    path: str,
++) -> None:
++    from voicerender.document import render_document
++    from voicerender.errors import DocumentRenderError
++
++    root = _workspace(tmp_path / "story.ssmd-bundle")
++    child = root / "child"
++    child.mkdir()
++    monkeypatch.chdir(root if working_directory == "root" else child)
++
++    index = load_document_workspace(path)
++    assert index.root == root.resolve()
++    for render_api in (render_document, estimate_render_document):
++        with pytest.raises(DocumentRenderError) as caught:
++            render_api(path, variant="missing")
++        assert caught.value.code == "variant.not_found"
++
++
++def test_document_workspace_rejects_renderplan_root_and_direct_symlink(
++    tmp_path: Path,
++) -> None:
++    root = _workspace(tmp_path / "story.ssmd-bundle")
++    renderplan_root = root / "renderplan"
++    renderplan_root.mkdir()
++    with pytest.raises(DocumentWorkspaceError, match="canonical .ssmd-bundle"):
++        load_document_workspace(renderplan_root)
++
++    link = tmp_path / "link.ssmd-bundle"
++    try:
++        link.symlink_to(root, target_is_directory=True)
++    except (NotImplementedError, OSError) as exc:
++        pytest.skip(f"directory symlinks are unavailable: {exc}")
++    with pytest.raises(DocumentWorkspaceError, match="root must not be a symlink"):
++        load_document_workspace(link)
++
++
+ def test_load_document_bundle_root_and_rejects_file_shortcut(
+     tmp_path: Path,
+ ) -> None:
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index e02ecb7..c5c726d 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -1215,3 +1215,38 @@ def test_estimate_render_book_is_workload_only_and_does_not_create_outputs(
+         if path.is_file()
+     }
+     assert after_files == before_files
++
++
++def test_book_workspace_and_public_apis_accept_root_aliases(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from voicerender import estimate_render_book
++    from voicerender.book_layout import resolve_workspace
++
++    workspace, _ = _book(tmp_path)
++    child = workspace / "child"
++    child.mkdir()
++    for working_directory, path in (
++        (workspace, "."),
++        (workspace, "./"),
++        (child, ".."),
++    ):
++        monkeypatch.chdir(working_directory)
++        assert resolve_workspace(path) == workspace.resolve()
++        for render_api in (render_book, estimate_render_book):
++            with pytest.raises(
++                BookRenderError, match="variant directory does not exist"
++            ):
++                render_api(path, variant="missing")
++
++    monkeypatch.chdir(workspace / "renderplan")
++    with pytest.raises(BookRenderError, match="canonical .ssmd-bundle"):
++        resolve_workspace(".")
++
++    link = tmp_path / "link.ssmd-bundle"
++    try:
++        link.symlink_to(workspace, target_is_directory=True)
++    except (NotImplementedError, OSError) as exc:
++        pytest.skip(f"directory symlinks are unavailable: {exc}")
++    with pytest.raises(BookRenderError, match="root must not be a symlink"):
++        resolve_workspace(link)
+diff --git a/voicerender/book_layout.py b/voicerender/book_layout.py
+index 7bc9a10..6b99285 100644
+--- a/voicerender/book_layout.py
++++ b/voicerender/book_layout.py
+@@ -10,16 +10,20 @@ from .book_contract import BookRenderError
+
+ def resolve_workspace(workspace: str | Path) -> Path:
+     path = Path(workspace).expanduser()
+-    if not path.name.endswith(".ssmd-bundle"):
+-        raise BookRenderError(
+-            "book bundle input must be the canonical .ssmd-bundle directory root"
+-        )
+     if path.is_symlink():
+         raise BookRenderError("book bundle root must not be a symlink")
+     try:
+         resolved = path.resolve(strict=True)
+     except (OSError, RuntimeError) as exc:
++        if not path.name.endswith(".ssmd-bundle"):
++            raise BookRenderError(
++                "book bundle input must resolve to the canonical .ssmd-bundle directory root"
++            ) from exc
+         raise BookRenderError(f"cannot resolve book bundle {path}: {exc}") from exc
++    if not resolved.name.endswith(".ssmd-bundle"):
++        raise BookRenderError(
++            "book bundle input must resolve to the canonical .ssmd-bundle directory root"
++        )
+     if not resolved.is_dir():
+         raise BookRenderError(f"book bundle is not a directory: {resolved}")
+     return resolved
+diff --git a/voicerender/bundle_contract.py b/voicerender/bundle_contract.py
+index d1fb773..ebb22cd 100644
+--- a/voicerender/bundle_contract.py
++++ b/voicerender/bundle_contract.py
+@@ -36,19 +36,23 @@ class BundleIdentity:
+ def load_bundle_identity(path: str | Path) -> BundleIdentity:
+     """Read only the bounded, authoritative identity fields of a bundle manifest."""
+     input_path = Path(path).expanduser()
+-    if not input_path.name.endswith(".ssmd-bundle"):
+-        raise BundleContractError(
+-            "bundle input must be the canonical .ssmd-bundle directory root"
+-        )
+     if input_path.is_symlink():
+         raise BundleContractError("SSMD bundle root must not be a symlink")
+
+     try:
+         root = input_path.resolve(strict=True)
+     except (OSError, RuntimeError) as exc:
++        if not input_path.name.endswith(".ssmd-bundle"):
++            raise BundleContractError(
++                "bundle input must resolve to the canonical .ssmd-bundle directory root"
++            ) from exc
+         raise BundleContractError(
+             f"cannot resolve SSMD bundle root {input_path}: {exc}"
+         ) from exc
++    if not root.name.endswith(".ssmd-bundle"):
++        raise BundleContractError(
++            "bundle input must resolve to the canonical .ssmd-bundle directory root"
++        )
+     if not root.is_dir():
+         raise BundleContractError(f"SSMD bundle root is not a directory: {root}")
+
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index fb641b3..0be7e22 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -486,7 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
+         "render", help="Render a book or document SSMD bundle"
+     )
+     bundle_render.add_argument(
+-        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
++        "bundle",
++        type=Path,
++        help="path resolving to a canonical NAME.ssmd-bundle directory",
+     )
+     bundle_render.add_argument(
+         "--variant", required=True, help="exact RenderPlan variant directory name"
+@@ -516,11 +518,15 @@ def build_parser() -> argparse.ArgumentParser:
+         "variants",
+         help="Discover existing RenderPlan variants and their render state",
+         description=(
+-            "List direct RenderPlan variant directories without rendering or modifying the bundle."
++            "List direct RenderPlan variant directories for an SSMD bundle. "
++            "The positional path must resolve to the bundle root; "
++            "--renderplan-root only overrides where variant directories are read from."
+         ),
+     )
+     bundle_variants.add_argument(
+-        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
++        "bundle",
++        type=Path,
++        help="path resolving to a canonical NAME.ssmd-bundle directory",
+     )
+     bundle_variants.add_argument("--renderplan-root", type=Path)
+     bundle_variants.add_argument("--output-root", type=Path)
+diff --git a/voicerender/document_contract.py b/voicerender/document_contract.py
+index c08363f..eb6d051 100644
+--- a/voicerender/document_contract.py
++++ b/voicerender/document_contract.py
+@@ -29,14 +29,21 @@ class DocumentWorkspaceIndex:
+ def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
+     """Validate document-specific identity fields within a canonical bundle root."""
+     input_path = Path(value).expanduser()
+-    if not input_path.name.endswith(".ssmd-bundle"):
+-        raise DocumentWorkspaceError(
+-            "document bundle input must be the canonical .ssmd-bundle directory root"
+-        )
+     if input_path.is_symlink():
+         raise DocumentWorkspaceError("document bundle root must not be a symlink")
+     try:
+-        root = input_path.resolve(strict=True)
++        try:
++            root = input_path.resolve(strict=True)
++        except (OSError, RuntimeError) as exc:
++            if not input_path.name.endswith(".ssmd-bundle"):
++                raise DocumentWorkspaceError(
++                    "document bundle input must resolve to the canonical .ssmd-bundle directory root"
++                ) from exc
++            raise
++        if not root.name.endswith(".ssmd-bundle"):
++            raise DocumentWorkspaceError(
++                "document bundle input must resolve to the canonical .ssmd-bundle directory root"
++            )
+         if not root.is_dir():
+             raise DocumentWorkspaceError(
+                 "document bundle input is not a directory root"

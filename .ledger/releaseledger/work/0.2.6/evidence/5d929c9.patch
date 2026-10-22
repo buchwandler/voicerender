@@ -1,0 +1,254 @@
+ tests/test_cli.py                 | 95 +++++++++++++++++++++++++++++++++++++++
+ tests/test_kokoro_reference.py    | 31 ++++++++-----
+ tests/test_qwen3synth_engine.py   | 13 ++++++
+ voicerender/engines/kokoro.py     | 12 +++--
+ voicerender/engines/qwen3synth.py |  5 ++-
+ 5 files changed, 141 insertions(+), 15 deletions(-)
+
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 76ab213..d831a1e 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -1027,6 +1027,101 @@ def test_cli_profile_create_normalizes_output_path(
+         assert str(destination) in stdout
+
+
++@pytest.mark.parametrize(
++    "gain",
++    [None, 0, 1.5, -1.5],
++    ids=["unset", "zero", "positive", "negative"],
++)
++def test_cli_kokoro_profile_create_round_trips_voice_level_gain(
++    monkeypatch, tmp_path: Path, capsys, gain: float | None
++) -> None:
++    import json
++    from types import SimpleNamespace
++
++    import tomlkit
++
++    from voicerender import cli, models
++    from voicerender.engines.api_probe import EngineApiProbe
++    from voicerender.engines.registry import get_adapter
++    from voicerender.renderprofile import load_render_profile
++
++    adapter = get_adapter("kokoro")
++    probe = EngineApiProbe(
++        engine="kokoro",
++        package="pykokoro",
++        compatible=True,
++        status="ready",
++        distribution_version="0.10.5",
++        expected_api_version=1,
++        api_version=1,
++        contract_source="explicit",
++    )
++    monkeypatch.setattr(adapter, "probe_api", lambda: probe)
++    model = SimpleNamespace(
++        id="v1.0",
++        languages=("en-us",),
++        voices=("am_michael",),
++        qualities=("fp32",),
++        metadata={"frontend": "kokoro"},
++        sample_rate=24000,
++        max_tokens=512,
++        source="test",
++        distribution_id="v1.0-test",
++    )
++    monkeypatch.setattr(models, "get_model_info", lambda *_args, **_kwargs: (model, ()))
++    monkeypatch.chdir(tmp_path)
++
++    args = [
++        "profile",
++        "create",
++        "--engine",
++        "kokoro",
++        "--target",
++        "v1.0",
++        "--voice",
++        "am_michael",
++        "--language",
++        "en-us",
++        "-o",
++        "profile1",
++    ]
++    if gain is not None:
++        args.extend(
++            [
++                "--option",
++                f"voice_level={json.dumps({'mode': 'off', 'gain_db': gain})}",
++            ]
++        )
++
++    assert cli.main(args) == 0
++    output = tmp_path / "profile1.renderprofile.toml"
++    assert output.is_file()
++    assert "profile1.renderprofile.toml" in capsys.readouterr().out
++    document = tomlkit.parse(output.read_text(encoding="utf-8"))
++    binding = document["roles"]["narrator"]["binding"]
++    assert binding["renderer"] == "kokoro"
++    assert binding["target_id"] == "v1.0"
++    assert binding["voice"] == "am_michael"
++    assert binding["options"]["voice_level"]["mode"] == "off"
++    if gain is None:
++        assert "gain_db" not in binding["options"]["voice_level"]
++    else:
++        assert binding["options"]["voice_level"]["gain_db"] == float(gain)
++
++    profile = load_render_profile(output)
++    role = profile.roles["narrator"]
++    assert role.language == "en-us"
++    assert role.binding["renderer"] == "kokoro"
++    assert role.binding["target_id"] == "v1.0"
++    assert role.binding["voice"] == "am_michael"
++    loaded_voice_level = role.binding["options"]["voice_level"]
++    assert loaded_voice_level["mode"] == "off"
++    if gain is None:
++        assert "gain_db" not in loaded_voice_level
++    else:
++        assert loaded_voice_level["gain_db"] == float(gain)
++
++
+ def test_profile_output_normalizer_is_idempotent_and_case_insensitive() -> None:
+     from voicerender.cli import normalize_renderprofile_output_path
+
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 35fa071..b956d67 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -596,16 +596,26 @@ def test_short_sentence_options_reject_invalid_values(value: Any) -> None:
+         _normalize_short_sentence(value)
+
+
+-def test_voice_level_options_normalize_gain_and_preserve_shorthand() -> None:
+-    assert _normalize_voice_level("off") == {"mode": "off", "gain_db": None}
+-    assert _normalize_voice_level("calibrated") == {
+-        "mode": "calibrated",
+-        "gain_db": None,
+-    }
+-    assert _normalize_voice_level({"mode": "off", "gain_db": 1.5}) == {
+-        "mode": "off",
+-        "gain_db": 1.5,
+-    }
++@pytest.mark.parametrize(
++    ("value", "expected"),
++    [
++        (None, {"mode": "off"}),
++        ("off", {"mode": "off"}),
++        ("calibrated", {"mode": "calibrated"}),
++        ({"mode": "off"}, {"mode": "off"}),
++        ({"mode": "off", "gain_db": None}, {"mode": "off"}),
++        ({"mode": "off", "gain_db": 0}, {"mode": "off", "gain_db": 0.0}),
++        (
++            {"mode": "calibrated", "gain_db": 1.5},
++            {"mode": "calibrated", "gain_db": 1.5},
++        ),
++        ({"mode": "off", "gain_db": -1.5}, {"mode": "off", "gain_db": -1.5}),
++    ],
++)
++def test_voice_level_options_normalize_gain_and_preserve_shorthand(
++    value: Any, expected: dict[str, Any]
++) -> None:
++    assert _normalize_voice_level(value) == expected
+
+
+ @pytest.mark.parametrize(
+@@ -616,6 +626,7 @@ def test_voice_level_options_normalize_gain_and_preserve_shorthand() -> None:
+         {"gain_db": True},
+         {"gain_db": float("nan")},
+         {"gain_db": float("inf")},
++        {"gain_db": float("-inf")},
+         {"unknown": 1},
+     ],
+ )
+diff --git a/tests/test_qwen3synth_engine.py b/tests/test_qwen3synth_engine.py
+index cf7face..dc32cbe 100644
+--- a/tests/test_qwen3synth_engine.py
++++ b/tests/test_qwen3synth_engine.py
+@@ -311,6 +311,18 @@ def test_resolve_selects_base_bundle_and_preserves_revision(
+     assert selection.options["quality"] == "int4"
+     assert selection.options["provider"] == "cpu"
+
++    assert "seed" not in selection.options
++    none_seed, none_diagnostics = Qwen3SynthEngineAdapter().resolve(
++        EngineRequest(
++            engine="qwen3",
++            target_id="base-0.6b",
++            language="en-US",
++            options={**selection.options, "seed": None},
++        )
++    )
++    assert none_diagnostics == ()
++    assert "seed" not in none_seed.options
++
+
+ def test_missing_optional_package_is_reported_as_missing(
+     monkeypatch: pytest.MonkeyPatch,
+@@ -414,6 +426,7 @@ def test_session_measures_without_synthesis_and_reuses_reference_voice(
+     )
+     assert diagnostics == ()
+     identity = adapter.canonical_synthesis_identity(selection)
++    assert selection.options["seed"] == 11
+     assert identity["voice"]["sha256"] == source["sha256"]
+     assert (
+         identity["voice"]["reference_text_sha256"]
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index 82aeab1..18a9a3b 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -462,16 +462,18 @@ def _normalize_short_sentence(value: Any) -> dict[str, Any] | None:
+ def _normalize_voice_level(value: Any) -> dict[str, Any]:
+     config: dict[str, Any]
+     if value is None:
+-        config = {"mode": "off", "gain_db": None}
++        config = {"mode": "off"}
+     elif isinstance(value, str):
+-        config = {"mode": value, "gain_db": None}
++        config = {"mode": value}
+     elif isinstance(value, Mapping):
+         unknown = set(value) - _VOICE_LEVEL_FIELDS
+         if unknown:
+             raise _invalid_kokoro_option(
+                 f"Unknown voice_level option(s): {', '.join(sorted(map(str, unknown)))}"
+             )
+-        config = {"mode": value.get("mode", "off"), "gain_db": value.get("gain_db")}
++        config = {"mode": value.get("mode", "off")}
++        if "gain_db" in value:
++            config["gain_db"] = value["gain_db"]
+     else:
+         raise _invalid_kokoro_option(
+             "voice_level must be 'off', 'calibrated', a table, or None"
+@@ -480,7 +482,7 @@ def _normalize_voice_level(value: Any) -> dict[str, Any]:
+     mode = config["mode"]
+     if not isinstance(mode, str) or mode not in {"off", "calibrated"}:
+         raise _invalid_kokoro_option("voice_level.mode must be 'off' or 'calibrated'")
+-    gain = config["gain_db"]
++    gain = config.get("gain_db")
+     if gain is not None:
+         if isinstance(gain, bool) or not isinstance(gain, (int, float)):
+             raise _invalid_kokoro_option(
+@@ -495,6 +497,8 @@ def _normalize_voice_level(value: Any) -> dict[str, Any]:
+                 "voice_level.gain_db must be a finite number or None"
+             )
+         config["gain_db"] = normalized_gain
++    else:
++        config.pop("gain_db", None)
+     return config
+
+
+diff --git a/voicerender/engines/qwen3synth.py b/voicerender/engines/qwen3synth.py
+index 00342bd..6a1bc67 100644
+--- a/voicerender/engines/qwen3synth.py
++++ b/voicerender/engines/qwen3synth.py
+@@ -759,8 +759,11 @@ class Qwen3SynthEngineAdapter:
+             "top_k": generation.top_k,
+             "repetition_penalty": generation.repetition_penalty,
+             "max_new_tokens": generation.max_new_tokens,
+-            "seed": generation.seed,
+         }
++        if generation.seed is None:
++            selected_options.pop("seed", None)
++        else:
++            selected_options["seed"] = generation.seed
+         metadata = {
+             "model_type": target.metadata.get("model_type"),
+             "model_id": target.metadata.get("model_id"),

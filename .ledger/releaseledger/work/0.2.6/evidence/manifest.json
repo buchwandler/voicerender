@@ -1,0 +1,120 @@
+{
+  "candidate_count": 6,
+  "candidates": [
+    {
+      "additions": 809,
+      "deletions": 0,
+      "patch_file": "fdfe8ca.patch",
+      "patch_sha256": "7d1c37a9539df825405784d2ed7d41e1cd72277edb156e52a53ebaf4e802a840",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "pyproject.toml",
+        "tests/test_runtime.py",
+        "tests/test_runtime_cli.py",
+        "voicerender/__init__.py",
+        "voicerender/cli.py",
+        "voicerender/errors.py",
+        "voicerender/runtime.py"
+      ],
+      "sha": "fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d",
+      "short_sha": "fdfe8ca",
+      "source_ref": "git:fdfe8ca0754a9cb3b3bfc9f792d6c2cf6e44af7d"
+    },
+    {
+      "additions": 1563,
+      "deletions": 7,
+      "patch_file": "9a323b2.patch",
+      "patch_sha256": "69ce5ed385b570943bfc8957b5114f672353d1564c95ae9ea5f5499b9d20107f",
+      "paths": [
+        ".ledger/releaseledger/data/ledgers/main/events/events.jsonl",
+        ".ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0007.md",
+        ".ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0008.md",
+        ".ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md",
+        "README.md",
+        "docs/changelog.md",
+        "docs/renderprofile.md",
+        "tests/test_cli.py",
+        "tests/test_variants.py",
+        "voicerender/__init__.py",
+        "voicerender/cli.py",
+        "voicerender/variants.py"
+      ],
+      "sha": "9a323b21cc87657ece1aa324ccf84ca1cdb1ef34",
+      "short_sha": "9a323b2",
+      "source_ref": "git:9a323b21cc87657ece1aa324ccf84ca1cdb1ef34"
+    },
+    {
+      "additions": 141,
+      "deletions": 15,
+      "patch_file": "5d929c9.patch",
+      "patch_sha256": "5ce2bef02ea3db39411a0c685da4b2280817b618459e60c0fcb5671428c0eaab",
+      "paths": [
+        "tests/test_cli.py",
+        "tests/test_kokoro_reference.py",
+        "tests/test_qwen3synth_engine.py",
+        "voicerender/engines/kokoro.py",
+        "voicerender/engines/qwen3synth.py"
+      ],
+      "sha": "5d929c9e092cd142238cc05a91b237dd00a65cd8",
+      "short_sha": "5d929c9",
+      "source_ref": "git:5d929c9e092cd142238cc05a91b237dd00a65cd8"
+    },
+    {
+      "additions": 194,
+      "deletions": 16,
+      "patch_file": "4ab4750.patch",
+      "patch_sha256": "39a4eac08d8bf4e6859dfe4f3d6d65f8cd095791801bd96f96836e1ec68259cb",
+      "paths": [
+        "README.md",
+        "tests/test_bundle_contract.py",
+        "tests/test_cli.py",
+        "tests/test_document_contract.py",
+        "tests/test_render_book.py",
+        "voicerender/book_layout.py",
+        "voicerender/bundle_contract.py",
+        "voicerender/cli.py",
+        "voicerender/document_contract.py"
+      ],
+      "sha": "4ab4750c673eadbd57ca91a42099fa87f13797cb",
+      "short_sha": "4ab4750",
+      "source_ref": "git:4ab4750c673eadbd57ca91a42099fa87f13797cb"
+    },
+    {
+      "additions": 9,
+      "deletions": 6,
+      "patch_file": "bc7551a.patch",
+      "patch_sha256": "75bb1c0f76f570e1328d352bb0699c1279c3e29de4ccd0d91bf7ff6946f3b7a2",
+      "paths": ["voicerender/cli.py"],
+      "sha": "bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f",
+      "short_sha": "bc7551a",
+      "source_ref": "git:bc7551a9d81cc66dd8d740fbf7f1541a4f50d02f"
+    },
+    {
+      "additions": 1298,
+      "deletions": 28,
+      "patch_file": "ade44bc.patch",
+      "patch_sha256": "eeb2466e655f82a214f37b79f77a38839bcefa243c0e30551745e32e6f9ee6a7",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "tests/test_bundle_batch_render.py",
+        "tests/test_bundle_render.py",
+        "voicerender/__init__.py",
+        "voicerender/bundle_batch.py",
+        "voicerender/cli.py"
+      ],
+      "sha": "ade44bcbbcc223db372f6e7821d133b1777b1048",
+      "short_sha": "ade44bc",
+      "source_ref": "git:ade44bcbbcc223db372f6e7821d133b1777b1048"
+    }
+  ],
+  "git_base_ref": "23b84f88fdf7bd101fbd8f2b0986004483a8d63b",
+  "git_base_sha": "23b84f88fdf7bd101fbd8f2b0986004483a8d63b",
+  "git_head_ref": "ade44bcbbcc223db372f6e7821d133b1777b1048",
+  "git_head_sha": "ade44bcbbcc223db372f6e7821d133b1777b1048",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.2.6",
+  "schema_version": 1
+}

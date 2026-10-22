@@ -1,0 +1,969 @@
+ README.md                 |  23 ++++
+ docs/index.md             |   4 +
+ pyproject.toml            |   1 +
+ tests/test_runtime.py     | 294 ++++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_runtime_cli.py | 159 +++++++++++++++++++++++++
+ voicerender/__init__.py   |  14 +++
+ voicerender/cli.py        | 157 +++++++++++++++++++++++++
+ voicerender/errors.py     |  18 +++
+ voicerender/runtime.py    | 139 ++++++++++++++++++++++
+ 9 files changed, 809 insertions(+)
+
+diff --git a/README.md b/README.md
+index ed8b92f..c278f19 100644
+--- a/README.md
++++ b/README.md
+@@ -145,6 +145,29 @@ voicerender profile validate printer-cast.renderprofile.toml
+
+ The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+
++## ONNX Runtime provider policy
++
++VoiceRender exposes ONNXVoice's default ONNX Runtime provider policy without managing installed runtime distributions. An ONNX Runtime distribution (for example, `onnxruntime` or `onnxruntime-gpu`) is a Python package; an execution provider (for example, `CPUExecutionProvider` or `CUDAExecutionProvider`) is an execution backend reported by that runtime build. `voicerender runtime status` inspects the imported distribution, build, available providers, and configured/resolved policy. Resolved providers describe policy resolution, not the providers active in an existing session or proof that a session successfully used them.
++
++The saved policy is a global default for compatible ONNXVoice-backed or provider-aware sessions. It does not imply that every VoiceRender engine uses ONNX Runtime. An explicit engine `providers` option remains an override and is passed through unchanged. Changing or resetting policy affects future sessions only; already initialized sessions are unchanged. `runtime use` does not install packages, switch distributions, or alter the Python environment.
++
++ONNXVoice resolves defaults in this order: explicit request, `ONNXVOICE_PROVIDERS`, `ONNXVOICE_PROVIDER`, saved ONNXVoice configuration, then the CPU default. Environment variables therefore override a saved preference. `voicerender runtime reset` removes only the saved preference; environment overrides remain in force.
++
++```bash
++# Inspect installed runtime and provider policy.
++voicerender runtime status
++voicerender runtime list --json
++
++# Set a saved default for future compatible sessions.
++voicerender runtime use cpu
++voicerender runtime use cuda
++voicerender runtime use auto
++voicerender runtime use cuda,cpu  # ordered provider preference
++
++# Remove only the saved ONNXVoice preference.
++voicerender runtime reset
++```
++
+ ## Reference voices
+
+ Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
+diff --git a/docs/index.md b/docs/index.md
+index 63ac3a9..5908ab4 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -13,6 +13,10 @@ changelog
+
+ VoiceRender owns engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice cloning, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and profile preparation do not synthesize audio. See [RenderProfile lifecycle](renderprofile.md) for role APIs and write safety.
+
++## ONNX Runtime provider policy
++
++See the [ONNX Runtime provider policy guide in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#onnx-runtime-provider-policy) for `runtime status`, `list`, `use`, and `reset`, including provider precedence and CPU/CUDA/auto examples. The policy is an ONNXVoice-managed default for compatible future sessions; it does not install or select runtime distributions, imply that every engine is ONNX-backed, or override explicit engine provider options. Environment overrides take precedence over the saved preference, and reset clears only that saved preference.
++
+ ## Workflow
+
+ 1. Create a complete-cast RenderProfile with per-role engine bindings.
+diff --git a/pyproject.toml b/pyproject.toml
+index 1eb596f..ed9dc64 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,6 +18,7 @@ dependencies = [
+   "tomli>=2; python_version < '3.11'",
+   "renderplan>=0.1.2,<0.2",
+   "voicefolio>=0.1.1,<0.2",
++  "onnxvoice>=0.2.12,<0.3",
+ ]
+
+ [project.optional-dependencies]
+diff --git a/tests/test_runtime.py b/tests/test_runtime.py
+new file mode 100644
+index 0000000..660b6a4
+--- /dev/null
++++ b/tests/test_runtime.py
+@@ -0,0 +1,294 @@
++from __future__ import annotations
++
++import dataclasses
++import subprocess
++import sys
++from pathlib import Path
++from textwrap import dedent
++from types import SimpleNamespace
++from typing import Any
++
++import pytest
++
++import voicerender
++from voicerender import runtime
++from voicerender.errors import RuntimeControlError
++
++
++def _status(**changes: Any) -> SimpleNamespace:
++    values: dict[str, Any] = {
++        "importable": True,
++        "module_version": "1.20.0",
++        "module_path": Path("/venv/lib/python/site-packages/onnxruntime/__init__.py"),
++        "build_device": "CUDA",
++        "build_info": "test build",
++        "distributions": (
++            SimpleNamespace(
++                name="onnxruntime-gpu",
++                version="1.20.0",
++                location=Path("/venv/lib/python/site-packages"),
++                owns_import=True,
++            ),
++        ),
++        "imported_distribution": "onnxruntime-gpu",
++        "distribution_state": "resolved",
++        "available_providers": ("CUDAExecutionProvider", "CPUExecutionProvider"),
++        "configured_providers": ("cuda", "cpu"),
++        "provider_source": "user_config",
++        "resolved_providers": ("CUDAExecutionProvider", "CPUExecutionProvider"),
++        "import_error": None,
++        "resolution_error": None,
++    }
++    values.update(changes)
++    return SimpleNamespace(**values)
++
++
++def test_runtime_status_copies_every_field_to_voicerender_models(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    source = _status()
++    monkeypatch.setattr(
++        runtime,
++        "_onnxvoice",
++        lambda: SimpleNamespace(runtime_status=lambda: source),
++    )
++
++    result = voicerender.onnx_runtime_status()
++
++    assert type(result) is voicerender.OnnxRuntimeStatus
++    assert dataclasses.asdict(result) == {
++        "importable": True,
++        "module_version": "1.20.0",
++        "module_path": Path("/venv/lib/python/site-packages/onnxruntime/__init__.py"),
++        "build_device": "CUDA",
++        "build_info": "test build",
++        "distributions": (
++            {
++                "name": "onnxruntime-gpu",
++                "version": "1.20.0",
++                "location": Path("/venv/lib/python/site-packages"),
++                "owns_import": True,
++            },
++        ),
++        "imported_distribution": "onnxruntime-gpu",
++        "distribution_state": "resolved",
++        "available_providers": ("CUDAExecutionProvider", "CPUExecutionProvider"),
++        "configured_providers": ("cuda", "cpu"),
++        "provider_source": "user_config",
++        "resolved_providers": ("CUDAExecutionProvider", "CPUExecutionProvider"),
++        "import_error": None,
++        "resolution_error": None,
++    }
++    assert type(result.distributions[0]) is voicerender.RuntimeDistribution
++    with pytest.raises(dataclasses.FrozenInstanceError):
++        result.provider_source = "explicit"  # type: ignore[assignment]
++
++
++@pytest.mark.parametrize(
++    ("distribution_state", "importable", "imported_distribution", "resolution_error"),
++    [
++        ("ambiguous", True, None, None),
++        ("vendor", True, None, None),
++        ("not_installed", False, None, None),
++        ("import_failed", False, None, "ImportError: failed to import"),
++    ],
++)
++def test_runtime_status_preserves_distribution_and_error_states(
++    monkeypatch: pytest.MonkeyPatch,
++    distribution_state: str,
++    importable: bool,
++    imported_distribution: str | None,
++    resolution_error: str | None,
++) -> None:
++    source = _status(
++        distribution_state=distribution_state,
++        importable=importable,
++        imported_distribution=imported_distribution,
++        resolution_error=resolution_error,
++        import_error=resolution_error
++        if distribution_state == "import_failed"
++        else None,
++        distributions=(
++            SimpleNamespace(
++                name="ort-a",
++                version=None,
++                location=None,
++                owns_import=None,
++            ),
++            SimpleNamespace(
++                name="ort-b",
++                version="1.0",
++                location=Path("/vendor"),
++                owns_import=True,
++            ),
++        ),
++    )
++    monkeypatch.setattr(
++        runtime,
++        "_onnxvoice",
++        lambda: SimpleNamespace(runtime_status=lambda: source),
++    )
++
++    result = runtime.onnx_runtime_status()
++
++    assert result.distribution_state == distribution_state
++    assert result.importable is importable
++    assert result.imported_distribution == imported_distribution
++    assert result.resolution_error == resolution_error
++    assert result.distributions == (
++        voicerender.RuntimeDistribution("ort-a", None, None, None),
++        voicerender.RuntimeDistribution("ort-b", "1.0", Path("/vendor"), True),
++    )
++
++
++@pytest.mark.parametrize("providers", ["cpu", "cuda", "auto", "cuda,cpu"])
++def test_set_providers_passes_request_unchanged(
++    monkeypatch: pytest.MonkeyPatch, providers: str
++) -> None:
++    calls: list[object] = []
++    monkeypatch.setattr(
++        runtime,
++        "_onnxvoice",
++        lambda: SimpleNamespace(
++            set_default_providers=lambda value: calls.append(value)
++        ),
++    )
++
++    assert voicerender.set_onnx_runtime_providers(providers) is None
++    assert calls == [providers]
++
++
++def test_set_providers_preserves_ordered_sequence_without_resolution(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    providers = ["cuda", "cpu"]
++    calls: list[object] = []
++    monkeypatch.setattr(
++        runtime,
++        "_onnxvoice",
++        lambda: SimpleNamespace(
++            set_default_providers=lambda value: calls.append(value)
++        ),
++    )
++
++    voicerender.set_onnx_runtime_providers(providers)
++
++    assert calls[0] is providers
++
++
++def test_clear_providers_delegates_to_onnxvoice(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    calls: list[str] = []
++    monkeypatch.setattr(
++        runtime,
++        "_onnxvoice",
++        lambda: SimpleNamespace(clear_default_providers=lambda: calls.append("clear")),
++    )
++
++    voicerender.clear_onnx_runtime_providers()
++
++    assert calls == ["clear"]
++
++
++def test_runtime_errors_are_stable_and_keep_provider_validation_details(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    def reject(_providers: object) -> None:
++        raise ValueError("CUDAExecutionProvider is unavailable")
++
++    monkeypatch.setattr(
++        runtime,
++        "_onnxvoice",
++        lambda: SimpleNamespace(set_default_providers=reject),
++    )
++
++    with pytest.raises(RuntimeControlError) as caught:
++        voicerender.set_onnx_runtime_providers("cuda")
++
++    assert caught.value.code == "runtime.control_failed"
++    assert caught.value.details == {
++        "operation": "set_default_providers",
++        "native_error_type": "ValueError",
++        "provider_validation_message": "CUDAExecutionProvider is unavailable",
++    }
++    assert "CUDAExecutionProvider is unavailable" in str(caught.value)
++    assert caught.value.__cause__ is None
++
++
++def test_missing_onnxvoice_is_reported_as_stable_error(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    def missing() -> Any:
++        raise ModuleNotFoundError("onnxvoice")
++
++    monkeypatch.setattr(runtime, "_onnxvoice", missing)
++
++    with pytest.raises(RuntimeControlError) as caught:
++        voicerender.onnx_runtime_status()
++
++    assert caught.value.code == "runtime.onnxvoice_unavailable"
++    assert caught.value.details["operation"] == "runtime_status"
++    assert "install a compatible onnxvoice" in str(caught.value)
++
++
++def test_missing_onnxvoice_api_is_reported_as_incompatible(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setattr(runtime, "_onnxvoice", lambda: SimpleNamespace())
++
++    with pytest.raises(RuntimeControlError) as caught:
++        voicerender.clear_onnx_runtime_providers()
++
++    assert caught.value.code == "runtime.onnxvoice_incompatible"
++    assert caught.value.details["native_error_type"] == "AttributeError"
++
++
++def test_importing_voicerender_does_not_import_onnxvoice_or_onnxruntime() -> None:
++    script = dedent(
++        """
++        import importlib.abc
++        import sys
++
++        class RejectOnnxRuntime(importlib.abc.MetaPathFinder):
++            def find_spec(self, fullname, path=None, target=None):
++                if fullname.split(".", 1)[0] == "onnxruntime":
++                    raise ModuleNotFoundError(fullname)
++                return None
++
++        sys.meta_path.insert(0, RejectOnnxRuntime())
++        import voicerender
++
++        assert "onnxvoice" not in sys.modules
++        assert "onnxruntime" not in sys.modules
++        """
++    )
++    result = subprocess.run(
++        [
++            sys.executable,
++            "-c",
++            script,
++        ],
++        capture_output=True,
++        check=False,
++        text=True,
++    )
++
++    assert result.returncode == 0, result.stderr
++
++
++def test_project_requires_lightweight_onnxvoice_without_ort_distribution() -> None:
++    try:
++        import tomllib
++    except ModuleNotFoundError:  # Python 3.10
++        import tomli as tomllib  # type: ignore[no-redef]
++
++    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
++    dependencies = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"][
++        "dependencies"
++    ]
++
++    assert "onnxvoice>=0.2.12,<0.3" in dependencies
++    assert not any(
++        "onnxruntime" in dependency.casefold() for dependency in dependencies
++    )
+diff --git a/tests/test_runtime_cli.py b/tests/test_runtime_cli.py
+new file mode 100644
+index 0000000..18ea87e
+--- /dev/null
++++ b/tests/test_runtime_cli.py
+@@ -0,0 +1,159 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from voicerender import cli
++from voicerender.errors import RuntimeControlError
++from voicerender.runtime import OnnxRuntimeStatus, RuntimeDistribution
++
++
++def _status() -> OnnxRuntimeStatus:
++    return OnnxRuntimeStatus(
++        importable=True,
++        module_version="1.20.0",
++        module_path=Path("/opt/ort/__init__.py"),
++        build_device="CUDA",
++        build_info="test build",
++        distributions=(
++            RuntimeDistribution(
++                name="onnxruntime-gpu",
++                version="1.20.0",
++                location=Path("/opt/ort"),
++                owns_import=True,
++            ),
++        ),
++        imported_distribution="onnxruntime-gpu",
++        distribution_state="resolved",
++        available_providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
++        configured_providers=("cuda", "cpu"),
++        provider_source="user_config",
++        resolved_providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
++        import_error=None,
++        resolution_error=None,
++    )
++
++
++def test_runtime_status_json_serializes_paths_and_provider_tuples(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    monkeypatch.setattr(cli, "onnx_runtime_status", _status)
++
++    assert cli.main(["runtime", "status", "--json"]) == 0
++
++    payload = json.loads(capsys.readouterr().out)
++    assert payload["module_path"] == "/opt/ort/__init__.py"
++    assert payload["distributions"][0]["location"] == "/opt/ort"
++    assert payload["available_providers"] == [
++        "CUDAExecutionProvider",
++        "CPUExecutionProvider",
++    ]
++    assert payload["configured_providers"] == ["cuda", "cpu"]
++    assert payload["resolved_providers"] == [
++        "CUDAExecutionProvider",
++        "CPUExecutionProvider",
++    ]
++
++
++def test_runtime_status_human_output_uses_non_active_labels(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    monkeypatch.setattr(cli, "onnx_runtime_status", _status)
++
++    assert cli.main(["runtime", "status"]) == 0
++
++    output = capsys.readouterr().out
++    assert "Imported distribution: onnxruntime-gpu" in output
++    assert "Distribution state: resolved" in output
++    assert "Available providers: CUDAExecutionProvider, CPUExecutionProvider" in output
++    assert "Configured providers: cuda, cpu" in output
++    assert "Resolved providers: CUDAExecutionProvider, CPUExecutionProvider" in output
++    assert "Active providers" not in output
++
++
++def test_runtime_list_json_and_human_output(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    monkeypatch.setattr(cli, "onnx_runtime_status", _status)
++
++    assert cli.main(["runtime", "list", "--json"]) == 0
++    payload = json.loads(capsys.readouterr().out)
++    assert payload == {
++        "distribution_state": "resolved",
++        "distributions": [
++            {
++                "name": "onnxruntime-gpu",
++                "version": "1.20.0",
++                "location": "/opt/ort",
++                "owns_import": True,
++            }
++        ],
++        "available_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
++    }
++
++    assert cli.main(["runtime", "list"]) == 0
++    output = capsys.readouterr().out
++    assert "DISTRIBUTION\tVERSION\tLOCATION\tOWNS_IMPORT" in output
++    assert "onnxruntime-gpu\t1.20.0\t/opt/ort\tTrue" in output
++    assert "CUDAExecutionProvider" in output
++
++
++def test_runtime_use_delegates_policy_and_emits_json(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    calls: list[str] = []
++    monkeypatch.setattr(cli, "set_onnx_runtime_providers", calls.append)
++
++    assert cli.main(["runtime", "use", "cuda,cpu", "--json"]) == 0
++
++    assert calls == ["cuda,cpu"]
++    assert json.loads(capsys.readouterr().out) == {
++        "status": "ok",
++        "action": "use",
++        "providers": "cuda,cpu",
++        "applies_to": "future_sessions",
++    }
++
++
++def test_runtime_reset_clears_only_saved_preference_and_emits_json(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    calls: list[str] = []
++    monkeypatch.setattr(
++        cli, "clear_onnx_runtime_providers", lambda: calls.append("clear")
++    )
++
++    assert cli.main(["runtime", "reset", "--json"]) == 0
++
++    assert calls == ["clear"]
++    assert json.loads(capsys.readouterr().out) == {
++        "status": "ok",
++        "action": "reset",
++        "environment_overrides_remain": True,
++        "existing_sessions_changed": False,
++    }
++
++
++def test_runtime_cli_errors_have_json_details(
++    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    def reject(_providers: str) -> None:
++        raise RuntimeControlError(
++            "Provider unavailable.",
++            code="runtime.control_failed",
++            details={"provider_validation_message": "CUDA is unavailable"},
++        )
++
++    monkeypatch.setattr(cli, "set_onnx_runtime_providers", reject)
++
++    assert cli.main(["runtime", "use", "cuda", "--json"]) == 1
++
++    payload = json.loads(capsys.readouterr().out)
++    assert payload == {
++        "status": "error",
++        "error": "Provider unavailable.",
++        "error_code": "runtime.control_failed",
++        "details": {"provider_validation_message": "CUDA is unavailable"},
++    }
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index 825e879..bf26926 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -69,6 +69,7 @@ from .errors import (
+     PlanError,
+     ProfileError,
+     RenderEventCallbackError,
++    RuntimeControlError,
+     UnsupportedPlanSemanticsError,
+     UnsupportedSynthesisFeatureError,
+     VoiceRenderError,
+@@ -117,6 +118,13 @@ from .renderprofile import (
+     save_render_profile,
+     validate_render_profile,
+ )
++from .runtime import (
++    OnnxRuntimeStatus,
++    RuntimeDistribution,
++    clear_onnx_runtime_providers,
++    onnx_runtime_status,
++    set_onnx_runtime_providers,
++)
+ from .voice_clone import VoiceCloneRequest, clone_voice_profile
+ from .voice_source_codec import load_voice_source, save_voice_source
+ from .voice_sources import (
+@@ -184,6 +192,7 @@ __all__ = [
+     "ModelRemoveRequest",
+     "ModelRemoveResult",
+     "ModelVerifyResult",
++    "OnnxRuntimeStatus",
+     "ParsedVoiceSelector",
+     "PlanError",
+     "PreflightReport",
+@@ -207,6 +216,8 @@ __all__ = [
+     "ResolvedPreparedVoice",
+     "ResolvedReferenceAudio",
+     "RoleProfile",
++    "RuntimeControlError",
++    "RuntimeDistribution",
+     "SpeechItem",
+     "SpeechRequest",
+     "SpeechSegment",
+@@ -227,6 +238,7 @@ __all__ = [
+     "VoiceSource",
+     "VoiceSourceKind",
+     "__version__",
++    "clear_onnx_runtime_providers",
+     "clone_voice_profile",
+     "create_render_profile",
+     "create_voice_source",
+@@ -249,6 +261,7 @@ __all__ = [
+     "managed_reference_source",
+     "model_status",
+     "normalize_voice_source",
++    "onnx_runtime_status",
+     "open_session",
+     "parse_voice_selector",
+     "preflight_render_plan",
+@@ -265,6 +278,7 @@ __all__ = [
+     "save_render_profile",
+     "save_voice_source",
+     "set_default_profile_role",
++    "set_onnx_runtime_providers",
+     "set_profile_role",
+     "synthesize",
+     "validate_render_profile",
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 88e415d..fa79796 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -70,6 +70,12 @@ from .renderprofile import (
+     save_render_profile,
+     validate_render_profile,
+ )
++from .runtime import (
++    OnnxRuntimeStatus,
++    clear_onnx_runtime_providers,
++    onnx_runtime_status,
++    set_onnx_runtime_providers,
++)
+ from .storage import install_file_no_replace, wav_info
+ from .voice_clone import VoiceCloneRequest, clone_voice_profile
+ from .voice_design import Qwen3VoiceDesignRecipe, design_qwen3_reference
+@@ -139,6 +145,27 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     commands = parser.add_subparsers(dest="command", required=True)
+
++    runtime = commands.add_parser(
++        "runtime", help="Inspect and configure ONNX Runtime providers"
++    )
++    runtime_commands = runtime.add_subparsers(dest="runtime_command", required=True)
++    for runtime_action in ("status", "list", "reset"):
++        runtime_subcommand = runtime_commands.add_parser(
++            runtime_action,
++            help={
++                "status": "Show ONNX Runtime distribution and provider policy status",
++                "list": "List detected distributions and available providers",
++                "reset": "Clear the saved ONNXVoice provider preference",
++            }[runtime_action],
++        )
++        runtime_subcommand.add_argument("--json", action="store_true")
++    runtime_use = runtime_commands.add_parser(
++        "use", help="Save an ordered provider preference for future sessions"
++    )
++    runtime_use.add_argument(
++        "providers", help="Provider policy, e.g. cpu, cuda, auto, or cuda,cpu"
++    )
++    runtime_use.add_argument("--json", action="store_true")
+     engines = commands.add_parser("engines", help="List or inspect synthesis engines")
+     engine_commands = engines.add_subparsers(dest="engines_command", required=True)
+     engine_list = engine_commands.add_parser("list", help="List registered engines")
+@@ -1341,11 +1368,140 @@ def _voice_clone_command(args: argparse.Namespace) -> dict[str, Any]:
+     return {"profile_id": profile.profile_id, "path": str(saved), "role": args.role}
+
+
++def _runtime_status_to_dict(status: OnnxRuntimeStatus) -> dict[str, Any]:
++    return {
++        "importable": status.importable,
++        "module_version": status.module_version,
++        "module_path": str(status.module_path)
++        if status.module_path is not None
++        else None,
++        "build_device": status.build_device,
++        "build_info": status.build_info,
++        "distributions": [
++            {
++                "name": item.name,
++                "version": item.version,
++                "location": str(item.location) if item.location is not None else None,
++                "owns_import": item.owns_import,
++            }
++            for item in status.distributions
++        ],
++        "imported_distribution": status.imported_distribution,
++        "distribution_state": status.distribution_state,
++        "available_providers": list(status.available_providers),
++        "configured_providers": list(status.configured_providers),
++        "provider_source": status.provider_source,
++        "resolved_providers": list(status.resolved_providers),
++        "import_error": status.import_error,
++        "resolution_error": status.resolution_error,
++    }
++
++
++def _print_runtime_status(status: OnnxRuntimeStatus) -> None:
++    rows = (
++        ("Imported distribution", status.imported_distribution),
++        ("Distribution state", status.distribution_state),
++        ("Module version", status.module_version),
++        ("Module path", str(status.module_path) if status.module_path else None),
++        ("Build device", status.build_device),
++        ("Build info", status.build_info),
++        ("Available providers", ", ".join(status.available_providers)),
++        ("Configured providers", ", ".join(status.configured_providers)),
++        ("Provider source", status.provider_source),
++        ("Resolved providers", ", ".join(status.resolved_providers)),
++        ("Import error", status.import_error),
++        ("Resolution error", status.resolution_error),
++    )
++    for label, value in rows:
++        print(f"{label}: {value if value is not None and value != '' else '-'}")
++
++
++def _print_runtime_list(status: OnnxRuntimeStatus) -> None:
++    print("DISTRIBUTION\tVERSION\tLOCATION\tOWNS_IMPORT")
++    for item in status.distributions:
++        print(
++            f"{item.name}\t{item.version or '-'}\t"
++            f"{item.location or '-'}\t{item.owns_import}"
++        )
++    if not status.distributions:
++        print("-\t-\t-\t-")
++    print("Available providers:")
++    for provider in status.available_providers:
++        print(provider)
++    if not status.available_providers:
++        print("-")
++
++
+ def main(argv: list[str] | None = None) -> int:
+     parser = build_parser()
+     args = parser.parse_args(argv)
+     payload: dict[str, Any]
+     try:
++        if args.command == "runtime":
++            if args.runtime_command == "status":
++                status = onnx_runtime_status()
++                if args.json:
++                    print(
++                        json.dumps(
++                            _runtime_status_to_dict(status),
++                            ensure_ascii=False,
++                            indent=2,
++                            sort_keys=True,
++                        )
++                    )
++                else:
++                    _print_runtime_status(status)
++                return 0
++            if args.runtime_command == "list":
++                status = onnx_runtime_status()
++                payload = {
++                    "distribution_state": status.distribution_state,
++                    "distributions": _runtime_status_to_dict(status)["distributions"],
++                    "available_providers": list(status.available_providers),
++                }
++                if args.json:
++                    print(
++                        json.dumps(
++                            payload, ensure_ascii=False, indent=2, sort_keys=True
++                        )
++                    )
++                else:
++                    _print_runtime_list(status)
++                return 0
++            if args.runtime_command == "use":
++                set_onnx_runtime_providers(args.providers)
++                payload = {
++                    "status": "ok",
++                    "action": "use",
++                    "providers": args.providers,
++                    "applies_to": "future_sessions",
++                }
++                if args.json:
++                    print(
++                        json.dumps(
++                            payload, ensure_ascii=False, indent=2, sort_keys=True
++                        )
++                    )
++                else:
++                    print(
++                        f"Saved ONNX Runtime provider preference {args.providers!r} "
++                        "for future compatible sessions."
++                    )
++                return 0
++            clear_onnx_runtime_providers()
++            payload = {
++                "status": "ok",
++                "action": "reset",
++                "environment_overrides_remain": True,
++                "existing_sessions_changed": False,
++            }
++            if args.json:
++                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
++            else:
++                print(
++                    "Cleared saved ONNXVoice provider preference; environment overrides remain in force."
++                )
++            return 0
+         if args.command == "engines":
+             if args.engines_command == "list":
+                 engines = list_engines()
+@@ -1949,6 +2105,7 @@ def main(argv: list[str] | None = None) -> int:
+             print(json.dumps(payload, ensure_ascii=False, indent=2))
+         elif getattr(args, "json", False) and (
+             args.command in {"engines", "models", "voices"}
++            or args.command == "runtime"
+             or (
+                 args.command == "profile"
+                 and args.profile_command
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+index fe5e30f..4c992f1 100644
+--- a/voicerender/errors.py
++++ b/voicerender/errors.py
+@@ -178,3 +178,21 @@ class ArtifactError(VoiceRenderError, RuntimeError):
+     def __init__(self, message: str, *, code: str | None = None) -> None:
+         super().__init__(message)
+         self.code = code or type(self).code
++
++
++class RuntimeControlError(VoiceRenderError):
++    """An ONNXVoice runtime status or provider-policy operation failed."""
++
++    code = "runtime.control_failed"
++
++    def __init__(
++        self,
++        message: str,
++        *,
++        code: str | None = None,
++        details: dict[str, object] | None = None,
++    ) -> None:
++        super().__init__(message)
++        self.message = message
++        self.code = code or type(self).code
++        self.details = dict(details or {})
+diff --git a/voicerender/runtime.py b/voicerender/runtime.py
+new file mode 100644
+index 0000000..a48c9dd
+--- /dev/null
++++ b/voicerender/runtime.py
+@@ -0,0 +1,139 @@
++"""Stable VoiceRender controls for ONNXVoice-managed ONNX Runtime policy."""
++
++from __future__ import annotations
++
++from collections.abc import Sequence
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++from .errors import RuntimeControlError
++
++
++@dataclass(frozen=True, slots=True)
++class RuntimeDistribution:
++    """A Python distribution that may provide the imported ONNX Runtime module."""
++
++    name: str
++    version: str | None
++    location: Path | None
++    owns_import: bool | None
++
++
++@dataclass(frozen=True, slots=True)
++class OnnxRuntimeStatus:
++    """Snapshot of ONNX Runtime availability and configured provider policy."""
++
++    importable: bool
++    module_version: str | None
++    module_path: Path | None
++    build_device: str | None
++    build_info: str | None
++    distributions: tuple[RuntimeDistribution, ...]
++    imported_distribution: str | None
++    distribution_state: str
++    available_providers: tuple[str, ...]
++    configured_providers: tuple[str, ...]
++    provider_source: str
++    resolved_providers: tuple[str, ...]
++    import_error: str | None = None
++    resolution_error: str | None = None
++
++
++def _onnxvoice() -> Any:
++    """Import ONNXVoice only when a runtime-control operation is requested."""
++    import onnxvoice
++
++    return onnxvoice
++
++
++class _RuntimeApiUnavailableError(RuntimeError):
++    """ONNXVoice does not expose one of the documented runtime functions."""
++
++
++def _runtime_error(operation: str, error: Exception) -> RuntimeControlError:
++    if isinstance(error, (ImportError, ModuleNotFoundError)):
++        code = "runtime.onnxvoice_unavailable"
++        message = "ONNXVoice is unavailable; install a compatible onnxvoice package."
++    elif isinstance(error, (AttributeError, _RuntimeApiUnavailableError)):
++        code = "runtime.onnxvoice_incompatible"
++        message = (
++            "The installed ONNXVoice package lacks a required runtime-control API."
++        )
++    else:
++        code = "runtime.control_failed"
++        detail = str(error).strip() or type(error).__name__
++        message = f"ONNXVoice runtime operation '{operation}' failed: {detail}"
++
++    details: dict[str, object] = {
++        "operation": operation,
++        "native_error_type": type(error).__name__,
++    }
++    if operation == "set_default_providers":
++        details["provider_validation_message"] = str(error)
++    return RuntimeControlError(message, code=code, details=details)
++
++
++def _invoke(name: str, *args: object) -> Any:
++    try:
++        api = getattr(_onnxvoice(), name)
++        if not callable(api):
++            raise _RuntimeApiUnavailableError(
++                f"ONNXVoice public API {name!r} is not callable"
++            )
++        return api(*args)
++    except RuntimeControlError:
++        raise
++    except Exception as exc:  # noqa: BLE001
++        raise _runtime_error(name, exc) from None
++
++
++def _as_path(value: Any) -> Path | None:
++    return None if value is None else Path(value)
++
++
++def _convert_status(status: Any) -> OnnxRuntimeStatus:
++    distributions = tuple(
++        RuntimeDistribution(
++            name=item.name,
++            version=item.version,
++            location=_as_path(item.location),
++            owns_import=item.owns_import,
++        )
++        for item in status.distributions
++    )
++    return OnnxRuntimeStatus(
++        importable=status.importable,
++        module_version=status.module_version,
++        module_path=_as_path(status.module_path),
++        build_device=status.build_device,
++        build_info=status.build_info,
++        distributions=distributions,
++        imported_distribution=status.imported_distribution,
++        distribution_state=status.distribution_state,
++        available_providers=tuple(status.available_providers),
++        configured_providers=tuple(status.configured_providers),
++        provider_source=status.provider_source,
++        resolved_providers=tuple(status.resolved_providers),
++        import_error=status.import_error,
++        resolution_error=status.resolution_error,
++    )
++
++
++def onnx_runtime_status() -> OnnxRuntimeStatus:
++    """Inspect ONNX Runtime and ONNXVoice provider policy without loading a TTS model."""
++    status = _invoke("runtime_status")
++    try:
++        return _convert_status(status)
++    except (AttributeError, TypeError, ValueError, OSError) as exc:
++        raise _runtime_error("runtime_status", exc) from None
++
++
++def set_onnx_runtime_providers(providers: str | Sequence[str]) -> None:
++    """Persist an ONNXVoice provider preference for future compatible sessions."""
++    _invoke("set_default_providers", providers)
++
++
++def clear_onnx_runtime_providers() -> None:
++    """Clear the persisted ONNXVoice provider preference."""
++    _invoke("clear_default_providers")

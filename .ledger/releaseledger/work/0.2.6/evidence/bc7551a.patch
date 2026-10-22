@@ -1,0 +1,53 @@
+ voicerender/cli.py | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 0be7e22..932edd0 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -1453,20 +1453,23 @@ def _voice_clone_command(args: argparse.Namespace) -> dict[str, Any]:
+     return {"profile_id": profile.profile_id, "path": str(saved), "role": args.role}
+
+
++def _runtime_path(path: Path | None) -> str | None:
++    """Render paths with stable separators across CLI platforms."""
++    return path.as_posix() if path is not None else None
++
++
+ def _runtime_status_to_dict(status: OnnxRuntimeStatus) -> dict[str, Any]:
+     return {
+         "importable": status.importable,
+         "module_version": status.module_version,
+-        "module_path": str(status.module_path)
+-        if status.module_path is not None
+-        else None,
++        "module_path": _runtime_path(status.module_path),
+         "build_device": status.build_device,
+         "build_info": status.build_info,
+         "distributions": [
+             {
+                 "name": item.name,
+                 "version": item.version,
+-                "location": str(item.location) if item.location is not None else None,
++                "location": _runtime_path(item.location),
+                 "owns_import": item.owns_import,
+             }
+             for item in status.distributions
+@@ -1487,7 +1490,7 @@ def _print_runtime_status(status: OnnxRuntimeStatus) -> None:
+         ("Imported distribution", status.imported_distribution),
+         ("Distribution state", status.distribution_state),
+         ("Module version", status.module_version),
+-        ("Module path", str(status.module_path) if status.module_path else None),
++        ("Module path", _runtime_path(status.module_path)),
+         ("Build device", status.build_device),
+         ("Build info", status.build_info),
+         ("Available providers", ", ".join(status.available_providers)),
+@@ -1506,7 +1509,7 @@ def _print_runtime_list(status: OnnxRuntimeStatus) -> None:
+     for item in status.distributions:
+         print(
+             f"{item.name}\t{item.version or '-'}\t"
+-            f"{item.location or '-'}\t{item.owns_import}"
++            f"{_runtime_path(item.location) or '-'}\t{item.owns_import}"
+         )
+     if not status.distributions:
+         print("-\t-\t-\t-")
