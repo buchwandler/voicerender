@@ -50,10 +50,44 @@ def test_loads_supported_bundle_identity(
     )
 
 
+@pytest.mark.parametrize(
+    ("working_directory", "path"),
+    [("root", "."), ("root", "./"), ("child", "..")],
+)
+def test_bundle_identity_accepts_aliases_resolving_to_canonical_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    working_directory: str,
+    path: str,
+) -> None:
+    root = _bundle(tmp_path / "story.ssmd-bundle")
+    child = root / "child"
+    child.mkdir()
+    monkeypatch.chdir(root if working_directory == "root" else child)
+
+    identity = load_bundle_identity(path)
+
+    assert identity.root == root.resolve()
+
+
 @pytest.mark.parametrize("name", ["workspace", "book.ssmd-bundle/chapters"])
 def test_rejects_noncanonical_root_shape(tmp_path: Path, name: str) -> None:
     with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
         load_bundle_identity(tmp_path / name)
+
+
+def test_rejects_existing_noncanonical_directories_even_with_manifest(
+    tmp_path: Path,
+) -> None:
+    workspace = _bundle(tmp_path / "workspace")
+    bundle = _bundle(tmp_path / "story.ssmd-bundle")
+    renderplan_root = bundle / "renderplan"
+    renderplan_root.mkdir()
+
+    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
+        load_bundle_identity(workspace)
+    with pytest.raises(BundleContractError, match="canonical .ssmd-bundle"):
+        load_bundle_identity(renderplan_root)
 
 
 def test_rejects_document_file_and_zip_shortcuts(tmp_path: Path) -> None:

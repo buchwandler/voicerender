@@ -486,7 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
         "render", help="Render a book or document SSMD bundle"
     )
     bundle_render.add_argument(
-        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
+        "bundle",
+        type=Path,
+        help="path resolving to a canonical NAME.ssmd-bundle directory",
     )
     bundle_render.add_argument(
         "--variant", required=True, help="exact RenderPlan variant directory name"
@@ -516,11 +518,15 @@ def build_parser() -> argparse.ArgumentParser:
         "variants",
         help="Discover existing RenderPlan variants and their render state",
         description=(
-            "List direct RenderPlan variant directories without rendering or modifying the bundle."
+            "List direct RenderPlan variant directories for an SSMD bundle. "
+            "The positional path must resolve to the bundle root; "
+            "--renderplan-root only overrides where variant directories are read from."
         ),
     )
     bundle_variants.add_argument(
-        "bundle", type=Path, help="canonical .ssmd-bundle directory root"
+        "bundle",
+        type=Path,
+        help="path resolving to a canonical NAME.ssmd-bundle directory",
     )
     bundle_variants.add_argument("--renderplan-root", type=Path)
     bundle_variants.add_argument("--output-root", type=Path)

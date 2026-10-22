@@ -36,19 +36,23 @@ class BundleIdentity:
 def load_bundle_identity(path: str | Path) -> BundleIdentity:
     """Read only the bounded, authoritative identity fields of a bundle manifest."""
     input_path = Path(path).expanduser()
-    if not input_path.name.endswith(".ssmd-bundle"):
-        raise BundleContractError(
-            "bundle input must be the canonical .ssmd-bundle directory root"
-        )
     if input_path.is_symlink():
         raise BundleContractError("SSMD bundle root must not be a symlink")
 
     try:
         root = input_path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
+        if not input_path.name.endswith(".ssmd-bundle"):
+            raise BundleContractError(
+                "bundle input must resolve to the canonical .ssmd-bundle directory root"
+            ) from exc
         raise BundleContractError(
             f"cannot resolve SSMD bundle root {input_path}: {exc}"
         ) from exc
+    if not root.name.endswith(".ssmd-bundle"):
+        raise BundleContractError(
+            "bundle input must resolve to the canonical .ssmd-bundle directory root"
+        )
     if not root.is_dir():
         raise BundleContractError(f"SSMD bundle root is not a directory: {root}")
 

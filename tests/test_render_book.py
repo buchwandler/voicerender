@@ -1215,3 +1215,38 @@ def test_estimate_render_book_is_workload_only_and_does_not_create_outputs(
         if path.is_file()
     }
     assert after_files == before_files
+
+
+def test_book_workspace_and_public_apis_accept_root_aliases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from voicerender import estimate_render_book
+    from voicerender.book_layout import resolve_workspace
+
+    workspace, _ = _book(tmp_path)
+    child = workspace / "child"
+    child.mkdir()
+    for working_directory, path in (
+        (workspace, "."),
+        (workspace, "./"),
+        (child, ".."),
+    ):
+        monkeypatch.chdir(working_directory)
+        assert resolve_workspace(path) == workspace.resolve()
+        for render_api in (render_book, estimate_render_book):
+            with pytest.raises(
+                BookRenderError, match="variant directory does not exist"
+            ):
+                render_api(path, variant="missing")
+
+    monkeypatch.chdir(workspace / "renderplan")
+    with pytest.raises(BookRenderError, match="canonical .ssmd-bundle"):
+        resolve_workspace(".")
+
+    link = tmp_path / "link.ssmd-bundle"
+    try:
+        link.symlink_to(workspace, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    with pytest.raises(BookRenderError, match="root must not be a symlink"):
+        resolve_workspace(link)

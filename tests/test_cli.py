@@ -37,6 +37,8 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
         capture_output=True,
         text=True,
     ).stdout.casefold()
+    bundle_help = " ".join(bundle_help.split())
+    variants_help = " ".join(variants_help.split())
 
     assert "preflight" in root_help
     assert "renderplan" in root_help
@@ -55,6 +57,14 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
     assert "--renderplan-root" in variants_help
     assert "--output-root" in variants_help
     assert "--json" in variants_help
+
+    assert "path resolving to a canonical name.ssmd-bundle directory" in bundle_help
+    assert "path resolving to a canonical name.ssmd-bundle directory" in variants_help
+    assert "positional path must resolve to the bundle root" in variants_help
+    assert (
+        "--renderplan-root only overrides where variant directories are read from"
+        in variants_help
+    )
 
 
 def test_package_imports_when_legacy_planner_package_is_unavailable() -> None:
@@ -1262,3 +1272,28 @@ def test_bundle_variants_empty_state_and_bundle_errors_are_json(
     assert payload["version"] == 1
     assert payload["error"]
     assert payload["exit_code"] == 2
+
+
+def test_bundle_variants_accepts_current_directory_bundle_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from voicerender import cli
+
+    bundle = tmp_path / "story.ssmd-bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(
+        '{"format":"ssmdconvert.book","schema_version":1}', encoding="utf-8"
+    )
+    monkeypatch.chdir(bundle)
+
+    assert cli.main(["bundle", "variants", "."]) == 0
+    assert "No RenderPlan variants found" in capsys.readouterr().out
+
+    from voicerender import render_bundle
+    from voicerender.book_contract import BookRenderError
+
+    with pytest.raises(BookRenderError) as caught:
+        render_bundle(".", variant="missing")
+    assert caught.value.code == "variant.not_found"

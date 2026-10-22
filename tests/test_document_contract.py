@@ -29,6 +29,50 @@ def _workspace(root: Path) -> Path:
     return root
 
 
+@pytest.mark.parametrize(
+    ("working_directory", "path"),
+    [("root", "."), ("root", "./"), ("child", "..")],
+)
+def test_document_workspace_and_render_apis_accept_root_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    working_directory: str,
+    path: str,
+) -> None:
+    from voicerender.document import render_document
+    from voicerender.errors import DocumentRenderError
+
+    root = _workspace(tmp_path / "story.ssmd-bundle")
+    child = root / "child"
+    child.mkdir()
+    monkeypatch.chdir(root if working_directory == "root" else child)
+
+    index = load_document_workspace(path)
+    assert index.root == root.resolve()
+    for render_api in (render_document, estimate_render_document):
+        with pytest.raises(DocumentRenderError) as caught:
+            render_api(path, variant="missing")
+        assert caught.value.code == "variant.not_found"
+
+
+def test_document_workspace_rejects_renderplan_root_and_direct_symlink(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path / "story.ssmd-bundle")
+    renderplan_root = root / "renderplan"
+    renderplan_root.mkdir()
+    with pytest.raises(DocumentWorkspaceError, match="canonical .ssmd-bundle"):
+        load_document_workspace(renderplan_root)
+
+    link = tmp_path / "link.ssmd-bundle"
+    try:
+        link.symlink_to(root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    with pytest.raises(DocumentWorkspaceError, match="root must not be a symlink"):
+        load_document_workspace(link)
+
+
 def test_load_document_bundle_root_and_rejects_file_shortcut(
     tmp_path: Path,
 ) -> None:

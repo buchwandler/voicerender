@@ -29,14 +29,21 @@ class DocumentWorkspaceIndex:
 def load_document_workspace(value: str | Path) -> DocumentWorkspaceIndex:
     """Validate document-specific identity fields within a canonical bundle root."""
     input_path = Path(value).expanduser()
-    if not input_path.name.endswith(".ssmd-bundle"):
-        raise DocumentWorkspaceError(
-            "document bundle input must be the canonical .ssmd-bundle directory root"
-        )
     if input_path.is_symlink():
         raise DocumentWorkspaceError("document bundle root must not be a symlink")
     try:
-        root = input_path.resolve(strict=True)
+        try:
+            root = input_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            if not input_path.name.endswith(".ssmd-bundle"):
+                raise DocumentWorkspaceError(
+                    "document bundle input must resolve to the canonical .ssmd-bundle directory root"
+                ) from exc
+            raise
+        if not root.name.endswith(".ssmd-bundle"):
+            raise DocumentWorkspaceError(
+                "document bundle input must resolve to the canonical .ssmd-bundle directory root"
+            )
         if not root.is_dir():
             raise DocumentWorkspaceError(
                 "document bundle input is not a directory root"

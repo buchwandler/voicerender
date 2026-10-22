@@ -311,6 +311,15 @@ voicerender bundle variants story.ssmd-bundle
 voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
 ```
 
+Bundle path arguments are resolved before their canonical root name is checked, so aliases such as `.` and `./` work when they resolve exactly to a `<name>.ssmd-bundle/` root:
+
+```bash
+cd story.ssmd-bundle
+voicerender bundle variants .
+```
+
+The path must resolve to the bundle root itself; VoiceRender does not search parent directories, and a `renderplan/` directory, source file, chapter directory, or other inner path is not a bundle root. The bundle root identifies the workspace and bundle kind. `--renderplan-root` only relocates the directory containing RenderPlan variant directories; it does not replace the bundle argument. Each variant directory is a direct child of that RenderPlan root.
+
 `bundle variants` is read-only discovery: it validates existing book or document plans and reports their render state without compiling variants or synthesizing speech. UtterPlan remains responsible for producing RenderPlan variants.
 
 For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
