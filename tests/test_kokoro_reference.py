@@ -596,16 +596,26 @@ def test_short_sentence_options_reject_invalid_values(value: Any) -> None:
         _normalize_short_sentence(value)
 
 
-def test_voice_level_options_normalize_gain_and_preserve_shorthand() -> None:
-    assert _normalize_voice_level("off") == {"mode": "off", "gain_db": None}
-    assert _normalize_voice_level("calibrated") == {
-        "mode": "calibrated",
-        "gain_db": None,
-    }
-    assert _normalize_voice_level({"mode": "off", "gain_db": 1.5}) == {
-        "mode": "off",
-        "gain_db": 1.5,
-    }
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, {"mode": "off"}),
+        ("off", {"mode": "off"}),
+        ("calibrated", {"mode": "calibrated"}),
+        ({"mode": "off"}, {"mode": "off"}),
+        ({"mode": "off", "gain_db": None}, {"mode": "off"}),
+        ({"mode": "off", "gain_db": 0}, {"mode": "off", "gain_db": 0.0}),
+        (
+            {"mode": "calibrated", "gain_db": 1.5},
+            {"mode": "calibrated", "gain_db": 1.5},
+        ),
+        ({"mode": "off", "gain_db": -1.5}, {"mode": "off", "gain_db": -1.5}),
+    ],
+)
+def test_voice_level_options_normalize_gain_and_preserve_shorthand(
+    value: Any, expected: dict[str, Any]
+) -> None:
+    assert _normalize_voice_level(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -616,6 +626,7 @@ def test_voice_level_options_normalize_gain_and_preserve_shorthand() -> None:
         {"gain_db": True},
         {"gain_db": float("nan")},
         {"gain_db": float("inf")},
+        {"gain_db": float("-inf")},
         {"unknown": 1},
     ],
 )

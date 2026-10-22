@@ -759,8 +759,11 @@ class Qwen3SynthEngineAdapter:
             "top_k": generation.top_k,
             "repetition_penalty": generation.repetition_penalty,
             "max_new_tokens": generation.max_new_tokens,
-            "seed": generation.seed,
         }
+        if generation.seed is None:
+            selected_options.pop("seed", None)
+        else:
+            selected_options["seed"] = generation.seed
         metadata = {
             "model_type": target.metadata.get("model_type"),
             "model_id": target.metadata.get("model_id"),

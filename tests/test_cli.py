@@ -1027,6 +1027,101 @@ def test_cli_profile_create_normalizes_output_path(
         assert str(destination) in stdout
 
 
+@pytest.mark.parametrize(
+    "gain",
+    [None, 0, 1.5, -1.5],
+    ids=["unset", "zero", "positive", "negative"],
+)
+def test_cli_kokoro_profile_create_round_trips_voice_level_gain(
+    monkeypatch, tmp_path: Path, capsys, gain: float | None
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import tomlkit
+
+    from voicerender import cli, models
+    from voicerender.engines.api_probe import EngineApiProbe
+    from voicerender.engines.registry import get_adapter
+    from voicerender.renderprofile import load_render_profile
+
+    adapter = get_adapter("kokoro")
+    probe = EngineApiProbe(
+        engine="kokoro",
+        package="pykokoro",
+        compatible=True,
+        status="ready",
+        distribution_version="0.10.5",
+        expected_api_version=1,
+        api_version=1,
+        contract_source="explicit",
+    )
+    monkeypatch.setattr(adapter, "probe_api", lambda: probe)
+    model = SimpleNamespace(
+        id="v1.0",
+        languages=("en-us",),
+        voices=("am_michael",),
+        qualities=("fp32",),
+        metadata={"frontend": "kokoro"},
+        sample_rate=24000,
+        max_tokens=512,
+        source="test",
+        distribution_id="v1.0-test",
+    )
+    monkeypatch.setattr(models, "get_model_info", lambda *_args, **_kwargs: (model, ()))
+    monkeypatch.chdir(tmp_path)
+
+    args = [
+        "profile",
+        "create",
+        "--engine",
+        "kokoro",
+        "--target",
+        "v1.0",
+        "--voice",
+        "am_michael",
+        "--language",
+        "en-us",
+        "-o",
+        "profile1",
+    ]
+    if gain is not None:
+        args.extend(
+            [
+                "--option",
+                f"voice_level={json.dumps({'mode': 'off', 'gain_db': gain})}",
+            ]
+        )
+
+    assert cli.main(args) == 0
+    output = tmp_path / "profile1.renderprofile.toml"
+    assert output.is_file()
+    assert "profile1.renderprofile.toml" in capsys.readouterr().out
+    document = tomlkit.parse(output.read_text(encoding="utf-8"))
+    binding = document["roles"]["narrator"]["binding"]
+    assert binding["renderer"] == "kokoro"
+    assert binding["target_id"] == "v1.0"
+    assert binding["voice"] == "am_michael"
+    assert binding["options"]["voice_level"]["mode"] == "off"
+    if gain is None:
+        assert "gain_db" not in binding["options"]["voice_level"]
+    else:
+        assert binding["options"]["voice_level"]["gain_db"] == float(gain)
+
+    profile = load_render_profile(output)
+    role = profile.roles["narrator"]
+    assert role.language == "en-us"
+    assert role.binding["renderer"] == "kokoro"
+    assert role.binding["target_id"] == "v1.0"
+    assert role.binding["voice"] == "am_michael"
+    loaded_voice_level = role.binding["options"]["voice_level"]
+    assert loaded_voice_level["mode"] == "off"
+    if gain is None:
+        assert "gain_db" not in loaded_voice_level
+    else:
+        assert loaded_voice_level["gain_db"] == float(gain)
+
+
 def test_profile_output_normalizer_is_idempotent_and_case_insensitive() -> None:
     from voicerender.cli import normalize_renderprofile_output_path
 

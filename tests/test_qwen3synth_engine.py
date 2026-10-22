@@ -311,6 +311,18 @@ def test_resolve_selects_base_bundle_and_preserves_revision(
     assert selection.options["quality"] == "int4"
     assert selection.options["provider"] == "cpu"
 
+    assert "seed" not in selection.options
+    none_seed, none_diagnostics = Qwen3SynthEngineAdapter().resolve(
+        EngineRequest(
+            engine="qwen3",
+            target_id="base-0.6b",
+            language="en-US",
+            options={**selection.options, "seed": None},
+        )
+    )
+    assert none_diagnostics == ()
+    assert "seed" not in none_seed.options
+
 
 def test_missing_optional_package_is_reported_as_missing(
     monkeypatch: pytest.MonkeyPatch,
@@ -414,6 +426,7 @@ def test_session_measures_without_synthesis_and_reuses_reference_voice(
     )
     assert diagnostics == ()
     identity = adapter.canonical_synthesis_identity(selection)
+    assert selection.options["seed"] == 11
     assert identity["voice"]["sha256"] == source["sha256"]
     assert (
         identity["voice"]["reference_text_sha256"]

@@ -462,16 +462,18 @@ def _normalize_short_sentence(value: Any) -> dict[str, Any] | None:
 def _normalize_voice_level(value: Any) -> dict[str, Any]:
     config: dict[str, Any]
     if value is None:
-        config = {"mode": "off", "gain_db": None}
+        config = {"mode": "off"}
     elif isinstance(value, str):
-        config = {"mode": value, "gain_db": None}
+        config = {"mode": value}
     elif isinstance(value, Mapping):
         unknown = set(value) - _VOICE_LEVEL_FIELDS
         if unknown:
             raise _invalid_kokoro_option(
                 f"Unknown voice_level option(s): {', '.join(sorted(map(str, unknown)))}"
             )
-        config = {"mode": value.get("mode", "off"), "gain_db": value.get("gain_db")}
+        config = {"mode": value.get("mode", "off")}
+        if "gain_db" in value:
+            config["gain_db"] = value["gain_db"]
     else:
         raise _invalid_kokoro_option(
             "voice_level must be 'off', 'calibrated', a table, or None"
@@ -480,7 +482,7 @@ def _normalize_voice_level(value: Any) -> dict[str, Any]:
     mode = config["mode"]
     if not isinstance(mode, str) or mode not in {"off", "calibrated"}:
         raise _invalid_kokoro_option("voice_level.mode must be 'off' or 'calibrated'")
-    gain = config["gain_db"]
+    gain = config.get("gain_db")
     if gain is not None:
         if isinstance(gain, bool) or not isinstance(gain, (int, float)):
             raise _invalid_kokoro_option(
@@ -495,6 +497,8 @@ def _normalize_voice_level(value: Any) -> dict[str, Any]:
                 "voice_level.gain_db must be a finite number or None"
             )
         config["gain_db"] = normalized_gain
+    else:
+        config.pop("gain_db", None)
     return config
 
 
