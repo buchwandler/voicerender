@@ -69,6 +69,7 @@ from .errors import (
     PlanError,
     ProfileError,
     RenderEventCallbackError,
+    RuntimeControlError,
     UnsupportedPlanSemanticsError,
     UnsupportedSynthesisFeatureError,
     VoiceRenderError,
@@ -116,6 +117,13 @@ from .renderprofile import (
     refresh_render_profile,
     save_render_profile,
     validate_render_profile,
+)
+from .runtime import (
+    OnnxRuntimeStatus,
+    RuntimeDistribution,
+    clear_onnx_runtime_providers,
+    onnx_runtime_status,
+    set_onnx_runtime_providers,
 )
 from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_source_codec import load_voice_source, save_voice_source
@@ -184,6 +192,7 @@ __all__ = [
     "ModelRemoveRequest",
     "ModelRemoveResult",
     "ModelVerifyResult",
+    "OnnxRuntimeStatus",
     "ParsedVoiceSelector",
     "PlanError",
     "PreflightReport",
@@ -207,6 +216,8 @@ __all__ = [
     "ResolvedPreparedVoice",
     "ResolvedReferenceAudio",
     "RoleProfile",
+    "RuntimeControlError",
+    "RuntimeDistribution",
     "SpeechItem",
     "SpeechRequest",
     "SpeechSegment",
@@ -227,6 +238,7 @@ __all__ = [
     "VoiceSource",
     "VoiceSourceKind",
     "__version__",
+    "clear_onnx_runtime_providers",
     "clone_voice_profile",
     "create_render_profile",
     "create_voice_source",
@@ -249,6 +261,7 @@ __all__ = [
     "managed_reference_source",
     "model_status",
     "normalize_voice_source",
+    "onnx_runtime_status",
     "open_session",
     "parse_voice_selector",
     "preflight_render_plan",
@@ -265,6 +278,7 @@ __all__ = [
     "save_render_profile",
     "save_voice_source",
     "set_default_profile_role",
+    "set_onnx_runtime_providers",
     "set_profile_role",
     "synthesize",
     "validate_render_profile",

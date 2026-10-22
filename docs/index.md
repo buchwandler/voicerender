@@ -13,6 +13,10 @@ changelog
 
 VoiceRender owns engine-option and voice discovery, optional model-asset management, pinned voice-source lifecycle, reference-voice cloning, and multi-role RenderProfile mutations. These APIs are available from the `voicerender` package root and corresponding CLI commands; unsupported asset operations are reported rather than delegated to private backend code or backend CLI subprocesses. Discovery and profile preparation do not synthesize audio. See [RenderProfile lifecycle](renderprofile.md) for role APIs and write safety.
 
+## ONNX Runtime provider policy
+
+See the [ONNX Runtime provider policy guide in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#onnx-runtime-provider-policy) for `runtime status`, `list`, `use`, and `reset`, including provider precedence and CPU/CUDA/auto examples. The policy is an ONNXVoice-managed default for compatible future sessions; it does not install or select runtime distributions, imply that every engine is ONNX-backed, or override explicit engine provider options. Environment overrides take precedence over the saved preference, and reset clears only that saved preference.
+
 ## Workflow
 
 1. Create a complete-cast RenderProfile with per-role engine bindings.

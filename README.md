@@ -145,6 +145,29 @@ voicerender profile validate printer-cast.renderprofile.toml
 
 The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
 
+## ONNX Runtime provider policy
+
+VoiceRender exposes ONNXVoice's default ONNX Runtime provider policy without managing installed runtime distributions. An ONNX Runtime distribution (for example, `onnxruntime` or `onnxruntime-gpu`) is a Python package; an execution provider (for example, `CPUExecutionProvider` or `CUDAExecutionProvider`) is an execution backend reported by that runtime build. `voicerender runtime status` inspects the imported distribution, build, available providers, and configured/resolved policy. Resolved providers describe policy resolution, not the providers active in an existing session or proof that a session successfully used them.
+
+The saved policy is a global default for compatible ONNXVoice-backed or provider-aware sessions. It does not imply that every VoiceRender engine uses ONNX Runtime. An explicit engine `providers` option remains an override and is passed through unchanged. Changing or resetting policy affects future sessions only; already initialized sessions are unchanged. `runtime use` does not install packages, switch distributions, or alter the Python environment.
+
+ONNXVoice resolves defaults in this order: explicit request, `ONNXVOICE_PROVIDERS`, `ONNXVOICE_PROVIDER`, saved ONNXVoice configuration, then the CPU default. Environment variables therefore override a saved preference. `voicerender runtime reset` removes only the saved preference; environment overrides remain in force.
+
+```bash
+# Inspect installed runtime and provider policy.
+voicerender runtime status
+voicerender runtime list --json
+
+# Set a saved default for future compatible sessions.
+voicerender runtime use cpu
+voicerender runtime use cuda
+voicerender runtime use auto
+voicerender runtime use cuda,cpu  # ordered provider preference
+
+# Remove only the saved ONNXVoice preference.
+voicerender runtime reset
+```
+
 ## Reference voices
 
 Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.

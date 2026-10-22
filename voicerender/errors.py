@@ -178,3 +178,21 @@ class ArtifactError(VoiceRenderError, RuntimeError):
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.code = code or type(self).code
+
+
+class RuntimeControlError(VoiceRenderError):
+    """An ONNXVoice runtime status or provider-policy operation failed."""
+
+    code = "runtime.control_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code or type(self).code
+        self.details = dict(details or {})

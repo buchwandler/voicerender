@@ -70,6 +70,12 @@ from .renderprofile import (
     save_render_profile,
     validate_render_profile,
 )
+from .runtime import (
+    OnnxRuntimeStatus,
+    clear_onnx_runtime_providers,
+    onnx_runtime_status,
+    set_onnx_runtime_providers,
+)
 from .storage import install_file_no_replace, wav_info
 from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_design import Qwen3VoiceDesignRecipe, design_qwen3_reference
@@ -139,6 +145,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    runtime = commands.add_parser(
+        "runtime", help="Inspect and configure ONNX Runtime providers"
+    )
+    runtime_commands = runtime.add_subparsers(dest="runtime_command", required=True)
+    for runtime_action in ("status", "list", "reset"):
+        runtime_subcommand = runtime_commands.add_parser(
+            runtime_action,
+            help={
+                "status": "Show ONNX Runtime distribution and provider policy status",
+                "list": "List detected distributions and available providers",
+                "reset": "Clear the saved ONNXVoice provider preference",
+            }[runtime_action],
+        )
+        runtime_subcommand.add_argument("--json", action="store_true")
+    runtime_use = runtime_commands.add_parser(
+        "use", help="Save an ordered provider preference for future sessions"
+    )
+    runtime_use.add_argument(
+        "providers", help="Provider policy, e.g. cpu, cuda, auto, or cuda,cpu"
+    )
+    runtime_use.add_argument("--json", action="store_true")
     engines = commands.add_parser("engines", help="List or inspect synthesis engines")
     engine_commands = engines.add_subparsers(dest="engines_command", required=True)
     engine_list = engine_commands.add_parser("list", help="List registered engines")
@@ -1341,11 +1368,140 @@ def _voice_clone_command(args: argparse.Namespace) -> dict[str, Any]:
     return {"profile_id": profile.profile_id, "path": str(saved), "role": args.role}
 
 
+def _runtime_status_to_dict(status: OnnxRuntimeStatus) -> dict[str, Any]:
+    return {
+        "importable": status.importable,
+        "module_version": status.module_version,
+        "module_path": str(status.module_path)
+        if status.module_path is not None
+        else None,
+        "build_device": status.build_device,
+        "build_info": status.build_info,
+        "distributions": [
+            {
+                "name": item.name,
+                "version": item.version,
+                "location": str(item.location) if item.location is not None else None,
+                "owns_import": item.owns_import,
+            }
+            for item in status.distributions
+        ],
+        "imported_distribution": status.imported_distribution,
+        "distribution_state": status.distribution_state,
+        "available_providers": list(status.available_providers),
+        "configured_providers": list(status.configured_providers),
+        "provider_source": status.provider_source,
+        "resolved_providers": list(status.resolved_providers),
+        "import_error": status.import_error,
+        "resolution_error": status.resolution_error,
+    }
+
+
+def _print_runtime_status(status: OnnxRuntimeStatus) -> None:
+    rows = (
+        ("Imported distribution", status.imported_distribution),
+        ("Distribution state", status.distribution_state),
+        ("Module version", status.module_version),
+        ("Module path", str(status.module_path) if status.module_path else None),
+        ("Build device", status.build_device),
+        ("Build info", status.build_info),
+        ("Available providers", ", ".join(status.available_providers)),
+        ("Configured providers", ", ".join(status.configured_providers)),
+        ("Provider source", status.provider_source),
+        ("Resolved providers", ", ".join(status.resolved_providers)),
+        ("Import error", status.import_error),
+        ("Resolution error", status.resolution_error),
+    )
+    for label, value in rows:
+        print(f"{label}: {value if value is not None and value != '' else '-'}")
+
+
+def _print_runtime_list(status: OnnxRuntimeStatus) -> None:
+    print("DISTRIBUTION\tVERSION\tLOCATION\tOWNS_IMPORT")
+    for item in status.distributions:
+        print(
+            f"{item.name}\t{item.version or '-'}\t"
+            f"{item.location or '-'}\t{item.owns_import}"
+        )
+    if not status.distributions:
+        print("-\t-\t-\t-")
+    print("Available providers:")
+    for provider in status.available_providers:
+        print(provider)
+    if not status.available_providers:
+        print("-")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     payload: dict[str, Any]
     try:
+        if args.command == "runtime":
+            if args.runtime_command == "status":
+                status = onnx_runtime_status()
+                if args.json:
+                    print(
+                        json.dumps(
+                            _runtime_status_to_dict(status),
+                            ensure_ascii=False,
+                            indent=2,
+                            sort_keys=True,
+                        )
+                    )
+                else:
+                    _print_runtime_status(status)
+                return 0
+            if args.runtime_command == "list":
+                status = onnx_runtime_status()
+                payload = {
+                    "distribution_state": status.distribution_state,
+                    "distributions": _runtime_status_to_dict(status)["distributions"],
+                    "available_providers": list(status.available_providers),
+                }
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    _print_runtime_list(status)
+                return 0
+            if args.runtime_command == "use":
+                set_onnx_runtime_providers(args.providers)
+                payload = {
+                    "status": "ok",
+                    "action": "use",
+                    "providers": args.providers,
+                    "applies_to": "future_sessions",
+                }
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    print(
+                        f"Saved ONNX Runtime provider preference {args.providers!r} "
+                        "for future compatible sessions."
+                    )
+                return 0
+            clear_onnx_runtime_providers()
+            payload = {
+                "status": "ok",
+                "action": "reset",
+                "environment_overrides_remain": True,
+                "existing_sessions_changed": False,
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(
+                    "Cleared saved ONNXVoice provider preference; environment overrides remain in force."
+                )
+            return 0
         if args.command == "engines":
             if args.engines_command == "list":
                 engines = list_engines()
@@ -1949,6 +2105,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         elif getattr(args, "json", False) and (
             args.command in {"engines", "models", "voices"}
+            or args.command == "runtime"
             or (
                 args.command == "profile"
                 and args.profile_command
