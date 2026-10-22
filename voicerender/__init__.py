@@ -18,6 +18,12 @@ from .book import (
     ChapterRenderOutcome,
 )
 from .bundle import BundleRenderResult, render_bundle
+from .bundle_batch import (
+    BundleBatchRenderResult,
+    BundleBatchRenderSummary,
+    BundleVariantRenderOutcome,
+    render_bundle_batch,
+)
 from .bundle_contract import BundleContractError
 from .document import DocumentRenderRequest, DocumentRenderResult
 from .engines.api_probe import EngineApiProbe
@@ -162,9 +168,12 @@ __all__ = [
     "BookRenderError",
     "BookRenderRequest",
     "BookRenderResult",
+    "BundleBatchRenderResult",
+    "BundleBatchRenderSummary",
     "BundleContractError",
     "BundleRenderResult",
     "BundleVariant",
+    "BundleVariantRenderOutcome",
     "BundleVariantsResult",
     "CatalogRequest",
     "CatalogResult",
@@ -274,6 +283,7 @@ __all__ = [
     "remove_profile_role",
     "render",
     "render_bundle",
+    "render_bundle_batch",
     "render_plan",
     "render_renderplan",
     "resolve_prepared_voice",

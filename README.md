@@ -307,6 +307,10 @@ ssmdconvert bundle convert story.ssmd.md
 utterplan bundle compile story.ssmd-bundle
 utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
 voicerender bundle variants story.ssmd-bundle
+# Render all incomplete valid variants; complete variants are skipped.
+voicerender bundle render story.ssmd-bundle
+# Include completed valid variants too.
+voicerender bundle render story.ssmd-bundle --force
 # Choose the exact existing variant basename from its state/progress listing:
 voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
 ```
@@ -315,6 +319,7 @@ Bundle path arguments are resolved before their canonical root name is checked, 
 
 ```bash
 cd story.ssmd-bundle
+voicerender bundle render .
 voicerender bundle variants .
 ```
 
@@ -330,7 +335,9 @@ voicerender bundle render Novel.ssmd-bundle \
   --chapters 5-17 --cache-dir .voicerender-cache --json
 ```
 
-Omit `--chapters` to select all chapters. A speech QC window selects one source chapter and a one-based speech range; verified WAVs accumulate into the same chapter manifest. `--fail-fast` skips remaining chapters after a failure. `--renderplan-root`, `--output-root`, and `--cache-dir` override their roots. `--reset-stale` replaces stale VoiceRender-owned output while keeping cache entries available for verified reuse; `--force` synthesizes every selected request and bypasses cache.
+Omit `--chapters` to select all chapters. A speech QC window selects one source chapter and a one-based speech range; verified WAVs accumulate into the same chapter manifest. Partial chapter or speech selections can leave the whole variant partial, so a later default batch run may select it again. In batch mode, omitting `--variant` renders every valid variant not yet complete and skips completed variants; invalid variants are reported and make the batch exit nonzero. If no variants are found, or all valid variants are complete, the batch is a successful no-op.
+
+`--chapters`, `--speech`, `--renderplan-root`, `--output-root`, and `--cache-dir` are applied to every selected variant. `--fail-fast` preserves chapter-level fail-fast inside the active book variant and stops scheduling later variants after a batch failure. Batch `--force` includes every valid variant, even completed ones. With an explicit `--variant`, `--force` keeps its existing meaning: bypass verified-output reuse/cache for the selected work. It does not delete the output directory; `--reset-stale` remains the explicit stale-output operation.
 
 A document is one render item and accepts only `--chapters all`:
 

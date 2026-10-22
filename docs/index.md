@@ -31,12 +31,19 @@ For the coordinated SSMD workflow, the packages share one command-group name and
 ssmdconvert bundle convert story.ssmd.md
 utterplan bundle compile story.ssmd-bundle
 utterplan bundle render story.ssmd-bundle --profile narration.renderprofile.toml
+# Render all incomplete valid variants; complete variants are skipped.
+voicerender bundle render story.ssmd-bundle
+# Include completed valid variants too.
+voicerender bundle render story.ssmd-bundle --force
+# Render one exact variant only.
 voicerender bundle render story.ssmd-bundle --variant narration--<profile-fingerprint>
 ```
 
-`manifest.json` decides whether the root holds a book or a single document. VoiceRender detects the kind automatically; the same command takes a `.ssmd-bundle/` root for either. It does not accept an inner source file or a chapter directory. Documents are one render item and require `--chapters all`; books support chapter and speech selectors. The canonical packed transport artifact is `<name>.ssmd-bundle.zip`; VoiceRender's render pipeline operates on the editable directory.
+`manifest.json` decides whether the root holds a book or a single document. VoiceRender detects the kind automatically; the same command takes a canonical `.ssmd-bundle/` root for either. It does not accept an inner source file or a chapter directory. Documents are one render item and require `--chapters all`; books support chapter and speech selectors. The canonical packed transport artifact is `<name>.ssmd-bundle.zip`; VoiceRender renders from the editable bundle directory.
 
-For books, UtterPlan owns the `renderplan-set.toml` collection index and its per-invocation report. VoiceRender consumes the ordered set, while direct single-plan preflight and render remain available. A speech window can succeed while the whole-book manifest remains partial; later selections accumulate verified WAVs. `--fail-fast` skips remaining chapters after a failure. `--renderplan-root`, `--output-root`, and `--cache-dir` override their roots. `--reset-stale` replaces stale VoiceRender-owned output while keeping cache entries available for verified reuse; `--force` bypasses cache.
+For books, UtterPlan owns the `renderplan-set.toml` collection index and its per-invocation report; VoiceRender consumes the ordered plans and never compiles variants. With no `--variant`, `bundle render` discovers direct variants and renders valid variants whose state is not complete, including partial, failed, and unknown states. Completed variants are skipped, invalid variants are reported and cause a nonzero exit, and no-variant/all-complete runs are successful no-ops. A speech window can succeed while the whole-book state remains partial; a later batch run may select it again.
+
+`--chapters`, `--speech`, `--renderplan-root`, `--output-root`, and `--cache-dir` apply to each selected variant. `--fail-fast` skips remaining chapters within the active book and stops scheduling later variants after a batch failure. In batch mode, `--force` includes every valid variant, including completed ones. With `--variant NAME`, `--force` bypasses verified-output reuse/cache for that exact render work; it never deletes the output directory. `--reset-stale` remains the separate stale-output operation.
 
 VoiceRender keeps its output below `<bundle>/voicerender/<variant>/`. Existing internal layouts may differ by kind, but they are selected from the manifest, not from a command name. The generic RenderPlan renderer preserves request order and identity: one speech item becomes one exact request and one numbered WAV. It does not adaptively split, merge, normalize, or reorder requests. An incomplete run leaves a valid partial manifest.
 

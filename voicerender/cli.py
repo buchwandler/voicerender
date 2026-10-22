@@ -18,6 +18,10 @@ from renderplan import load_manifest, load_plan
 
 from . import __version__
 from .bundle import BundleRenderResult, render_bundle
+from .bundle_batch import (
+    BundleBatchRenderResult,
+    render_bundle_batch,
+)
 from .engines.options import engine_option_to_dict, engine_options
 from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
 from .engines.registry import (
@@ -491,14 +495,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="path resolving to a canonical NAME.ssmd-bundle directory",
     )
     bundle_render.add_argument(
-        "--variant", required=True, help="exact RenderPlan variant directory name"
+        "--variant",
+        default=None,
+        help=(
+            "exact variant to render alone; omit for state-aware batch rendering "
+            "of incomplete valid variants (batch --force also includes complete variants)"
+        ),
     )
     bundle_render.add_argument("--chapters", default="all", metavar="SELECTOR")
     bundle_render.add_argument("--speech", default="all", metavar="SELECTOR")
     bundle_render.add_argument("--renderplan-root", type=Path)
     bundle_render.add_argument("--output-root", type=Path)
     bundle_render.add_argument("--cache-dir", type=Path)
-    bundle_render.add_argument("--force", action="store_true")
+    bundle_render.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "batch: include completed valid variants; single variant: bypass verified "
+            "output reuse/cache"
+        ),
+    )
     bundle_render.add_argument(
         "--reset-stale",
         action="store_true",
@@ -592,6 +608,19 @@ class _ProgressPrinter:
         self._last_phase: str | None = None
         self._last_chapter: tuple[str | None, int | None] | None = None
         self._line_open = False
+        self._context: str | None = None
+
+    def set_context(self, context: str | None) -> None:
+        """Reset progress throttling and identify the next batch variant."""
+        self.finish()
+        self._context = context
+        self._last_output_at = None
+        self._last_output_progress = None
+        self._last_phase = None
+        self._last_chapter = None
+        if context:
+            self.stream.write(f"[{context}] starting\n")
+            self.stream.flush()
 
     def __call__(self, event: RenderEvent) -> None:
         now = self._clock()
@@ -712,8 +741,8 @@ class _ProgressPrinter:
                 fields.append(status.replace(" ", "_"))
             if chapter is not None:
                 fields.append(chapter.replace(" ", "_"))
-            return " ".join(fields)
-        return " | ".join(details)
+            return (f"[{self._context}] " if self._context else "") + " ".join(fields)
+        return (f"[{self._context}] " if self._context else "") + " | ".join(details)
 
     @staticmethod
     def _event_status(event: RenderEvent) -> str | None:
@@ -1069,6 +1098,66 @@ def _print_bundle_result(result: BundleRenderResult) -> None:
     print(f"  rendered:  {rendered}")
     print(f"  reused:    {reused}")
     print(f"  failed:    {failed}")
+
+
+def _print_bundle_batch_result(result: BundleBatchRenderResult) -> None:
+    summary = result.summary
+    print("VoiceRender bundle render")
+    print("  mode:        batch")
+    print(f"  bundle:      {result.bundle}")
+    print(f"  kind:        {result.kind}")
+    print(f"  renderplans: {result.renderplan_root}")
+    print(f"  output:      {result.output_root}")
+    print(f"  discovered:  {summary.discovered}")
+    print(f"  scheduled:   {summary.scheduled}")
+    print(f"  attempted:   {summary.attempted}")
+    print(f"  skipped:     {summary.skipped_complete} complete")
+
+    if summary.discovered == 0:
+        print("No variants found; nothing to do.")
+    elif result.no_work and summary.skipped_complete == summary.discovered:
+        print("All valid variants are already complete; nothing to do.")
+
+    attempted_index = 0
+    for variant in result.variants:
+        if variant.attempt_status is not None:
+            attempted_index += 1
+            position = f"[{attempted_index}/{summary.attempted}]"
+        else:
+            position = "[--]"
+        print(f"\n{position} {variant.name} ({variant.initial_state})")
+        print(f"  status: {variant.status}")
+        if variant.attempt_status is not None:
+            print(f"  attempt: {variant.attempt_status}")
+        if variant.result is not None:
+            value = variant.result.value
+            rendered = getattr(value, "written", getattr(value, "rendered", 0))
+            reused = getattr(value, "reused", 0)
+            print(f"  rendered: {rendered} new, {reused} reused")
+        error_message = variant.error_message or variant.validation_error
+        if variant.error_code or error_message:
+            print(
+                "  error: "
+                + ": ".join(
+                    text for text in (variant.error_code, error_message) if text
+                )
+            )
+        if variant.output_error:
+            print(f"  output warning: {variant.output_error}")
+        if variant.pending_composition:
+            print("  WARNING: audio composition is pending")
+
+    if result.error_message:
+        print(
+            f"Batch inspection error: {result.error_code or 'bundle.invalid'}: {result.error_message}"
+        )
+    print("\nVoiceRender batch summary")
+    print(f"  completed:       {summary.completed}")
+    print(f"  partial:         {summary.partial}")
+    print(f"  failed:          {summary.failed}")
+    print(f"  skipped:         {summary.skipped_complete}")
+    print(f"  invalid:         {summary.invalid}")
+    print(f"  not attempted:   {summary.not_attempted}")
 
 
 def _inspect_manifest(path: Path) -> tuple[dict[str, Any], bool]:
@@ -2130,36 +2219,97 @@ def main(argv: list[str] | None = None) -> int:
             progress = _progress_callback(args)
             try:
                 try:
-                    bundle_result = render_bundle(
-                        args.bundle,
-                        variant=args.variant,
-                        chapters=args.chapters,
-                        speech=args.speech,
-                        renderplan_root=args.renderplan_root,
-                        output_root=args.output_root,
-                        cache_dir=args.cache_dir,
-                        force=args.force,
-                        reset_stale=args.reset_stale,
-                        emphasis_policy=args.emphasis_policy,
-                        fail_fast=args.fail_fast,
-                        on_progress=progress,
-                    )
+                    if args.variant is None:
+                        batch_result = render_bundle_batch(
+                            args.bundle,
+                            chapters=args.chapters,
+                            speech=args.speech,
+                            renderplan_root=args.renderplan_root,
+                            output_root=args.output_root,
+                            cache_dir=args.cache_dir,
+                            force=args.force,
+                            reset_stale=args.reset_stale,
+                            emphasis_policy=args.emphasis_policy,
+                            fail_fast=args.fail_fast,
+                            on_progress=progress,
+                        )
+                    else:
+                        bundle_result = render_bundle(
+                            args.bundle,
+                            variant=args.variant,
+                            chapters=args.chapters,
+                            speech=args.speech,
+                            renderplan_root=args.renderplan_root,
+                            output_root=args.output_root,
+                            cache_dir=args.cache_dir,
+                            force=args.force,
+                            reset_stale=args.reset_stale,
+                            emphasis_policy=args.emphasis_policy,
+                            fail_fast=args.fail_fast,
+                            on_progress=progress,
+                        )
                 finally:
                     if progress is not None:
                         progress.finish()
             except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
-                payload = {
-                    "format": "voicerender-bundle-result",
-                    "version": 1,
-                    "error": str(exc),
-                    "code": getattr(exc, "code", "bundle.invalid"),
-                    "exit_code": 2,
-                }
+                if args.variant is None:
+                    error_code = getattr(exc, "code", None)
+                    payload = {
+                        "format": "voicerender-bundle-batch-result",
+                        "version": 1,
+                        "kind": None,
+                        "bundle": str(args.bundle),
+                        "renderplan_root": (
+                            str(args.renderplan_root)
+                            if args.renderplan_root is not None
+                            else None
+                        ),
+                        "output_root": (
+                            str(args.output_root)
+                            if args.output_root is not None
+                            else None
+                        ),
+                        "force": args.force,
+                        "summary": {
+                            "discovered": 0,
+                            "scheduled": 0,
+                            "attempted": 0,
+                            "completed": 0,
+                            "partial": 0,
+                            "failed": 0,
+                            "skipped_complete": 0,
+                            "invalid": 0,
+                            "not_attempted": 0,
+                        },
+                        "variants": [],
+                        "error_code": error_code
+                        if isinstance(error_code, str)
+                        else "bundle.invalid",
+                        "error_message": str(exc),
+                        "exit_code": 2,
+                    }
+                else:
+                    payload = {
+                        "format": "voicerender-bundle-result",
+                        "version": 1,
+                        "error": str(exc),
+                        "code": getattr(exc, "code", "bundle.invalid"),
+                        "exit_code": 2,
+                    }
                 if args.json:
                     print(json.dumps(payload, ensure_ascii=False, indent=2))
                 else:
                     print(f"error: {exc}", file=sys.stderr)
                 return 2
+
+            if args.variant is None:
+                if args.json:
+                    print(
+                        json.dumps(batch_result.to_dict(), ensure_ascii=False, indent=2)
+                    )
+                else:
+                    _print_bundle_batch_result(batch_result)
+                return batch_result.exit_code
             if args.json:
                 print(json.dumps(bundle_result.to_dict(), ensure_ascii=False, indent=2))
             else:

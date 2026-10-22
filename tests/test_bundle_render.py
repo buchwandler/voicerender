@@ -160,6 +160,9 @@ def test_bundle_render_parser_and_removed_commands(
     args = parser.parse_args(
         ["bundle", "render", "sample.ssmd-bundle", "--variant", "v"]
     )
+    batch_args = parser.parse_args(["bundle", "render", "sample.ssmd-bundle"])
+    assert args.variant == "v"
+    assert batch_args.variant is None
     assert args.command == "bundle"
     assert args.bundle_command == "render"
     assert args.chapters == args.speech == "all"
@@ -172,6 +175,9 @@ def test_bundle_render_parser_and_removed_commands(
     help_output = capsys.readouterr().out
     assert "--variant" in help_output
     assert "--chapters" in help_output
+    assert "incomplete valid variants" in help_output
+    assert "force also includes complete variants" in help_output
+    assert "completed valid variants" in help_output
 
 
 def test_bundle_cli_emits_neutral_json(
