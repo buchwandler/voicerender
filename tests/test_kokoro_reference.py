@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import tomllib
 
 from voicerender.engines.base import (
     PCM_RANGE_POLICY,
@@ -18,23 +19,46 @@ from voicerender.engines.base import (
     validate_rendered_speech,
 )
 from voicerender.engines.kokoro import (
+    PYKOKORO_REQUIRED,
     PyKokoroEngineAdapter,
     _normalize_short_sentence,
     _normalize_voice_level,
+    _pykokoro_discovery,
     _target_from_capabilities,
     _translate_pykokoro_error,
     _version_supported,
 )
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineBackendError, EngineSelectionError
+from voicerender.models import ModelDiscoveryError
 from voicerender.voice_sources import local_reference_source
 
 
-def test_pykokoro_minimum_version_is_0105() -> None:
-    assert not _version_supported("0.10.4")
-    assert _version_supported("0.10.5")
+def test_pykokoro_minimum_version_is_0106() -> None:
+    assert not _version_supported("0.10.5")
+    assert _version_supported("0.10.6")
     assert _version_supported("0.10.10")
     assert not _version_supported("0.11.0")
+
+
+def test_pykokoro_incompatibility_diagnostic_matches_package_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata_path = Path(__file__).parents[1] / "pyproject.toml"
+    metadata = tomllib.loads(metadata_path.read_text(encoding="utf-8"))
+    declared_requirement = metadata["project"]["optional-dependencies"]["kokoro"][0]
+    assert declared_requirement == f"pykokoro{PYKOKORO_REQUIRED}"
+
+    module = ModuleType("pykokoro")
+    module.__version__ = "0.10.5"
+    module.__file__ = "/fake/pykokoro/__init__.py"
+    monkeypatch.setitem(sys.modules, "pykokoro", module)
+
+    with pytest.raises(ModelDiscoveryError) as caught:
+        _pykokoro_discovery()
+
+    assert caught.value.code == "pykokoro.version_unsupported"
+    assert f"required: {PYKOKORO_REQUIRED}" in str(caught.value)
 
 
 def _model(
@@ -694,6 +718,62 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
     assert rendered.metadata["voice_level"]["mode"] == "off"
 
 
+@pytest.mark.parametrize(
+    ("seed_options", "expected_seed"),
+    [({}, None), ({"random_seed": 17}, 17)],
+)
+def test_akinvox_reference_generation_preserves_optional_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    seed_options: dict[str, int],
+    expected_seed: int | None,
+) -> None:
+    from voicerender.engines import kokoro
+
+    adapter, state = _install(
+        monkeypatch, _model(voice_mode="reference", reference_enrollment=True)
+    )
+    reference_audio = Path("/cache/reference.wav")
+    monkeypatch.setattr(
+        kokoro,
+        "resolve_reference_audio",
+        lambda *args, **kwargs: SimpleNamespace(path=reference_audio),
+    )
+    options = {
+        "voice_source": _managed_source(),
+        "voice_enrollment": {
+            "engine": "akinvox",
+            "reference_text": "Reference transcript",
+        },
+        **seed_options,
+    }
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="en-akinvox-cloning-v1",
+        language="en-US",
+        voice="akinvox",
+        options=options,
+    )
+
+    with adapter.open(selection) as session:
+        session.synthesize(
+            SpeechRequest(
+                id="reference",
+                text="Reference-conditioned speech",
+                language="en-US",
+            )
+        )
+
+    config = state["config"]
+    assert config.model_variant == "en-akinvox-cloning-v1"
+    assert config.voice is None
+    assert config.generation.random_seed == expected_seed
+    assert len(state["enrollments"]) == 1
+    enrollment = state["enrollments"][0]
+    assert enrollment["engine"] == "akinvox"
+    assert enrollment["reference_text"] == "Reference transcript"
+    assert state["syntheses"][0].voice is enrollment["voice"]
+
+
 def test_kokoro_invalid_option_is_reported_before_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -866,19 +946,35 @@ class BackendError(Exception):
     native_error_message = "bad shape"
 
 
-def _translation_selection() -> EngineSelection:
+def _translation_selection(*, options: dict[str, Any] | None = None) -> EngineSelection:
     return EngineSelection(
         engine="kokoro",
         target_id="en-akinvox-cloning-v1",
         language="en-US",
         voice="akinvox",
         speaker=1,
+        options=options or {},
     )
 
 
+@pytest.mark.parametrize(
+    ("seed_options", "expected_configured", "expected_seed"),
+    [({}, False, None), ({"random_seed": 17}, True, 17)],
+)
 def test_translate_pykokoro_error_preserves_native_diagnostics_and_cause(
     monkeypatch: pytest.MonkeyPatch,
+    seed_options: dict[str, int],
+    expected_configured: bool,
+    expected_seed: int | None,
 ) -> None:
+    from voicerender.engines import kokoro
+
+    versions = {
+        "pykokoro": "0.10.6",
+        "onnxvoice": "0.2.12",
+        "onnxruntime": "1.20.1",
+    }
+    monkeypatch.setattr(kokoro, "distribution_version", lambda name: versions.get(name))
     module = ModuleType("pykokoro")
     module.BackendError = BackendError
     native_diagnostic = {
@@ -894,7 +990,23 @@ def test_translate_pykokoro_error_preserves_native_diagnostics_and_cause(
         "Kokoro model inference failed: RuntimeContractError: bad shape"
     )
     native.__cause__ = RuntimeError("provider execution failed")
-    translated = _translate_pykokoro_error(native, _translation_selection())
+    selection = _translation_selection(
+        options={
+            "voice_source": {
+                "kind": "managed_reference",
+                "resolver": "voicefolio",
+                "value": "catalog:private-source",
+                "access_token": "private-token",
+                "path": "/private/reference.wav",
+            },
+            "voice_enrollment": {
+                "engine": "akinvox",
+                "reference_text": "private transcript",
+            },
+            **seed_options,
+        }
+    )
+    translated = _translate_pykokoro_error(native, selection)
 
     assert isinstance(translated, EngineBackendError)
     assert translated.code == "synthesis.backend_error"
@@ -903,6 +1015,25 @@ def test_translate_pykokoro_error_preserves_native_diagnostics_and_cause(
     assert translated.details["native_stage"] == "inference"
     assert translated.details["native_error_message"] == "bad shape"
     assert translated.details["native_diagnostic"] == native_diagnostic
+    assert translated.details["pykokoro_version"] == "0.10.6"
+    assert translated.details["onnxvoice_version"] == "0.2.12"
+    assert translated.details["onnxruntime_version"] == "1.20.1"
+    assert translated.details["python_version"]
+    assert translated.details["platform_system"]
+    assert translated.details["platform_machine"]
+    assert translated.details["target_id"] == "en-akinvox-cloning-v1"
+    assert translated.details["reference_conditioning"] is True
+    assert translated.details["random_seed_configured"] is expected_configured
+    assert translated.details["random_seed"] == expected_seed
+    assert translated.details["backend_boundary"] == "pykokoro->onnxvoice"
+    serialized = repr(translated.details)
+    for secret in (
+        "catalog:private-source",
+        "private-token",
+        "/private/reference.wav",
+        "private transcript",
+    ):
+        assert secret not in serialized
     with pytest.raises(EngineBackendError) as caught:
         raise translated from native
     assert caught.value.__cause__ is native

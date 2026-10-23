@@ -7,6 +7,7 @@ import importlib.metadata
 import json
 import logging
 import math
+import platform
 import re
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
@@ -60,7 +61,7 @@ from .registry import normalize_engine_id
 logger = logging.getLogger(__name__)
 
 
-PYKOKORO_REQUIRED = ">=0.10.5,<0.11"
+PYKOKORO_REQUIRED = ">=0.10.6,<0.11"
 _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
 
 
@@ -80,7 +81,7 @@ def _version_supported(version: str) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     patch = int(match.group(3) or 0)
-    return (major, minor, patch) >= (0, 10, 5) and (major, minor) == (0, 10)
+    return (major, minor, patch) >= (0, 10, 6) and (major, minor) == (0, 10)
 
 
 def _package_metadata() -> str | None:
@@ -601,9 +602,33 @@ def _translate_pykokoro_error(
         elif isinstance(error, (TypeError, ValueError)):
             error_type = InvalidSpeechRequestError
 
+    pykokoro_version = distribution_version("pykokoro")
+    if pykokoro_version is None:
+        module_version = getattr(pykokoro, "__version__", None)
+        pykokoro_version = module_version if isinstance(module_version, str) else None
+    options = selection.options
+    random_seed = options.get("random_seed")
+    runtime_details: dict[str, object] = {
+        "pykokoro_version": pykokoro_version,
+        "onnxvoice_version": distribution_version("onnxvoice"),
+        "onnxruntime_version": distribution_version("onnxruntime"),
+        "python_version": platform.python_version(),
+        "platform_system": platform.system(),
+        "platform_machine": platform.machine(),
+        "reference_conditioning": isinstance(options.get("voice_source"), Mapping)
+        and isinstance(options.get("voice_enrollment"), Mapping),
+        "random_seed_configured": random_seed is not None,
+        "random_seed": (
+            random_seed
+            if isinstance(random_seed, int) and not isinstance(random_seed, bool)
+            else None
+        ),
+        "backend_boundary": "pykokoro->onnxvoice",
+    }
+
     context: dict[str, Any] = {
         "engine": "kokoro",
-        "engine_version": distribution_version("pykokoro"),
+        "engine_version": pykokoro_version,
         "target_id": selection.target_id,
         "language": request.language if request is not None else selection.language,
         "voice": request.voice if request is not None else selection.voice,
@@ -624,6 +649,7 @@ def _translate_pykokoro_error(
     if failure_code is not None and error_type is EngineBackendError:
         context["code"] = failure_code
     details: dict[str, object] = {}
+    details.update(runtime_details)
     for attribute, detail_name in (
         ("stage", "native_stage"),
         ("native_error_message", "native_error_message"),
@@ -1027,6 +1053,15 @@ class PyKokoroEngineAdapter:
                 value_type="number",
                 default=None,
                 description="Explicit PyKokoro gain override, including for enrolled voices.",
+            ),
+            "random_seed": EngineOption(
+                name="random_seed",
+                value_type="integer",
+                default=None,
+                description=(
+                    "Optional deterministic PyKokoro/OnnxVoice inference seed; "
+                    "leave unset to use the backend default."
+                ),
             ),
         }
 

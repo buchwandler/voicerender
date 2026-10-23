@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from voicerender import cli
 from voicerender.engines.base import EngineCapabilities, EngineOption
 from voicerender.engines.options import engine_options
+from voicerender.engines.registry import get_adapter
 from voicerender.engines.selection import reject_incompatible_options
 
 
@@ -49,6 +50,11 @@ def test_kokoro_options_expose_shorthand_and_structured_capabilities() -> None:
     assert options["short_sentence.min_phoneme_length"].minimum == 0
     assert options["voice_level"].value_type == "string|table"
     assert options["voice_level.gain_db"].value_type == "number"
+
+    adapter = get_adapter("kokoro")
+    assert "random_seed" in adapter.capabilities().option_names
+    assert options["random_seed"].value_type == "integer"
+    assert options["random_seed"].default is None
 
 
 def test_engine_options_command_emits_deterministic_json(monkeypatch, capsys) -> None:
