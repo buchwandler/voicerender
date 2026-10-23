@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -89,6 +90,8 @@ def test_profile_bind_delegates_to_role_set_and_requires_destination(
 ) -> None:
     source = tmp_path / "source.renderprofile.toml"
     original = _write_profile(source)
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"reference audio")
     calls: dict[str, object] = {}
 
     def fake_set_profile_role(profile, role, **kwargs):
@@ -117,8 +120,10 @@ def test_profile_bind_delegates_to_role_set_and_requires_destination(
             "mini-0.8",
             "--language",
             "en-US",
-            "--voice",
-            "Jasper",
+            "--reference-wav",
+            str(reference),
+            "--transcript",
+            "Exact reference words.",
             "--offline",
             "--make-default",
             "--in-place",
@@ -128,8 +133,8 @@ def test_profile_bind_delegates_to_role_set_and_requires_destination(
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert calls["voice"] == "Jasper"
-    assert calls["offline"] is True
+    assert calls["voice_source"]["kind"] == "reference"
+    assert calls["transcript"] == "Exact reference words."
     assert calls["make_default"] is True
     assert load_render_profile(source).default_role == "host"
     assert payload["path"] == str(source)
@@ -231,8 +236,15 @@ def test_role_list_and_profile_show_present_the_complete_cast(
             "options": {
                 "voice_source": {
                     "kind": "managed_reference",
-                    "reference": "large-reference-mapping-is-not-displayed",
-                }
+                    "resolver": "voicefolio",
+                    "value": "fine-read-it-voices:S5339",
+                    "sha256": "a" * 64,
+                    "source_format": "wav",
+                },
+                "voice_enrollment": {
+                    "engine": "akinvox",
+                    "reference_text": "Exact transcript must not be printed.",
+                },
             },
         },
     )
@@ -248,7 +260,9 @@ def test_role_list_and_profile_show_present_the_complete_cast(
     assert "speaker:Jasper" in role_output
     assert "source:managed_reference" in role_output
     assert "private_detail" not in role_output
-    assert "large-reference-mapping-is-not-displayed" not in role_output
+    assert "fine-read-it-voices:S5339" in role_output
+    assert "enrollment:akinvox" in role_output
+    assert "Exact transcript must not be printed." not in role_output
     assert "RoleProfile(" not in role_output
 
     exit_code = cli.main(["profile", "show", str(source)])
@@ -267,9 +281,22 @@ def test_role_list_and_profile_show_present_the_complete_cast(
     source_role = next(
         item for item in show_payload["roles"] if item["role"] == "source"
     )
-    assert source_role["binding"]["options"]["voice_source"]["reference"] == (
-        "large-reference-mapping-is-not-displayed"
-    )
+    source_binding = source_role["binding"]["options"]
+    assert source_binding["voice_source"] == {
+        "kind": "managed_reference",
+        "ref": "fine-read-it-voices:S5339",
+        "resolver": "voicefolio",
+        "sha256": "a" * 64,
+        "source_format": "wav",
+    }
+    enrollment = source_binding["voice_enrollment"]
+    assert enrollment == {
+        "engine": "akinvox",
+        "reference_text_sha256": hashlib.sha256(
+            b"Exact transcript must not be printed."
+        ).hexdigest(),
+    }
+    assert "Exact transcript must not be printed." not in json.dumps(show_payload)
     narrator_role = next(
         item for item in show_payload["roles"] if item["role"] == "narrator"
     )

@@ -20,7 +20,7 @@ The profile is a discovery snapshot. If engine-derived metadata is stale, create
 
 ## Reference-voice profile examples
 
-Discover the available Sopro bundles and install the extra before creating a profile. A local or Voicefolio-managed source can be selected; managed audio is resolved only when synthesis begins:
+Discover the available Sopro bundles and install the extra before creating a profile. VoiceFolio-managed audio is resolved only when synthesis begins:
 
 ```bash
 python -m pip install -e '.[sopro]'
@@ -30,21 +30,42 @@ voicerender profile create --engine sopro --target BUNDLE_ID --language en-US \
   --output sopro.renderprofile.toml
 ```
 
-Kokoro supports Inno on static targets that advertise `inno-v0.2`, and AkinVox on a reference-only target. Inno does not need a transcript; AkinVox requires the exact reference transcript:
+### Kokoro multi-role VoiceFolio AkinVox
+
+When a VoiceFolio catalog entry contains its transcript, create and bind cast roles without a local reference WAV or engine-specific enrollment JSON:
+
+```bash
+voicerender profile create \
+  --role narrator --engine kokoro \
+  --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref fine-read-it-voices:S5339 \
+  -o story-cast.renderprofile.toml
+
+voicerender profile bind story-cast.renderprofile.toml analyst \
+  --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref fine-read-it-voices:S5393 --in-place
+```
+
+For a reference without catalog transcript metadata, pass the exact spoken words with the generic `--transcript` fallback:
+
+```bash
+voicerender profile create \
+  --role narrator --engine kokoro \
+  --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref other:voice --transcript "Exact spoken words." \
+  -o narrator.renderprofile.toml
+```
+
+AkinVox requires a non-empty exact transcript, supports English only, and requires speed `1.0`. Conflicting transcript sources are rejected. Profile create, bind, and validate read catalog metadata but do not fetch audio; VoiceFolio resolves/verifies the pinned source and AkinVox enrolls lazily during rendering. The profile keeps portable source pins, not cache or materialized WAV paths. Existing advanced `voice_enrollment` options remain available when required.
+
+Inno remains a separate option for static targets that advertise its enroller. It needs no transcript and may accept `fmax`:
 
 ```bash
 voicerender profile create --engine kokoro --target STATIC_TARGET_WITH_INNO \
   --language en-US --reference-wav ./speaker.wav \
   --option 'voice_enrollment={"engine":"auto","fmax":8000}' \
   --output local-inno.renderprofile.toml
-
-voicerender profile create --engine kokoro --target en-akinvox-cloning-v1 \
-  --language en-US --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
-  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact spoken words."}' \
-  --output managed-akinvox.renderprofile.toml
 ```
-
-Preflight checks source pins and measures requests without fetching managed WAVs or enrolling voices. The render session resolves and enrolls a reference lazily, then reuses the enrolled voice for that session. Local references are path-specific; use Voicefolio pins when profiles must travel between machines.
 
 ## Compatibility API
 

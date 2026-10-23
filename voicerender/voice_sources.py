@@ -27,6 +27,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _QWEN_ORIGIN_SCHEMA = "voicerender.voice-origin.qwen3-design.v1"
 _MANAGED_FIELDS = (
     "resolver",
+    "source_format",
     "source_revision",
     "source_repository",
     "source_path",
@@ -64,6 +65,7 @@ class VoiceSource:
     value: str
     sha256: str | None = None
     resolver: str | None = None
+    source_format: str | None = None
     source_revision: str | None = None
     source_repository: str | None = None
     source_path: str | None = None
@@ -82,6 +84,7 @@ class VoiceSource:
         for name in (
             "sha256",
             "resolver",
+            "source_format",
             "source_revision",
             "source_repository",
             "source_path",
@@ -104,6 +107,15 @@ class VoiceSource:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedReferenceContext:
+    """Portable source identity and the small catalog facts needed for binding."""
+
+    source: VoiceSource
+    language: str | None = None
+    transcript: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedReferenceAudio:
     """A verified local reference WAV and its stable source provenance."""
 
@@ -115,6 +127,8 @@ class ResolvedReferenceAudio:
     source_revision: str | None = None
     source_repository: str | None = None
     source_path: str | None = None
+    source_sha256: str | None = None
+    source_format: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,7 +545,7 @@ def normalize_voice_source(
                 details={"field": name, "ref": value},
             )
         fields[name] = item
-    for name in ("license", "dataset", "variant"):
+    for name in ("source_format", "license", "dataset", "variant"):
         item = source.get(name)
         if item is not None and (not isinstance(item, str) or not item.strip()):
             raise _voice_error(
@@ -545,6 +559,7 @@ def normalize_voice_source(
         value=value,
         sha256=sha256,
         resolver=resolver,
+        source_format=fields["source_format"],
         source_revision=fields["source_revision"],
         source_repository=fields["source_repository"],
         source_path=fields["source_path"],
@@ -657,6 +672,55 @@ def managed_reference_source(
             f"Cannot create Voicefolio managed reference {ref!r}: {exc}",
             details={"resolver": "voicefolio", "ref": ref},
         ) from exc
+
+
+def managed_reference_context(
+    ref: str,
+    *,
+    catalog_paths: Iterable[str | Path] | str | Path | None = None,
+) -> ManagedReferenceContext:
+    """Load a managed source plus public catalog language/transcript metadata."""
+    if not isinstance(ref, str) or not ref.strip():
+        raise _voice_error(
+            "managed_voice.invalid_source",
+            "Voicefolio reference must be a non-empty string",
+            details={"resolver": "voicefolio"},
+        )
+    try:
+        catalog = voicefolio.load_catalog(
+            extra_paths=_catalog_path_tuple(catalog_paths)
+        )
+        entry = catalog.get(ref)
+        raw_source = voicefolio.managed_reference(ref, catalog=catalog)
+        if not isinstance(raw_source, Mapping):
+            raise _voice_error(
+                "managed_voice.invalid_source",
+                "Voicefolio returned a managed voice source that is not a table",
+                details={"resolver": "voicefolio", "ref": ref},
+            )
+    except (voicefolio.VoicefolioError, ValueError) as exc:
+        raise _voice_error(
+            "managed_voice.invalid_source",
+            f"Cannot inspect Voicefolio managed reference {ref!r}: {exc}",
+            details={"resolver": "voicefolio", "ref": ref},
+        ) from exc
+    source = normalize_voice_source(raw_source)
+    raw_language = getattr(entry, "language", None)
+    language = raw_language.strip() if isinstance(raw_language, str) else None
+    if not language:
+        language = None
+    raw_metadata = getattr(entry, "metadata", None)
+    raw_transcript = (
+        raw_metadata.get("transcript") if isinstance(raw_metadata, Mapping) else None
+    )
+    transcript = (
+        raw_transcript.strip()
+        if isinstance(raw_transcript, str) and raw_transcript.strip()
+        else None
+    )
+    return ManagedReferenceContext(
+        source=source, language=language, transcript=transcript
+    )
 
 
 def create_voice_source(
@@ -789,7 +853,12 @@ def resolve_reference_audio(
     )
     if normalized.kind == "reference":
         path, digest = _validate_local_reference(normalized)
-        return ResolvedReferenceAudio(kind="reference", path=path, sha256=digest)
+        return ResolvedReferenceAudio(
+            kind="reference",
+            path=path,
+            sha256=digest,
+            source_sha256=digest,
+        )
     if normalized.kind == "prepared":
         raise _voice_error(
             "voice_source.prepared_invalid",
@@ -809,12 +878,14 @@ def resolve_reference_audio(
     return ResolvedReferenceAudio(
         kind="managed_reference",
         path=resolved.path,
-        sha256=resolved.sha256,
+        sha256=resolved.resolved_sha256,
         resolver=resolved.resolver,
         ref=resolved.ref,
         source_revision=resolved.source_revision,
         source_repository=resolved.source_repository,
         source_path=resolved.source_path,
+        source_sha256=resolved.source_sha256,
+        source_format=resolved.source_format,
     )
 
 
@@ -957,6 +1028,7 @@ def _option_error(
 
 
 __all__ = [
+    "ManagedReferenceContext",
     "ResolvedPreparedVoice",
     "ResolvedReferenceAudio",
     "VoiceSource",
@@ -964,6 +1036,7 @@ __all__ = [
     "create_voice_source",
     "local_prepared_voice_source",
     "local_reference_source",
+    "managed_reference_context",
     "managed_reference_source",
     "normalize_voice_source",
     "resolve_prepared_voice",

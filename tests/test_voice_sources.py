@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import voicefolio
 
 from voicerender import voice_sources
 from voicerender.errors import InvalidEngineOptionError, InvalidEngineVoiceError
@@ -147,6 +148,9 @@ def test_managed_resolution_preserves_pins_and_identity_omits_cache_paths(
         ref = source["value"]
         path = resolved_path
         sha256 = source["sha256"]
+        source_sha256 = source["sha256"]
+        resolved_sha256 = source["sha256"]
+        source_format = "wav"
         source_revision = source["source_revision"]
         source_repository = source["source_repository"]
         source_path = source["source_path"]
@@ -163,6 +167,8 @@ def test_managed_resolution_preserves_pins_and_identity_omits_cache_paths(
     assert resolved.kind == "managed_reference"
     assert resolved.path == resolved_path
     assert resolved.sha256 == source["sha256"]
+    assert resolved.source_sha256 == source["sha256"]
+    assert resolved.source_format == "wav"
     assert resolved.ref == source["value"]
     assert resolved.source_revision == source["source_revision"]
     assert calls[0]["cache_dir"] == tmp_path / "cache"
@@ -198,3 +204,56 @@ def test_unsupported_resolver_is_rejected_and_legacy_shim_is_limited() -> None:
     with pytest.raises(InvalidEngineVoiceError) as error:
         voice_sources.normalize_voice_source(historical)
     assert error.value.code == "managed_voice.resolver_missing"
+
+
+@pytest.mark.parametrize("source_format", ["wav", "flac"])
+def test_managed_reference_source_format_is_preserved(source_format: str) -> None:
+    source = _managed_source()
+    source["source_format"] = source_format
+
+    normalized = voice_sources.normalize_voice_source(source)
+
+    assert normalized.source_format == source_format
+    assert normalized.as_mapping()["source_format"] == source_format
+
+
+def test_managed_reference_source_format_is_optional_but_non_empty() -> None:
+    source = _managed_source()
+    assert voice_sources.normalize_voice_source(source).source_format is None
+
+    source["source_format"] = "  "
+    with pytest.raises(InvalidEngineVoiceError) as error:
+        voice_sources.normalize_voice_source(source)
+    assert error.value.code == "managed_voice.invalid_source"
+    assert error.value.details["field"] == "source_format"
+
+
+def test_local_reference_rejects_managed_source_format(tmp_path: Path) -> None:
+    source_path = tmp_path / "speaker.wav"
+    source_path.write_bytes(b"reference")
+    source = voice_sources.local_reference_source(source_path)
+    source["source_format"] = "wav"
+
+    with pytest.raises(InvalidEngineVoiceError) as error:
+        voice_sources.normalize_voice_source(source)
+    assert error.value.code == "voice_source.invalid"
+    assert "source_format" in error.value.details["fields"]
+
+
+def test_unknown_managed_reference_field_is_rejected() -> None:
+    source = _managed_source()
+    source["unexpected"] = "value"
+
+    with pytest.raises(InvalidEngineVoiceError) as error:
+        voice_sources.normalize_voice_source(source)
+    assert error.value.code == "managed_voice.invalid_source"
+    assert error.value.details["fields"] == ["unexpected"]
+
+
+def test_current_voicefolio_managed_reference_contract_includes_source_format() -> None:
+    source = voicefolio.managed_reference("fine-read-it-voices:S5339")
+
+    normalized = voice_sources.normalize_voice_source(source)
+
+    assert normalized.source_format == "wav"
+    assert normalized.as_mapping()["source_format"] == "wav"

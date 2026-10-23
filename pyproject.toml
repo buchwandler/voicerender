@@ -75,6 +75,7 @@ module = [
   "chatterboxsynth",
   "inflectsynth",
   "kittensynth",
+  "onnxvoice",
   "pipersynth",
   "pocketsynth",
   "pykokoro",

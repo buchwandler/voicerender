@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +19,7 @@ from voicerender.engines.base import (
     EngineSelection,
     RenderProfileFragment,
 )
+from voicerender.engines.catalog import SynthesisTarget
 from voicerender.engines.profiles import make_renderprofile_fragment
 from voicerender.engines.registry import _ADAPTERS
 from voicerender.engines.selection import EngineRequest
@@ -28,7 +30,12 @@ from voicerender.profile_roles import (
     set_default_profile_role,
     set_profile_role,
 )
-from voicerender.renderprofile import create_render_profile
+from voicerender.renderprofile import create_render_profile, validate_render_profile
+from voicerender.voice_sources import (
+    local_reference_source,
+    managed_reference_context,
+    managed_reference_source,
+)
 
 
 class _RoleAdapter:
@@ -59,7 +66,8 @@ class _RoleAdapter:
                 engine=self.id,
                 target_id=request.target_id or "target-v1",
                 language=request.language or "en-US",
-                voice=request.voice or "voice-a",
+                voice=request.voice
+                or ("voice-a" if "voice_source" not in request.options else None),
                 speaker=request.speaker,
                 options=request.options,
             ),
@@ -248,3 +256,180 @@ def test_default_role_mutation_preserves_roles_and_refreshes_identity(
     assert updated.planning == profile.planning
     assert updated.pauses == profile.pauses
     assert set_default_profile_role(updated, "guest") is updated
+
+
+class _ReferenceRoleAdapter(_RoleAdapter):
+    def capabilities(self) -> EngineCapabilities:
+        return EngineCapabilities(id=self.id, supports_reference_voice=True)
+
+
+def _reference_target() -> SynthesisTarget:
+    return SynthesisTarget(
+        engine="role-test",
+        id="target-v1",
+        display_name="Reference-capable test target",
+        languages=("en-US",),
+        capabilities=frozenset({"reference_voice"}),
+        metadata={},
+    )
+
+
+def test_profile_create_uses_voicefolio_catalog_transcript_without_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ReferenceRoleAdapter()
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+    target = _reference_target()
+    monkeypatch.setattr(
+        "voicerender.renderprofile.discover_targets", lambda *a, **k: (target,)
+    )
+    calls: list[dict[str, Any]] = []
+
+    def bind_reference_voice(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {**kwargs["options"], "transcript": kwargs["transcript"]}
+
+    monkeypatch.setattr(
+        adapter, "bind_reference_voice", bind_reference_voice, raising=False
+    )
+    monkeypatch.setattr(
+        "voicerender.voice_sources.resolve_managed_voice",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("profile create fetched audio")
+        ),
+    )
+    reference = managed_reference_source("fine-read-it-voices:S5339")
+    catalog = managed_reference_context("fine-read-it-voices:S5339")
+
+    profile = create_render_profile(
+        engine=adapter.id,
+        target_id=target.id,
+        language="en-US",
+        voice_source=reference,
+    )
+
+    role_options = profile.roles["narrator"].binding["options"]
+    assert catalog.transcript is not None
+    assert calls[0]["transcript"] == catalog.transcript
+    assert role_options["transcript"] == catalog.transcript
+    assert role_options["voice_source"]["source_format"] == "wav"
+
+
+def test_profile_role_bind_and_validation_keep_voicefolio_setup_metadata_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _ReferenceRoleAdapter()
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+    target = _reference_target()
+    monkeypatch.setattr(
+        "voicerender.renderprofile.discover_targets", lambda *args, **kwargs: (target,)
+    )
+    bind_calls: list[dict[str, Any]] = []
+
+    def bind_reference_voice(**kwargs: Any) -> dict[str, Any]:
+        bind_calls.append(kwargs)
+        return {
+            **kwargs["options"],
+            **(
+                {"transcript": kwargs["transcript"]}
+                if kwargs["transcript"] is not None
+                else {}
+            ),
+        }
+
+    monkeypatch.setattr(
+        adapter, "bind_reference_voice", bind_reference_voice, raising=False
+    )
+    monkeypatch.setattr(
+        "voicerender.voice_sources.resolve_managed_voice",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("profile bind or validation fetched audio")
+        ),
+    )
+    seed_audio = tmp_path / "seed.wav"
+    seed_audio.write_bytes(b"seed")
+    profile = create_render_profile(
+        engine=adapter.id,
+        target_id=target.id,
+        language="en-US",
+        voice_source=local_reference_source(seed_audio),
+    )
+
+    updated = set_profile_role(
+        profile,
+        "guest",
+        engine=adapter.id,
+        target_id=target.id,
+        language="en-US",
+        voice_source=managed_reference_source("fine-read-it-voices:S5339"),
+    )
+    validate_render_profile(updated)
+
+    guest_options = updated.roles["guest"].binding["options"]
+    assert (
+        bind_calls[-1]["transcript"]
+        == managed_reference_context("fine-read-it-voices:S5339").transcript
+    )
+    assert guest_options["voice_source"]["value"] == "fine-read-it-voices:S5339"
+    assert guest_options["transcript"] == bind_calls[-1]["transcript"]
+    assert len(bind_calls) == 2
+
+
+def test_profile_create_transcript_fallback_and_catalog_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    adapter = _ReferenceRoleAdapter()
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+    target = _reference_target()
+    monkeypatch.setattr(
+        "voicerender.renderprofile.discover_targets", lambda *a, **k: (target,)
+    )
+    calls: list[str | None] = []
+
+    def bind_reference_voice(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs["transcript"])
+        return {**kwargs["options"], "transcript": kwargs["transcript"]}
+
+    monkeypatch.setattr(
+        adapter, "bind_reference_voice", bind_reference_voice, raising=False
+    )
+    reference_path = tmp_path / "reference.wav"
+    reference_path.write_bytes(b"reference audio")
+    local_source = local_reference_source(reference_path)
+
+    profile = create_render_profile(
+        engine=adapter.id,
+        target_id=target.id,
+        language="en-US",
+        voice_source=local_source,
+        transcript="Explicit fallback words.",
+    )
+    assert profile.roles["narrator"].binding["options"]["transcript"] == (
+        "Explicit fallback words."
+    )
+    assert calls == ["Explicit fallback words."]
+
+    with pytest.raises(ProfileError, match="explicit transcript differs"):
+        create_render_profile(
+            engine=adapter.id,
+            target_id=target.id,
+            language="en-US",
+            voice_source=managed_reference_source("fine-read-it-voices:S5339"),
+            transcript="A different transcript.",
+        )
+
+
+def test_profile_transcript_requires_reference_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch)
+
+    with pytest.raises(ProfileError, match="--transcript requires"):
+        create_render_profile(
+            engine="role-test",
+            target_id="target-v1",
+            language="en-US",
+            voice="voice-a",
+            transcript="Not a reference transcript.",
+        )

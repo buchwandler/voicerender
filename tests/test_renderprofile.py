@@ -61,7 +61,7 @@ class _ProfileAdapter:
         )
 
     def capabilities(self) -> EngineCapabilities:
-        return EngineCapabilities(id=self.id)
+        return EngineCapabilities(id=self.id, supports_reference_voice=True)
 
     def version(self) -> str:
         return "1.0"

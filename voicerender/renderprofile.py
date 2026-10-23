@@ -18,11 +18,22 @@ from renderplan import (
 )
 
 from .engines.base import EngineSelection, RenderProfileFragment
+from .engines.metadata import language_base
 from .engines.profiles import validate_voice_source_binding
-from .engines.registry import get_adapter, normalize_engine_id, resolve_voice
+from .engines.registry import (
+    discover_targets,
+    get_adapter,
+    normalize_engine_id,
+    resolve_voice,
+)
 from .engines.selection import EngineRequest
-from .errors import EngineError, ProfileError
-from .voice_sources import normalize_voice_source
+from .errors import EngineError, EngineSelectionError, ProfileError
+from .voice_sources import (
+    VoiceSource,
+    managed_reference_context,
+    normalize_voice_source,
+    validate_voice_source,
+)
 
 _DEFAULT_PAUSES = PausePolicy(
     mode="manual",
@@ -39,6 +50,7 @@ def create_render_profile(
     voice: str | None = None,
     speaker: str | int | None = None,
     voice_source: Mapping[str, Any] | None = None,
+    transcript: str | None = None,
     options: Mapping[str, Any] | None = None,
     offline: bool = False,
     refresh: bool = False,
@@ -49,21 +61,198 @@ def create_render_profile(
     if not language.strip():
         raise ProfileError("Profile language must not be empty")
     profile_options = dict(options or {})
-    if voice_source is not None:
+    selected_voice_source = voice_source
+    if selected_voice_source is None:
+        selected_voice_source = profile_options.pop("voice_source", None)
+    elif "voice_source" in profile_options:
+        raise ProfileError("voice_source was provided both directly and in options")
+
+    normalized_source: VoiceSource | None = None
+    if selected_voice_source is not None:
         if voice is not None or speaker is not None:
             raise ProfileError("voice/speaker and voice_source cannot both be set")
-        if "voice_source" in profile_options:
-            raise ProfileError("voice_source was provided both directly and in options")
         try:
-            profile_options["voice_source"] = normalize_voice_source(
-                voice_source
-            ).as_mapping()
+            normalized_source = normalize_voice_source(selected_voice_source)
         except (EngineError, ValueError) as exc:
             raise ProfileError(str(exc)) from exc
-    elif "voice_source" in profile_options and (
-        voice is not None or speaker is not None
-    ):
-        raise ProfileError("voice/speaker and voice_source cannot both be set")
+
+    if transcript is not None:
+        if not isinstance(transcript, str) or not transcript.strip():
+            raise ProfileError("Transcript must be a non-empty string")
+        if normalized_source is None or normalized_source.kind not in {
+            "reference",
+            "managed_reference",
+        }:
+            raise ProfileError(
+                "--transcript requires --reference-wav, --voicefolio-ref, or --voice-source"
+            )
+
+    if normalized_source is not None and normalized_source.kind in {
+        "reference",
+        "managed_reference",
+    }:
+        diagnostics = validate_voice_source(normalized_source, offline=offline)
+        errors = [item for item in diagnostics if item.severity == "error"]
+        if errors:
+            raise ProfileError(errors[0].message)
+
+        source_metadata = normalized_source.metadata
+        raw_source_transcript = source_metadata.get("transcript")
+        if (
+            not isinstance(raw_source_transcript, str)
+            or not raw_source_transcript.strip()
+        ):
+            raw_source_transcript = (
+                normalized_source.origin.get("reference_text")
+                if normalized_source.origin is not None
+                else None
+            )
+        source_transcript = (
+            raw_source_transcript.strip()
+            if isinstance(raw_source_transcript, str) and raw_source_transcript.strip()
+            else None
+        )
+        catalog_transcript: str | None = None
+        catalog_language: str | None = None
+        if normalized_source.kind == "managed_reference":
+            context = managed_reference_context(normalized_source.value)
+            catalog_transcript = context.transcript
+            catalog_language = context.language
+            if (
+                catalog_language
+                and language_base(catalog_language) not in {"", "und"}
+                and language_base(catalog_language) != language_base(language)
+            ):
+                raise ProfileError(
+                    f"VoiceFolio reference {normalized_source.value!r} language "
+                    f"{catalog_language!r} is incompatible with profile language {language!r}"
+                )
+            if (
+                catalog_transcript is not None
+                and transcript is not None
+                and catalog_transcript != transcript
+            ):
+                raise ProfileError(
+                    f"Reference transcript conflict for {normalized_source.value!r}: "
+                    "the explicit transcript differs from the transcript pinned in "
+                    "the VoiceFolio catalog."
+                )
+            if (
+                catalog_transcript is not None
+                and source_transcript is not None
+                and catalog_transcript != source_transcript
+            ):
+                raise ProfileError(
+                    f"Reference transcript conflict for {normalized_source.value!r}: "
+                    "stored source text differs from the transcript pinned in the "
+                    "VoiceFolio catalog."
+                )
+        if (
+            transcript is not None
+            and source_transcript is not None
+            and transcript != source_transcript
+        ):
+            ref = normalized_source.value
+            raise ProfileError(
+                f"Reference transcript conflict for {ref!r}: the explicit transcript "
+                "differs from the transcript attached to the voice source."
+            )
+        effective_transcript = transcript or catalog_transcript or source_transcript
+
+        adapter = get_adapter(engine)
+        capabilities = adapter.capabilities()
+        bind_reference_voice = getattr(adapter, "bind_reference_voice", None)
+        if callable(bind_reference_voice):
+            targets = discover_targets(
+                engine, language=language, offline=offline, refresh=refresh
+            )
+            target = next((item for item in targets if item.id == target_id), None)
+            if target is None:
+                raise ProfileError(
+                    f"Engine {engine!r} does not expose target {target_id!r}"
+                )
+            if (
+                not capabilities.supports_reference_voice
+                and "reference_voice" not in target.capabilities
+            ):
+                raise EngineSelectionError(
+                    f"Engine {adapter.id!r} target {target_id!r} does not support reference voices",
+                    engine=adapter.id,
+                    target_id=target_id,
+                    code="voice_clone.reference_unsupported",
+                )
+            try:
+                bound_options = bind_reference_voice(
+                    target=target,
+                    language=language,
+                    voice_source=normalized_source.as_mapping(),
+                    transcript=effective_transcript,
+                    options=profile_options,
+                )
+            except EngineError as exc:
+                if (
+                    getattr(exc, "code", None) == "pykokoro.reference_text_required"
+                    and normalized_source.kind == "managed_reference"
+                    and catalog_transcript is None
+                    and effective_transcript is None
+                ):
+                    raise EngineSelectionError(
+                        "AkinVox reference cloning requires the exact reference transcript.\n"
+                        f"VoiceFolio ref {normalized_source.value!r} has no transcript metadata.\n"
+                        "Pass --transcript TEXT.",
+                        engine=adapter.id,
+                        target_id=target_id,
+                        code="pykokoro.reference_text_required",
+                    ) from exc
+                raise
+            if not isinstance(bound_options, Mapping):
+                raise EngineSelectionError(
+                    f"Engine {adapter.id!r} returned invalid reference voice options",
+                    engine=adapter.id,
+                    target_id=target_id,
+                    code="voice_clone.invalid_binding",
+                )
+            profile_options = dict(bound_options)
+        elif not capabilities.supports_reference_voice:
+            targets = discover_targets(
+                engine, language=language, offline=offline, refresh=refresh
+            )
+            target = next((item for item in targets if item.id == target_id), None)
+            if target is None:
+                raise ProfileError(
+                    f"Engine {engine!r} does not expose target {target_id!r}"
+                )
+            if "reference_voice" not in target.capabilities:
+                raise EngineSelectionError(
+                    f"Engine {adapter.id!r} target {target_id!r} does not support reference voices",
+                    engine=adapter.id,
+                    target_id=target_id,
+                    code="voice_clone.reference_unsupported",
+                )
+        else:
+            accepted_options = set(capabilities.option_names) | set(
+                capabilities.options
+            )
+            transcript_option = next(
+                (
+                    name
+                    for name in ("reference_text", "transcript")
+                    if name in accepted_options
+                ),
+                None,
+            )
+            if effective_transcript is not None and transcript_option is not None:
+                existing = profile_options.get(transcript_option)
+                if existing is not None and existing != effective_transcript:
+                    raise ProfileError(
+                        f"Conflicting transcript supplied in options.{transcript_option} "
+                        "and reference binding"
+                    )
+                profile_options[transcript_option] = effective_transcript
+        profile_options["voice_source"] = normalized_source.as_mapping()
+    elif normalized_source is not None:
+        profile_options["voice_source"] = normalized_source.as_mapping()
+
     request = EngineRequest(
         engine=engine,
         target_id=target_id,

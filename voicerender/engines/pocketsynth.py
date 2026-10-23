@@ -666,7 +666,7 @@ def _verify_resolved_managed_voice(
     actual = {
         "resolver": resolved.resolver,
         "ref": resolved.ref,
-        "sha256": resolved.sha256,
+        "sha256": resolved.source_sha256,
         "source_revision": resolved.source_revision,
         "source_repository": resolved.source_repository,
         "source_path": resolved.source_path,

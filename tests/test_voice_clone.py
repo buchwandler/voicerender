@@ -33,9 +33,11 @@ def test_clone_rejects_target_without_reference_voice_support(
 
     reference = tmp_path / "speaker.wav"
     reference.write_bytes(b"wav reference")
-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
     monkeypatch.setattr(
-        "voicerender.voice_clone.discover_targets",
+        "voicerender.renderprofile.get_adapter", lambda engine: Adapter()
+    )
+    monkeypatch.setattr(
+        "voicerender.renderprofile.discover_targets",
         lambda *a, **k: (_target(reference=False),),
     )
 
@@ -47,51 +49,18 @@ def test_clone_rejects_target_without_reference_voice_support(
     assert error.value.code == "voice_clone.reference_unsupported"
 
 
-def test_clone_delegates_transcript_validation_and_never_synthesizes(
+def test_clone_delegates_binding_to_shared_profile_flow(
     monkeypatch, tmp_path: Path
 ) -> None:
-    class Adapter:
-        id = "fake"
-
-        def capabilities(self):
-            return EngineCapabilities(
-                id="fake",
-                supports_reference_voice=True,
-                option_names=frozenset({"reference_text", "temperature"}),
-            )
-
     reference = tmp_path / "speaker.wav"
     reference.write_bytes(b"wav reference")
-    calls: list[dict[str, object]] = []
-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
-    monkeypatch.setattr(
-        "voicerender.voice_clone.discover_targets", lambda *a, **k: (_target(),)
-    )
+    calls: list[dict[str, Any]] = []
 
     def create_profile(**kwargs):
         calls.append(kwargs)
-        if "reference_text" not in kwargs["options"]:
-            raise EngineSelectionError(
-                "Exact reference transcript required",
-                engine="fake",
-                code="fake.reference_text_required",
-            )
         return kwargs
 
     monkeypatch.setattr("voicerender.voice_clone.create_render_profile", create_profile)
-    monkeypatch.setattr(
-        "voicerender.engines.registry.open_session",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("clone must not synthesize")
-        ),
-    )
-
-    with pytest.raises(EngineSelectionError) as error:
-        clone_voice_profile(
-            VoiceCloneRequest("fake", "clone-model", "en-US", reference_wav=reference)
-        )
-    assert error.value.code == "fake.reference_text_required"
-
     result = clone_voice_profile(
         VoiceCloneRequest(
             "fake",
@@ -104,28 +73,18 @@ def test_clone_delegates_transcript_validation_and_never_synthesizes(
         role="narrator",
     )
 
-    assert result["options"]["reference_text"] == "Exact transcript."
-    assert result["options"]["temperature"] == 0.7
+    assert result["transcript"] == "Exact transcript."
+    assert result["options"] == {"temperature": 0.7}
     assert result["role"] == "narrator"
     assert result["voice_source"]["kind"] == "reference"
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
-def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
+def test_clone_preserves_sidecar_metadata_for_shared_binding(
     monkeypatch, tmp_path: Path
 ) -> None:
     from voicerender.voice_source_codec import save_voice_source
     from voicerender.voice_sources import local_reference_source
-
-    class Adapter:
-        id = "fake"
-
-        def capabilities(self):
-            return EngineCapabilities(
-                id="fake",
-                supports_reference_voice=True,
-                option_names=frozenset({"transcript"}),
-            )
 
     reference = tmp_path / "speaker.wav"
     reference.write_bytes(b"pinned")
@@ -133,10 +92,6 @@ def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
     source["metadata"] = {"transcript": "From the source."}
     sidecar = tmp_path / "speaker.toml"
     save_voice_source(source, sidecar)
-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
-    monkeypatch.setattr(
-        "voicerender.voice_clone.discover_targets", lambda *a, **k: (_target(),)
-    )
     monkeypatch.setattr(
         "voicerender.voice_clone.create_render_profile", lambda **kwargs: kwargs
     )
@@ -145,13 +100,12 @@ def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
         VoiceCloneRequest("fake", "clone-model", "en-US", voice_source=sidecar)
     )
 
-    assert result["options"]["transcript"] == "From the source."
+    assert result["transcript"] is None
+    assert result["voice_source"]["metadata"]["transcript"] == "From the source."
     assert result["voice_source"]["sha256"] == source["sha256"]
 
 
-def test_clone_uses_kokoro_adapter_to_bind_akinvox_transcript(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_kokoro_adapter_binds_generic_transcript_to_akinvox() -> None:
     from voicerender.engines.kokoro import PyKokoroEngineAdapter
 
     target = SynthesisTarget(
@@ -166,32 +120,15 @@ def test_clone_uses_kokoro_adapter_to_bind_akinvox_transcript(
             "supports_voice_enrollment": True,
         },
     )
-    adapter = PyKokoroEngineAdapter()
-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: adapter)
-    monkeypatch.setattr(
-        "voicerender.voice_clone.discover_targets", lambda *args, **kwargs: (target,)
-    )
-    monkeypatch.setattr(
-        "voicerender.voice_clone.validate_voice_source", lambda *a, **k: ()
-    )
-    monkeypatch.setattr(
-        "voicerender.voice_clone.create_render_profile", lambda **kwargs: kwargs
-    )
-    reference = tmp_path / "speaker.wav"
-    reference.write_bytes(b"reference audio")
-
-    profile = clone_voice_profile(
-        VoiceCloneRequest(
-            "kokoro",
-            "clone-model",
-            "en-US",
-            reference_wav=reference,
-            transcript="Exact AkinVox transcript.",
-            options={"voice_enrollment": {"engine": "akinvox"}},
-        )
+    options = PyKokoroEngineAdapter().bind_reference_voice(
+        target=target,
+        language="en-US",
+        voice_source={"kind": "reference"},
+        transcript="Exact AkinVox transcript.",
+        options={"voice_enrollment": {"engine": "akinvox"}},
     )
 
-    assert profile["options"]["voice_enrollment"] == {
+    assert options["voice_enrollment"] == {
         "engine": "akinvox",
         "reference_text": "Exact AkinVox transcript.",
     }

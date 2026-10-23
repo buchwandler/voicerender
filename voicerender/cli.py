@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TextIO, cast
 
@@ -122,10 +122,17 @@ def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None
     parser.add_argument("--language", required=True)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--voice")
-    source.add_argument("--voicefolio-ref")
+    source.add_argument(
+        "--voicefolio-ref",
+        help="Pinned VoiceFolio reference; catalog transcript metadata is used when available",
+    )
     source.add_argument("--reference-wav", type=Path)
     source.add_argument("--prepared-voice", type=Path)
     source.add_argument("--voice-source", type=Path)
+    parser.add_argument(
+        "--transcript",
+        help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
+    )
     parser.add_argument("--speaker")
     parser.add_argument(
         "--option",
@@ -256,7 +263,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a RenderProfile with its first role binding",
         description=(
             "Create the first/default role binding of a complete RenderProfile cast; "
-            "use `profile bind` to add more roles."
+            "use `profile bind` to add more roles. VoiceFolio catalog transcripts "
+            "are used automatically; pass --transcript when metadata is absent."
         ),
     )
     profile_create.add_argument("--engine", required=True)
@@ -265,10 +273,17 @@ def build_parser() -> argparse.ArgumentParser:
     profile_create.add_argument("--role", default="narrator")
     voice_source_group = profile_create.add_mutually_exclusive_group()
     voice_source_group.add_argument("--voice")
-    voice_source_group.add_argument("--voicefolio-ref")
+    voice_source_group.add_argument(
+        "--voicefolio-ref",
+        help="Pinned VoiceFolio reference; catalog transcript metadata is used when available",
+    )
     voice_source_group.add_argument("--reference-wav", type=Path)
     voice_source_group.add_argument("--prepared-voice", type=Path)
     voice_source_group.add_argument("--voice-source", type=Path)
+    profile_create.add_argument(
+        "--transcript",
+        help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
+    )
     profile_create.add_argument("--speaker")
     profile_create.add_argument(
         "--option",
@@ -432,8 +447,14 @@ def build_parser() -> argparse.ArgumentParser:
     clone_source = voice_clone.add_mutually_exclusive_group(required=True)
     clone_source.add_argument("--reference-wav", type=Path)
     clone_source.add_argument("--voice-source", type=Path)
-    clone_source.add_argument("--voicefolio-ref")
-    voice_clone.add_argument("--transcript")
+    clone_source.add_argument(
+        "--voicefolio-ref",
+        help="Pinned VoiceFolio reference; catalog transcript metadata is used when available",
+    )
+    voice_clone.add_argument(
+        "--transcript",
+        help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
+    )
     voice_clone.add_argument("--speaker")
     voice_clone.add_argument(
         "--option", action="append", default=[], metavar="KEY=VALUE"
@@ -855,14 +876,83 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
             "role": role_name,
             "default": role_name == profile.default_role,
             "language": role.language,
-            "binding": dict(role.binding),
+            "binding": _inspection_binding(role.binding),
         }
         for role_name, role in sorted(list_profile_roles(profile).items())
     ]
 
 
+def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+    safe = dict(binding)
+    options = binding.get("options")
+    if isinstance(options, Mapping):
+        safe_options: dict[str, Any] = {}
+        for name, value in options.items():
+            safe_options[name] = (
+                _inspection_voice_source(value)
+                if name == "voice_source"
+                else _redact_transcript_fields(value)
+            )
+        safe["options"] = safe_options
+    if isinstance(binding.get("voice_source"), Mapping):
+        safe["voice_source"] = _inspection_voice_source(binding["voice_source"])
+    return safe
+
+
+def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
+    kind = source.get("kind") or source.get("type")
+    safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
+    if kind == "managed_reference":
+        ref = source.get("value", source.get("ref", source.get("reference")))
+        if isinstance(ref, str):
+            safe["ref"] = ref
+        fields: tuple[str, ...] = (
+            "resolver",
+            "sha256",
+            "source_format",
+            "source_revision",
+            "source_repository",
+            "source_path",
+            "license",
+            "dataset",
+            "variant",
+        )
+    elif kind == "prepared":
+        fields = ("sha256", "format", "model_id", "model_revision", "layout")
+    elif kind == "reference":
+        fields = ("sha256",)
+    else:
+        fields = ()
+    for name in fields:
+        value = source.get(name)
+        if value is not None:
+            safe[name] = value
+    return safe
+
+
+def _redact_transcript_fields(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        safe: dict[str, Any] = {}
+        for name, item in value.items():
+            if name in {"reference_text", "transcript"} and isinstance(item, str):
+                digest_name = (
+                    "reference_text_sha256"
+                    if name == "reference_text"
+                    else "transcript_sha256"
+                )
+                safe[digest_name] = hashlib.sha256(item.encode("utf-8")).hexdigest()
+            else:
+                safe[name] = _redact_transcript_fields(item)
+        return safe
+    if isinstance(value, (list, tuple)):
+        return [_redact_transcript_fields(item) for item in value]
+    return value
+
+
 def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
-    print("  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE")
+    print(
+        "  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE / ENROLLMENT"
+    )
     for item in roles:
         marker = "*" if item["default"] else " "
         binding = item["binding"]
@@ -872,6 +962,19 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
         selector = role_voice_selector(
             RoleProfile(language=item["language"], binding=binding)
         )
+        options = binding.get("options", {})
+        if isinstance(options, Mapping):
+            source = options.get("voice_source")
+            if (
+                isinstance(source, Mapping)
+                and source.get("kind") == "managed_reference"
+            ):
+                ref = source.get("ref")
+                if isinstance(ref, str) and ref:
+                    selector += f":{ref}"
+            enrollment = options.get("voice_enrollment")
+            if isinstance(enrollment, Mapping) and enrollment.get("engine"):
+                selector += f" enrollment:{enrollment['engine']}"
         print(
             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
             f"{target:<18} {selector}"
@@ -2177,6 +2280,7 @@ def main(argv: list[str] | None = None) -> int:
                     voice_source=voice_source,
                     speaker=args.speaker,
                     options=profile_options,
+                    transcript=args.transcript,
                     offline=args.offline,
                     refresh=args.refresh,
                 )
@@ -2247,6 +2351,7 @@ def main(argv: list[str] | None = None) -> int:
                             speaker=args.speaker,
                             voice_source=voice_source,
                             options=_json_options(args.option),
+                            transcript=args.transcript,
                             offline=args.offline,
                             refresh=args.refresh,
                             make_default=args.make_default,

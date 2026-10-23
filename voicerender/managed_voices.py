@@ -11,6 +11,7 @@ import voicefolio
 from voicefolio import (
     Catalog,
     IntegrityError,
+    MaterializedVoice,
     OfflineError,
     ResolvedVoice,
     VoiceEntry,
@@ -35,18 +36,25 @@ _MANAGED_PIN_FIELDS = (
 
 @dataclass(frozen=True, slots=True)
 class ResolvedManagedVoice:
-    """A pinned managed voice resolved to a Voicefolio-verified local WAV."""
+    """A verified renderer-ready asset and its independent portable source pin."""
 
     resolver: str
     ref: str
     path: Path
-    sha256: str
+    source_sha256: str
+    resolved_sha256: str
+    source_format: str
     source_revision: str
     source_repository: str
     source_path: str
     license: str | None = None
     dataset: str | None = None
     variant: str | None = None
+
+    @property
+    def sha256(self) -> str:
+        """Compatibility alias for the renderer-ready asset digest."""
+        return self.resolved_sha256
 
 
 def validate_managed_voice(
@@ -84,7 +92,7 @@ def resolve_managed_voice(
     resolver, ref = _source_identity(source)
     catalog = _load_catalog(catalog_paths, resolver=resolver, ref=ref)
     try:
-        resolved: ResolvedVoice = voicefolio.resolve_voice_source(
+        resolved: ResolvedVoice | MaterializedVoice = voicefolio.resolve_voice_source(
             source,
             catalog=catalog,
             cache_dir=cache_dir,
@@ -124,12 +132,24 @@ def resolve_managed_voice(
             details={"resolver": resolver, "ref": ref},
         ) from exc
 
-    entry = resolved.entry
+    if isinstance(resolved, MaterializedVoice):
+        source_voice = resolved.source
+        entry = source_voice.entry
+        source_sha256 = source_voice.sha256
+        resolved_sha256 = resolved.sha256
+        renderer_path = Path(resolved.path)
+    else:
+        entry = resolved.entry
+        source_sha256 = resolved.sha256
+        resolved_sha256 = resolved.sha256
+        renderer_path = Path(resolved.path)
     return ResolvedManagedVoice(
         resolver=resolver,
         ref=str(entry.ref),
-        path=Path(resolved.path),
-        sha256=entry.sha256,
+        path=renderer_path,
+        source_sha256=source_sha256,
+        resolved_sha256=resolved_sha256,
+        source_format=entry.format,
         source_revision=entry.source_revision,
         source_repository=entry.source_repository,
         source_path=entry.source_path,

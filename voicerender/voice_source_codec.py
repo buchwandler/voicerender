@@ -30,6 +30,7 @@ _SOURCE_FIELD_ORDER = (
     "model_revision",
     "layout",
     "resolver",
+    "source_format",
     "source_revision",
     "source_repository",
     "source_path",

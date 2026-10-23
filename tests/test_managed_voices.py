@@ -14,18 +14,18 @@ from voicerender.errors import (
 )
 
 
-def _entry() -> voicefolio.VoiceEntry:
+def _entry(*, source_format: str = "wav") -> voicefolio.VoiceEntry:
     return voicefolio.VoiceEntry(
         ref=voicefolio.VoiceRef("test-voices", "sample"),
         dataset="test-dataset",
         variant="original",
-        format="wav",
-        url="https://example.invalid/sample.wav",
+        format=source_format,
+        url=f"https://example.invalid/sample.{source_format}",
         size=12,
         sha256="a" * 64,
         source_repository="https://example.invalid/repo",
         source_revision="revision-1",
-        source_path="voices/sample.wav",
+        source_path=f"voices/sample.{source_format}",
         license="CC-BY-4.0",
     )
 
@@ -37,6 +37,7 @@ def _source(entry: voicefolio.VoiceEntry | None = None) -> dict[str, Any]:
         "resolver": "voicefolio",
         "value": str(entry.ref),
         "sha256": entry.sha256,
+        "source_format": entry.format,
         "source_revision": entry.source_revision,
         "source_repository": entry.source_repository,
         "source_path": entry.source_path,
@@ -130,7 +131,9 @@ def test_resolve_managed_voice_returns_pinned_metadata_and_local_path(
         resolver="voicefolio",
         ref=str(entry.ref),
         path=path,
-        sha256=entry.sha256,
+        source_sha256=entry.sha256,
+        resolved_sha256=entry.sha256,
+        source_format=entry.format,
         source_revision=entry.source_revision,
         source_repository=entry.source_repository,
         source_path=entry.source_path,
@@ -172,5 +175,47 @@ def test_resolve_managed_voice_maps_unknown_reference_to_invalid_voice(
 
     with pytest.raises(InvalidEngineVoiceError) as error:
         managed_voices.resolve_managed_voice(_source(entry))
-
     assert error.value.code == "managed_voice.invalid_source"
+
+
+def test_materialized_flac_keeps_source_and_renderer_digests_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entry = _entry(source_format="flac")
+    catalog = _install_catalog(monkeypatch, entry)
+    source_path = tmp_path / "source.flac"
+    renderer_path = tmp_path / "materialized.wav"
+    materialized = voicefolio.MaterializedVoice(
+        source=voicefolio.ResolvedVoice(entry=entry, path=source_path),
+        path=renderer_path,
+        sha256="b" * 64,
+        recipe="flac-to-wav-v1",
+        sample_rate=24000,
+        channels=1,
+        subtype="PCM_16",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def resolve(source: Any, **kwargs: Any) -> voicefolio.MaterializedVoice:
+        calls.append({"source": source, **kwargs})
+        return materialized
+
+    monkeypatch.setattr(managed_voices.voicefolio, "resolve_voice_source", resolve)
+
+    resolved = managed_voices.resolve_managed_voice(_source(entry), offline=True)
+
+    assert resolved.path == renderer_path
+    assert resolved.source_sha256 == entry.sha256
+    assert resolved.resolved_sha256 == "b" * 64
+    assert resolved.sha256 == resolved.resolved_sha256
+    assert resolved.source_format == "flac"
+    assert resolved.source_sha256 != resolved.resolved_sha256
+    assert calls == [
+        {
+            "source": _source(entry),
+            "catalog": catalog,
+            "cache_dir": None,
+            "offline": True,
+        }
+    ]

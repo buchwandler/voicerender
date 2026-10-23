@@ -762,6 +762,52 @@ def test_akinvox_rejects_non_unit_speed_during_selection_validation(
     assert speed_diagnostic.field == "render.options.speed"
 
 
+def test_akinvox_binding_rejects_missing_transcript_before_profile_persistence() -> (
+    None
+):
+    adapter = PyKokoroEngineAdapter()
+    with pytest.raises(
+        EngineSelectionError, match="requires non-empty reference_text"
+    ) as caught:
+        adapter.bind_reference_voice(
+            target=_model(voice_mode="reference", reference_enrollment=True),
+            language="en-US",
+            voice_source=_managed_source(),
+            transcript=None,
+            options={"voice_enrollment": {"engine": "auto"}},
+        )
+    assert caught.value.code == "pykokoro.reference_text_required"
+
+
+def test_kokoro_reference_binding_uses_transcript_and_preserves_advanced_options() -> (
+    None
+):
+    adapter = PyKokoroEngineAdapter()
+    akinvox_target = _model(voice_mode="reference", reference_enrollment=True)
+    bound = adapter.bind_reference_voice(
+        target=akinvox_target,
+        language="en-US",
+        voice_source=_managed_source(),
+        transcript="Catalog or fallback transcript.",
+        options={"voice_enrollment": {"engine": "auto"}, "speed": 1.0},
+    )
+    assert bound["voice_enrollment"] == {
+        "engine": "akinvox",
+        "reference_text": "Catalog or fallback transcript.",
+    }
+    assert bound["speed"] == 1.0
+
+    inno_target = _model(enrollers=({"id": "inno-v0.2", "transcript_required": False},))
+    inno_bound = adapter.bind_reference_voice(
+        target=inno_target,
+        language="en-US",
+        voice_source=_managed_source(),
+        transcript=None,
+        options={"voice_enrollment": {"engine": "inno", "fmax": 19000}},
+    )
+    assert inno_bound["voice_enrollment"] == {"engine": "inno", "fmax": 19000.0}
+
+
 def test_akinvox_binding_rejects_conflicting_explicit_transcript() -> None:
     model = _model(voice_mode="reference", reference_enrollment=True)
     adapter = PyKokoroEngineAdapter()

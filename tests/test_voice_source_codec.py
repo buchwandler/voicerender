@@ -180,3 +180,38 @@ def test_profile_voice_source_binding_accepts_verified_prepared_source(
     source = local_prepared_voice_source(artifact, format="qwen3.qvoice.v2")
 
     validate_voice_source_binding({"options": {"voice_source": source}})
+
+
+@pytest.mark.parametrize("source_format", ["wav", "flac", None])
+def test_managed_source_format_sidecar_roundtrip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_format: str | None,
+) -> None:
+    from voicerender import voice_source_codec
+
+    source: dict[str, object] = {
+        "kind": "managed_reference",
+        "resolver": "voicefolio",
+        "value": "catalog:voice-id",
+        "sha256": "a" * 64,
+        "source_revision": "revision-1",
+        "source_repository": "voice-repo",
+        "source_path": "voices/reference.wav",
+    }
+    if source_format is not None:
+        source["source_format"] = source_format
+    monkeypatch.setattr(voice_source_codec, "validate_voice_source", lambda _source: ())
+    sidecar = tmp_path / "managed-voice-source.toml"
+
+    save_voice_source(source, sidecar)
+    loaded = load_voice_source(sidecar)
+
+    if source_format is None:
+        assert "source_format" not in loaded
+    else:
+        assert loaded["source_format"] == source_format
+        assert f'source_format = "{source_format}"' in sidecar.read_text(
+            encoding="utf-8"
+        )
+    assert loaded["kind"] == "managed_reference"

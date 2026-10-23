@@ -194,21 +194,39 @@ Parsing a RenderProfile is engine-independent. `voicerender profile validate` ch
 
 ## Reference-voice sources
 
-A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They can be used in a local RenderProfile but are machine-specific; do not share a local profile unless that path and file are intentionally available on the other machine. Validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references; persist the Voicefolio reference, content digest, source revision, repository, and source path pins.
+A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They are machine-specific; validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references. The profile stores the VoiceFolio ref, source digest and format, revision, repository, and path—not a cache or materialized-audio path. Older managed profiles without `source_format` remain valid.
 
-The CLI creates local sources with `--reference-wav PATH` and managed sources with `--voicefolio-ref REF`. For example:
+### Preferred multi-role Kokoro/AkinVox workflow
+
+When a VoiceFolio catalog entry has transcript metadata, VoiceRender binds it automatically. Create the first role and add further cast members without copying audio or constructing Kokoro's nested `voice_enrollment` option:
 
 ```bash
 voicerender profile create \
+  --role narrator --engine kokoro \
+  --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref fine-read-it-voices:S5339 \
+  -o story-cast.renderprofile.toml
+
+voicerender profile bind story-cast.renderprofile.toml analyst \
   --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
-  --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
-  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact words spoken in the clip."}' \
-  --output narrator.renderprofile.toml
+  --voicefolio-ref fine-read-it-voices:S5393 --in-place
 ```
 
-Kokoro selects enrollment based on the target's discovered capabilities. `engine = "auto"` chooses Inno for a static target advertising the `inno-v0.2` enroller and AkinVox for a reference-only target. Inno accepts optional `fmax` and no transcript. AkinVox requires a non-empty exact `reference_text` and currently supports English only. A profile may also set `voice_enrollment` explicitly to `inno` or `akinvox`; unsupported target/engine combinations fail validation.
+For an entry without a catalog transcript, pass the exact spoken words using the generic fallback:
 
-Preflight verifies local hashes and Voicefolio catalog metadata, then measures the request without fetching managed audio or enrolling/conditioning a voice. At synthesis time, the engine resolves the verified audio and lazily enrolls it; the enrolled voice is reused within that session. Canonical synthesis identity includes content/provenance pins, the selected enrollment engine/options, and the exact AkinVox transcript hash, but excludes local/cache paths and raw transcript text.
+```bash
+voicerender profile create \
+  --role narrator --engine kokoro \
+  --target en-akinvox-cloning-v1 --language en-US \
+  --voicefolio-ref other:voice --transcript "Exact words spoken in the reference." \
+  -o narrator.renderprofile.toml
+```
+
+AkinVox requires a non-empty exact transcript, currently supports English only, and requires synthesis speed `1.0`. A catalog transcript, explicit `--transcript`, and an advanced `voice_enrollment.reference_text` must agree; conflicts are rejected without echoing transcript text. A missing transcript fails before the profile is saved with an actionable `--transcript` hint. Transcript text remains in the profile for enrollment, while routine inspection and canonical identity expose its SHA-256 instead.
+
+Kokoro owns enrollment selection and validation. `engine = "auto"` chooses Inno for a static target advertising `inno-v0.2`, or AkinVox for a reference-only target. Inno does not require or accept a transcript and may accept `fmax`. Existing advanced engine-specific options such as `--option 'voice_enrollment={"engine":"auto","fmax":8000}'` remain supported; they are not needed for the normal VoiceFolio AkinVox path.
+
+Profile create, bind, inspect, and validate read VoiceFolio catalog metadata but do not fetch or materialize reference audio. Preflight checks local hashes and managed catalog pins, then measures requests without enrolling a voice. At synthesis time, VoiceFolio resolves and verifies the pinned source; FLAC materialization and AkinVox enrollment remain lazy. The enrolled voice is reused within the render session. Canonical synthesis identity retains source provenance and the exact transcript digest, but excludes cache paths and raw transcript text.
 
 ## Kokoro quality and voice-level options
 

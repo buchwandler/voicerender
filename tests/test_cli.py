@@ -253,6 +253,8 @@ def test_cli_profile_create_reference_wav_persists_computed_pin(
             "en-US",
             "--reference-wav",
             str(reference),
+            "--transcript",
+            "Exact reference words.",
             "--output",
             str(tmp_path / "speaker.renderprofile.toml"),
             "--json",
@@ -265,6 +267,8 @@ def test_cli_profile_create_reference_wav_persists_computed_pin(
         "value": str(reference.resolve()),
         "sha256": hashlib.sha256(audio).hexdigest(),
     }
+
+    assert captured["transcript"] == "Exact reference words."
 
 
 def test_cli_profile_create_voicefolio_ref_uses_full_pinned_source(
