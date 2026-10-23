@@ -689,6 +689,28 @@ def test_cli_progress_printer_formats_tty_and_cleans_up_line() -> None:
     assert "\x1b" not in output
 
 
+def test_cli_progress_failure_includes_root_cause_and_diagnostics_path() -> None:
+    from voicerender.cli import _ProgressPrinter
+    from voicerender.events import RenderEvent, RenderEventKind
+
+    event = RenderEvent(
+        kind=RenderEventKind.SEGMENT_FAILED,
+        error_code="synthesis.backend_error",
+        error_type="EngineBackendError",
+        error_stage="inference",
+        error_root_cause_type="RuntimeError",
+        error_root_cause_message="provider execution failed",
+        render_diagnostics="/output/render-diagnostics.json",
+    )
+
+    status = _ProgressPrinter._event_status(event)
+
+    assert status is not None
+    assert "root cause RuntimeError: provider execution failed" in status
+    assert "stage inference" in status
+    assert "sidecar /output/render-diagnostics.json" in status
+
+
 def test_cli_progress_printer_throttles_non_tty_with_injected_clock() -> None:
     import io
 

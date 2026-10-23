@@ -475,7 +475,7 @@ def test_book_propagates_explicit_emphasis_policy(
 def test_book_reports_pending_composition_in_result_and_human_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _install_fake_execution(monkeypatch)
+    calls = _install_fake_execution(monkeypatch)
     workspace, variant = _book(tmp_path, chapters=((5, 1),), emphasis_speech=1)
 
     result = book_module.render_book(
@@ -487,6 +487,30 @@ def test_book_reports_pending_composition_in_result_and_human_output(
     report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["pending_composition"] is True
     assert report["item"][0]["pending_composition"] is True
+
+    diagnostics_path = outcome.output_dir / "render-diagnostics.json"
+    legacy = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert legacy["schema"] == "voicerender.render-diagnostics.v1"
+    assert "error_diagnostic" not in legacy
+    second = book_module.render_book(
+        workspace, variant=variant, emphasis_policy="defer-to-compose"
+    )
+    assert second.outcomes[0].status == "reused"
+    assert len(calls["render"]) == 1
+
+    additive = dict(legacy)
+    additive["error_type"] = "EngineBackendError"
+    additive["error_diagnostic"] = {
+        "schema": "voicerender.error-diagnostic.v1",
+        "type": "EngineBackendError",
+        "message": "optional additive field",
+    }
+    diagnostics_path.write_text(json.dumps(additive), encoding="utf-8")
+    third = book_module.render_book(
+        workspace, variant=variant, emphasis_policy="defer-to-compose"
+    )
+    assert third.outcomes[0].status == "reused"
+    assert len(calls["render"]) == 1
 
     from voicerender.bundle import BundleRenderResult
     from voicerender.cli import _print_bundle_result
@@ -1250,3 +1274,75 @@ def test_book_workspace_and_public_apis_accept_root_aliases(
         pytest.skip(f"directory symlinks are unavailable: {exc}")
     with pytest.raises(BookRenderError, match="root must not be a symlink"):
         resolve_workspace(link)
+
+
+def test_book_report_and_events_propagate_error_diagnostic_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path, chapters=((5, 1),))
+    original_render = book_module.render_renderplan
+    diagnostic = {
+        "schema": "voicerender.error-diagnostic.v1",
+        "type": "EngineBackendError",
+        "module": "voicerender.errors",
+        "message": "backend failed",
+        "details": {"native_stage": "inference"},
+        "cause": {
+            "type": "RuntimeError",
+            "module": "builtins",
+            "message": "provider execution failed",
+        },
+    }
+
+    def render_with_diagnostic(*args: Any, **kwargs: Any) -> Any:
+        result = original_render(*args, **kwargs)
+        diagnostics_path = Path(kwargs["output_dir"]) / "render-diagnostics.json"
+        diagnostics_path.write_text(json.dumps(diagnostic), encoding="utf-8")
+        return replace(
+            result,
+            error="backend failed",
+            error_code="synthesis.backend_error",
+            error_type="EngineBackendError",
+            error_diagnostic=diagnostic,
+            diagnostics_path=diagnostics_path,
+            error_segment_number=1,
+            error_segment_id="sha256:segment",
+            error_engine="kokoro",
+        )
+
+    monkeypatch.setattr(book_module, "render_renderplan", render_with_diagnostic)
+    events: list[RenderEvent] = []
+    result = book_module.render_book(workspace, variant=variant, on_event=events.append)
+    outcome = result.outcomes[0]
+
+    assert outcome.status == "failed"
+    assert (
+        outcome.render_diagnostics is not None and outcome.render_diagnostics.is_file()
+    )
+    assert outcome.error_type == "EngineBackendError"
+    assert outcome.error_stage == "inference"
+    assert outcome.error_root_cause_type == "RuntimeError"
+    assert outcome.error_root_cause_message == "provider execution failed"
+    item = result.to_dict()["items"][0]
+    assert item["render_diagnostics"] == "chapter-0005/render-diagnostics.json"
+    assert item["error_root_cause_message"] == "provider execution failed"
+    report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["item"][0]["render_diagnostics"] == item["render_diagnostics"]
+    chapter_event = next(
+        event for event in events if event.kind is RenderEventKind.CHAPTER_FINISHED
+    )
+    assert chapter_event.error_type == "EngineBackendError"
+    assert chapter_event.error_stage == "inference"
+    assert chapter_event.error_root_cause_message == "provider execution failed"
+    assert chapter_event.render_diagnostics == str(outcome.render_diagnostics)
+
+    from voicerender.bundle import BundleRenderResult
+    from voicerender.cli import _print_bundle_result
+
+    _print_bundle_result(BundleRenderResult(kind="book", value=result))
+    human_output = capsys.readouterr().out
+    assert "root cause RuntimeError: provider execution failed" in human_output
+    assert str(outcome.render_diagnostics) in human_output

@@ -50,6 +50,7 @@ from .book_layout import (
 from .book_layout import (
     resolve_workspace as _resolve_workspace,
 )
+from .error_diagnostics import diagnostic_summary_fields
 from .errors import ArtifactError, PlanError
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .preflight import preflight_render_plan
@@ -125,6 +126,11 @@ class ChapterRenderOutcome:
     error_segment_number: int | None = None
     error_segment_id: str | None = None
     error_engine: str | None = None
+    render_diagnostics: Path | None = None
+    error_type: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +354,13 @@ class _BookProgress:
         chapter_count: int | None = None,
         phase: str = "render",
         status: str | None = None,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        error_stage: str | None = None,
+        error_root_cause_type: str | None = None,
+        error_root_cause_message: str | None = None,
+        render_diagnostics: str | None = None,
     ) -> RenderEvent:
         snapshot = self.snapshot()
         return RenderEvent(
@@ -358,6 +371,13 @@ class _BookProgress:
             chapter_index=chapter_index,
             chapter_count=chapter_count,
             status=status,
+            error_type=error_type,
+            error_code=error_code,
+            error_message=error_message,
+            error_stage=error_stage,
+            error_root_cause_type=error_root_cause_type,
+            error_root_cause_message=error_root_cause_message,
+            render_diagnostics=render_diagnostics,
             completed_count=snapshot.completed_count,
             total_count=self.total_count,
             progress=snapshot.progress,
@@ -566,6 +586,17 @@ def render_book(
                     chapter_index=index,
                     chapter_count=chapter_count,
                     status=outcome.status,
+                    error_code=outcome.error_code,
+                    error_type=outcome.error_type,
+                    error_message=outcome.error_message,
+                    error_stage=outcome.error_stage,
+                    error_root_cause_type=outcome.error_root_cause_type,
+                    error_root_cause_message=outcome.error_root_cause_message,
+                    render_diagnostics=(
+                        str(outcome.render_diagnostics)
+                        if outcome.render_diagnostics is not None
+                        else None
+                    ),
                 ),
             )
         outcome = replace(
@@ -832,6 +863,11 @@ def _render_chapter(
                     for item in chapter.plan.speech
                     for control in item.controls
                 ),
+                render_diagnostics=(
+                    chapter.output_dir / RENDER_DIAGNOSTICS_FILENAME
+                    if (chapter.output_dir / RENDER_DIAGNOSTICS_FILENAME).is_file()
+                    else None
+                ),
             )
 
     try:
@@ -927,6 +963,9 @@ def _render_chapter(
         error_segment_number=getattr(result, "error_segment_number", None),
         error_segment_id=getattr(result, "error_segment_id", None),
         error_engine=getattr(result, "error_engine", None),
+        render_diagnostics=getattr(result, "diagnostics_path", None),
+        error_type=getattr(result, "error_type", None),
+        **diagnostic_summary_fields(getattr(result, "error_diagnostic", None)),
         recheck_report=(
             recheck_report_path if result.fresh_preflight is not None else None
         ),
@@ -1272,6 +1311,18 @@ def _outcome_to_dict(
         item["error_segment_id"] = outcome.error_segment_id
     if outcome.error_engine is not None:
         item["error_engine"] = outcome.error_engine
+    if outcome.render_diagnostics is not None:
+        item["render_diagnostics"] = _relative_posix(
+            outcome.render_diagnostics, output_variant_dir
+        )
+    for key, value in (
+        ("error_type", outcome.error_type),
+        ("error_stage", outcome.error_stage),
+        ("error_root_cause_type", outcome.error_root_cause_type),
+        ("error_root_cause_message", outcome.error_root_cause_message),
+    ):
+        if value is not None:
+            item[key] = value
     return item
 
 

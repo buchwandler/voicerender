@@ -362,3 +362,63 @@ def test_document_render_reports_reused_complete_manifest(
     assert result.status == "reused"
     assert result.manifest_complete is True
     assert result.reused == 1
+
+
+def test_document_report_preserves_error_diagnostic_summary_and_sidecar_path(
+    tmp_path: Path,
+) -> None:
+    import voicerender.document as document_module
+
+    root = _workspace(tmp_path / "diagnostics.ssmd-bundle")
+    profile_path = (
+        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+    )
+    profile = codec.load_profile(profile_path)
+    fingerprint = (profile.profile_id or profile.computed_id()).removeprefix("sha256:")[
+        :12
+    ]
+    variant = f"narration--{fingerprint}"
+    variant_dir = root / "renderplan" / variant
+    variant_dir.mkdir(parents=True)
+    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
+    shutil.copy(
+        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
+    )
+    request = document_module._resolve_document_request(root, variant=variant)
+    diagnostics_path = request.output_dir / "render-diagnostics.json"
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    diagnostics_path.write_text("{}", encoding="utf-8")
+    result = document_module.DocumentRenderResult(
+        request=request,
+        report_path=request.output_variant_dir / "voicerender-report.toml",
+        preflight_report=None,
+        recheck_report=None,
+        manifest=None,
+        status="failed",
+        planned_speech=1,
+        selected_speech=1,
+        available_speech=0,
+        rendered=0,
+        reused=0,
+        manifest_complete=False,
+        error_code="synthesis.backend_error",
+        error_message="backend failed",
+        render_diagnostics=diagnostics_path,
+        error_type="EngineBackendError",
+        error_stage="inference",
+        error_root_cause_type="RuntimeError",
+        error_root_cause_message="provider execution failed",
+    )
+
+    document_module._write_report(result)
+
+    payload = result.to_dict()
+    report = result.report_path.read_text(encoding="utf-8")
+    assert payload["render_diagnostics"] == str(diagnostics_path)
+    assert payload["error_type"] == "EngineBackendError"
+    assert payload["error_stage"] == "inference"
+    assert payload["error_root_cause_type"] == "RuntimeError"
+    assert payload["error_root_cause_message"] == "provider execution failed"
+    assert f'render_diagnostics = "{diagnostics_path}"' in report
+    assert 'error_stage = "inference"' in report

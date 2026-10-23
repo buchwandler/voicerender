@@ -16,6 +16,7 @@ from renderplan import codec as renderplan_codec
 
 from .book import _get_preflight
 from .document_contract import DocumentWorkspaceError, load_document_workspace
+from .error_diagnostics import diagnostic_summary_fields
 from .errors import ArtifactError, DocumentRenderError, PlanError
 from .events import RenderEventCallback
 from .renderplan_input import EmphasisPolicy
@@ -66,6 +67,11 @@ class DocumentRenderResult:
     error_segment_number: int | None = None
     error_segment_id: str | None = None
     error_engine: str | None = None
+    render_diagnostics: Path | None = None
+    error_type: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
 
     @property
     def exit_code(self) -> int:
@@ -102,6 +108,13 @@ class DocumentRenderResult:
             "error_segment_number": self.error_segment_number,
             "error_segment_id": self.error_segment_id,
             "error_engine": self.error_engine,
+            "render_diagnostics": str(self.render_diagnostics)
+            if self.render_diagnostics
+            else None,
+            "error_type": self.error_type,
+            "error_stage": self.error_stage,
+            "error_root_cause_type": self.error_root_cause_type,
+            "error_root_cause_message": self.error_root_cause_message,
             "exit_code": self.exit_code,
         }
 
@@ -338,6 +351,11 @@ def render_document(
                 error_segment_number=getattr(rendered, "error_segment_number", None),
                 error_segment_id=getattr(rendered, "error_segment_id", None),
                 error_engine=getattr(rendered, "error_engine", None),
+                render_diagnostics=getattr(rendered, "diagnostics_path", None),
+                error_type=getattr(rendered, "error_type", None),
+                **diagnostic_summary_fields(
+                    getattr(rendered, "error_diagnostic", None)
+                ),
             )
     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
         code = getattr(exc, "code", None) or "render.failed"
@@ -399,6 +417,11 @@ def _write_report(result: DocumentRenderResult) -> None:
         ("error_segment_number", result.error_segment_number),
         ("error_segment_id", result.error_segment_id),
         ("error_engine", result.error_engine),
+        ("render_diagnostics", result.render_diagnostics),
+        ("error_type", result.error_type),
+        ("error_stage", result.error_stage),
+        ("error_root_cause_type", result.error_root_cause_type),
+        ("error_root_cause_message", result.error_root_cause_message),
     ):
         if val is not None:
             data[key] = str(val) if isinstance(val, Path) else val

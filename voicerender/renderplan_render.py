@@ -6,7 +6,7 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -31,6 +31,11 @@ from renderplan import (
 
 from .engines.base import EngineSelection, EngineSession, SpeechRequest
 from .engines.registry import get_adapter, open_session
+from .error_diagnostics import (
+    ERROR_DIAGNOSTIC_SCHEMA,
+    diagnostic_summary_fields,
+    exception_diagnostic,
+)
 from .errors import (
     ArtifactError,
     PlanError,
@@ -70,6 +75,9 @@ class RenderPlanResult:
     error: str | None = None
     fresh_preflight: PreflightReport | None = None
     error_code: str | None = None
+    error_type: str | None = None
+    error_diagnostic: Mapping[str, object] | None = None
+    diagnostics_path: Path | None = None
     execution_fingerprint: tuple[dict[str, Any], ...] = ()
     pending_composition: bool = False
 
@@ -107,6 +115,22 @@ class _RenderFailure:
     error_segment_number: int | None = None
     error_segment_id: str | None = None
     error_engine: str | None = None
+    error_type: str | None = None
+    error_diagnostic: dict[str, object] | None = None
+
+
+def _capture_exception_diagnostic(error: BaseException) -> dict[str, object]:
+    """Capture structured details without allowing diagnostics to mask failures."""
+    try:
+        return exception_diagnostic(error)
+    except Exception:  # noqa: BLE001 - retain the original render failure.
+        error_type = type(error)
+        return {
+            "schema": ERROR_DIAGNOSTIC_SCHEMA,
+            "type": error_type.__name__,
+            "module": error_type.__module__,
+            "message": "[diagnostic serialization failed; original error preserved]",
+        }
 
 
 def _render_progress_event(
@@ -431,6 +455,10 @@ def render_renderplan(
                                 error_segment_number=item.number,
                                 error_segment_id=current.segment_id,
                                 error_engine=current.selection.engine,
+                                error_type=type(session.error).__name__,
+                                error_diagnostic=_capture_exception_diagnostic(
+                                    session.error
+                                ),
                             )
                             progress_tracker.complete("failed")
                             emit_render_event(
@@ -442,6 +470,13 @@ def render_renderplan(
                                     status="failed",
                                     error_type=type(session.error).__name__,
                                     error_code=getattr(session.error, "code", None),
+                                    error_message=failure.message,
+                                    render_diagnostics=str(
+                                        out / RENDER_DIAGNOSTICS_FILENAME
+                                    ),
+                                    **diagnostic_summary_fields(
+                                        failure.error_diagnostic
+                                    ),
                                 ),
                             )
                             break
@@ -493,6 +528,9 @@ def render_renderplan(
                                     status="failed",
                                     error_type="MeasurementError",
                                     error_code=failure.error_code,
+                                    render_diagnostics=str(
+                                        out / RENDER_DIAGNOSTICS_FILENAME
+                                    ),
                                 ),
                             )
                             break
@@ -598,6 +636,8 @@ def render_renderplan(
                         error_engine=(
                             getattr(exc, "engine", None) or current.selection.engine
                         ),
+                        error_type=type(exc).__name__,
+                        error_diagnostic=_capture_exception_diagnostic(exc),
                     )
                     fingerprint["execution_status"] = "render_failed"
                     execution_fingerprints[key] = _finalize_execution_fingerprint(
@@ -615,6 +655,9 @@ def render_renderplan(
                             error_code=(
                                 error_code if isinstance(error_code, str) else None
                             ),
+                            error_message=failure.message,
+                            render_diagnostics=str(out / RENDER_DIAGNOSTICS_FILENAME),
+                            **diagnostic_summary_fields(failure.error_diagnostic),
                         ),
                     )
                     break
@@ -634,6 +677,8 @@ def render_renderplan(
                     error_segment_number=failure.error_segment_number,
                     error_segment_id=failure.error_segment_id,
                     error_engine=failure.error_engine,
+                    error_type=type(exc).__name__,
+                    error_diagnostic=_capture_exception_diagnostic(exc),
                 )
         if failure is not None:
             diagnostics["error_code"] = failure.error_code
@@ -644,6 +689,10 @@ def render_renderplan(
                 diagnostics["error_segment_id"] = failure.error_segment_id
             if failure.error_engine is not None:
                 diagnostics["error_engine"] = failure.error_engine
+            if failure.error_type is not None:
+                diagnostics["error_type"] = failure.error_type
+            if failure.error_diagnostic is not None:
+                diagnostics["error_diagnostic"] = failure.error_diagnostic
         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
         current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
         manifest = _persist_manifest(
@@ -680,6 +729,13 @@ def render_renderplan(
         ),
         error_segment_id=failure.error_segment_id if failure is not None else None,
         error_engine=failure.error_engine if failure is not None else None,
+        error_type=failure.error_type if failure is not None else None,
+        error_diagnostic=failure.error_diagnostic if failure is not None else None,
+        diagnostics_path=(
+            out / RENDER_DIAGNOSTICS_FILENAME
+            if (out / RENDER_DIAGNOSTICS_FILENAME).is_file()
+            else None
+        ),
     )
     emit_render_event(
         on_event,
@@ -689,6 +745,14 @@ def render_renderplan(
             plan_id=report_id,
             status="failed" if result.failed else "completed",
             error_code=result.error_code,
+            error_type=result.error_type,
+            error_message=result.error,
+            render_diagnostics=(
+                str(result.diagnostics_path)
+                if result.diagnostics_path is not None
+                else None
+            ),
+            **diagnostic_summary_fields(result.error_diagnostic),
         ),
     )
     return result

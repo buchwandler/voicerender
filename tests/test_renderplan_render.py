@@ -1612,13 +1612,22 @@ def test_open_failure_emits_typed_terminal_progress(
     )
 
     assert result.failed
+    assert result.error_type == "RuntimeError"
+    assert result.error_diagnostic["message"] == "engine startup failed"
+    assert (
+        result.diagnostics_path
+        == tmp_path / "failed-output" / RENDER_DIAGNOSTICS_FILENAME
+    )
+    assert result.diagnostics_path.is_file()
     failed = [event for event in events if event.kind is RenderEventKind.SEGMENT_FAILED]
     assert len(failed) == 1
     assert failed[0].completed_count == 1
     assert failed[0].progress == 1.0
     assert failed[0].error_type == "RuntimeError"
+    assert failed[0].render_diagnostics == str(result.diagnostics_path)
     assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
     assert events[-1].status == "failed"
+    assert events[-1].render_diagnostics == str(result.diagnostics_path)
 
 
 def test_estimate_renderplan_reports_verified_reuse_without_side_effects(
@@ -1668,9 +1677,13 @@ def test_render_failure_diagnostics_identify_segment_and_engine(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     adapter = _install(monkeypatch)
+    root_cause_error = RuntimeError("provider execution failed")
+    engine_error = ValueError("engine adapter failed")
+    engine_error.__cause__ = root_cause_error
     adapter.synthesis_error = EngineBackendError(
         "backend failed", engine=adapter.id, request_id="request-1"
     )
+    adapter.synthesis_error.__cause__ = engine_error
     plan = _plan("fails during synthesis")
     report = _report(adapter, plan, tmp_path)
     output_dir = tmp_path / "render-output"
@@ -1687,10 +1700,54 @@ def test_render_failure_diagnostics_identify_segment_and_engine(
     assert result.error_segment_number == 1
     assert result.error_segment_id == expected_segment_id
     assert result.error_engine == adapter.id
+    assert result.error_type == "EngineBackendError"
+    assert result.error_diagnostic["cause"]["cause"]["type"] == "RuntimeError"
+    assert (
+        result.error_diagnostic["cause"]["cause"]["message"]
+        == "provider execution failed"
+    )
+    assert result.diagnostics_path == output_dir / RENDER_DIAGNOSTICS_FILENAME
+    assert result.diagnostics_path.is_file()
     diagnostics = json.loads(
         (output_dir / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
     )
     assert diagnostics["error_segment_number"] == 1
+    assert diagnostics["schema"] == "voicerender.render-diagnostics.v1"
     assert diagnostics["error_segment_id"] == expected_segment_id
     assert diagnostics["error_engine"] == adapter.id
     assert diagnostics["error_code"] == "synthesis.backend_error"
+    assert diagnostics["error_type"] == "EngineBackendError"
+    assert (
+        diagnostics["error_diagnostic"]["cause"]["cause"]["message"]
+        == "provider execution failed"
+    )
+    json.dumps(diagnostics)
+
+
+def test_diagnostic_serializer_failure_does_not_mask_render_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import voicerender.renderplan_render as render_module
+
+    adapter = _install(monkeypatch)
+    adapter.synthesis_error = EngineBackendError("original backend failure")
+    plan = _plan("serializer failure")
+    report = _report(adapter, plan, tmp_path)
+    monkeypatch.setattr(
+        render_module,
+        "exception_diagnostic",
+        lambda _error: (_ for _ in ()).throw(RuntimeError("serializer failed")),
+    )
+
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "serializer-failed-render",
+        cache_dir=tmp_path / "serializer-failed-cache",
+    )
+
+    assert result.error == "original backend failure"
+    assert result.error_code == "synthesis.backend_error"
+    assert result.error_diagnostic["message"].startswith(
+        "[diagnostic serialization failed;"
+    )

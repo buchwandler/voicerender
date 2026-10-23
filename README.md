@@ -98,6 +98,16 @@ voicerender render chapter.renderplan.toml \
 The accepted emphasis parameters are `{}` or one of `{ "level": "reduced" }`, `{ "level": "moderate" }`, or `{ "level": "strong" }`; unknown keys, types, and invalid ranges are rejected. Other unsupported controls remain fail-closed. VoiceRender sends the original text to the engine without an emphasis option, preserves the original controls and identities in the RenderPlan, and leaves control interpretation—including overlapping emphasis—to AudioCompose.
 
 Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `bundle render` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
+
+### Engine failure diagnostics
+
+A successful preflight does not guarantee that model execution will succeed: preflight checks declared engine capabilities and measures the request, but does not perform full inference or reference-voice enrollment. Session opening, immediate remeasurement, synthesis, and artifact writes can still fail during rendering.
+
+On a render-time exception, `render-diagnostics.json` keeps the existing `voicerender.render-diagnostics.v1` schema identifier and adds `error_type` plus an `error_diagnostic` chain. The chain records the VoiceRender error, available engine diagnostic, and Python cause/context without parsing human error strings. Document/book reports and JSON/API results retain compact `error_stage`, `error_root_cause_type`, `error_root_cause_message`, and `render_diagnostics` fields; the JSON sidecar is the canonical full diagnostic.
+
+The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
+
+Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. Older supported versions (including 0.10.5) continue with Python exception chaining and the available metadata; the optional dependency floor remains unchanged until a diagnostics-capable release is confirmed.
 The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
 
 Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:

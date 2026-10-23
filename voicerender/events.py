@@ -46,6 +46,11 @@ class RenderEvent:
     status: str | None = None
     error_type: str | None = None
     error_code: str | None = None
+    error_message: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
+    render_diagnostics: str | None = None
     rendered_count: int | None = None
     reused_count: int | None = None
     failed_count: int | None = None

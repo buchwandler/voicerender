@@ -22,6 +22,7 @@ from voicerender.engines.kokoro import (
     _normalize_short_sentence,
     _normalize_voice_level,
     _target_from_capabilities,
+    _translate_pykokoro_error,
     _version_supported,
 )
 from voicerender.engines.selection import EngineRequest
@@ -858,3 +859,88 @@ def test_real_pykokoro_public_api_contract_smoke_without_runtime_load() -> None:
     assert contract.supports_request_measurement is True
     assert contract.supports_reference_voice is True
     assert contract.supports_voice_enrollment is True
+
+
+class BackendError(Exception):
+    stage = "inference"
+    native_error_message = "bad shape"
+
+
+def _translation_selection() -> EngineSelection:
+    return EngineSelection(
+        engine="kokoro",
+        target_id="en-akinvox-cloning-v1",
+        language="en-US",
+        voice="akinvox",
+        speaker=1,
+    )
+
+
+def test_translate_pykokoro_error_preserves_native_diagnostics_and_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("pykokoro")
+    module.BackendError = BackendError
+    native_diagnostic = {
+        "schema": "pykokoro.error-diagnostic.v1",
+        "type": "BackendError",
+        "stage": "inference",
+        "cause": {"type": "RuntimeContractError", "message": "bad shape"},
+    }
+    module.error_diagnostic = lambda _error: native_diagnostic
+    monkeypatch.setitem(sys.modules, "pykokoro", module)
+
+    native = BackendError(
+        "Kokoro model inference failed: RuntimeContractError: bad shape"
+    )
+    native.__cause__ = RuntimeError("provider execution failed")
+    translated = _translate_pykokoro_error(native, _translation_selection())
+
+    assert isinstance(translated, EngineBackendError)
+    assert translated.code == "synthesis.backend_error"
+    assert str(translated) == str(native)
+    assert translated.native_error_type == "BackendError"
+    assert translated.details["native_stage"] == "inference"
+    assert translated.details["native_error_message"] == "bad shape"
+    assert translated.details["native_diagnostic"] == native_diagnostic
+    with pytest.raises(EngineBackendError) as caught:
+        raise translated from native
+    assert caught.value.__cause__ is native
+    assert caught.value.__cause__.__cause__.__str__() == "provider execution failed"
+
+
+def test_translate_pykokoro_reference_enrollment_error_keeps_specific_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("pykokoro")
+    module.BackendError = BackendError
+    module.error_diagnostic = lambda _error: {"stage": "reference_enrollment"}
+    monkeypatch.setitem(sys.modules, "pykokoro", module)
+
+    native = BackendError("Kokoro reference enrollment failed")
+    native.stage = "reference_enrollment"
+    translated = _translate_pykokoro_error(
+        native,
+        _translation_selection(),
+        failure_code="pykokoro.reference_enrollment_failed",
+    )
+
+    assert translated.code == "pykokoro.reference_enrollment_failed"
+    assert translated.details["native_stage"] == "reference_enrollment"
+    assert translated.details["native_diagnostic"]["stage"] == "reference_enrollment"
+
+
+def test_translate_pykokoro_error_falls_back_without_public_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("pykokoro")
+    module.BackendError = BackendError
+    monkeypatch.setitem(sys.modules, "pykokoro", module)
+
+    native = BackendError("older PyKokoro backend message")
+    translated = _translate_pykokoro_error(native, _translation_selection())
+
+    assert str(translated) == "older PyKokoro backend message"
+    assert translated.code == "synthesis.backend_error"
+    assert translated.details["native_stage"] == "inference"
+    assert "native_diagnostic" not in translated.details

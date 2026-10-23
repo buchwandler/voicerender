@@ -107,7 +107,6 @@ class EngineError(VoiceRenderError, RuntimeError):
         )
         for key, value in self.details.items():
             setattr(self, key, value)
-        self.__cause__ = None
 
 
 class EngineUnavailableError(EngineError):

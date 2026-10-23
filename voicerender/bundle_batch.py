@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from .bundle import BundleRenderResult, render_bundle
 from .bundle_contract import BundleKind
+from .error_diagnostics import diagnostic_summary_fields, exception_diagnostic
 from .events import RenderEventCallback
 from .variants import BundleVariant, VariantState, list_bundle_variants
 
@@ -36,6 +37,11 @@ class BundleVariantRenderOutcome:
     exit_code: int | None = None
     error_code: str | None = None
     error_message: str | None = None
+    error_type: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
+    render_diagnostics: Path | None = None
     validation_error: str | None = None
     output_error: str | None = None
     pending_composition: bool | None = None
@@ -53,6 +59,13 @@ class BundleVariantRenderOutcome:
             "exit_code": self.exit_code,
             "error_code": self.error_code,
             "error_message": self.error_message,
+            "error_type": self.error_type,
+            "error_stage": self.error_stage,
+            "error_root_cause_type": self.error_root_cause_type,
+            "error_root_cause_message": self.error_root_cause_message,
+            "render_diagnostics": str(self.render_diagnostics)
+            if self.render_diagnostics
+            else None,
             "validation_error": self.validation_error,
             "output_error": self.output_error,
             "pending_composition": self.pending_composition,
@@ -102,6 +115,11 @@ class BundleBatchRenderResult:
     exit_code: int
     error_code: str | None = None
     error_message: str | None = None
+    error_type: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
+    render_diagnostics: Path | None = None
 
     @property
     def no_work(self) -> bool:
@@ -124,6 +142,13 @@ class BundleBatchRenderResult:
             "variants": [variant.to_dict() for variant in self.variants],
             "error_code": self.error_code,
             "error_message": self.error_message,
+            "error_type": self.error_type,
+            "error_stage": self.error_stage,
+            "error_root_cause_type": self.error_root_cause_type,
+            "error_root_cause_message": self.error_root_cause_message,
+            "render_diagnostics": str(self.render_diagnostics)
+            if self.render_diagnostics
+            else None,
             "exit_code": self.exit_code,
         }
 
@@ -197,6 +222,7 @@ def render_bundle_batch(
             )
         except Exception as exc:  # noqa: BLE001 - Keep batch failures isolated.
             error_code, error_message = _exception_details(exc)
+            error_summary = _exception_summary_fields(exc)
             outcomes[outcome_index[name]] = replace(
                 outcomes[outcome_index[name]],
                 status="failed",
@@ -204,13 +230,23 @@ def render_bundle_batch(
                 exit_code=1,
                 error_code=error_code,
                 error_message=error_message,
+                error_type=type(exc).__name__,
+                **error_summary,
             )
             failed = True
             continue
 
         exit_code = result.exit_code
+        (
+            result_error_code,
+            result_error_message,
+            result_error_type,
+            result_error_stage,
+            result_error_root_cause_type,
+            result_error_root_cause_message,
+            result_render_diagnostics,
+        ) = _result_error_details(result)
         if exit_code != 0:
-            result_error_code, result_error_message = _result_error_details(result)
             if result_error_code is None:
                 result_error_code = "render.failed"
             if result_error_message is None:
@@ -222,6 +258,11 @@ def render_bundle_batch(
                 exit_code=exit_code,
                 error_code=result_error_code,
                 error_message=result_error_message,
+                error_type=result_error_type,
+                error_stage=result_error_stage,
+                error_root_cause_type=result_error_root_cause_type,
+                error_root_cause_message=result_error_root_cause_message,
+                render_diagnostics=result_render_diagnostics,
                 result=result,
             )
             failed = True
@@ -232,6 +273,13 @@ def render_bundle_batch(
                 attempt_status="complete",
                 exit_code=0,
                 result=result,
+                error_code=result_error_code,
+                error_message=result_error_message,
+                error_type=result_error_type,
+                error_stage=result_error_stage,
+                error_root_cause_type=result_error_root_cause_type,
+                error_root_cause_message=result_error_root_cause_message,
+                render_diagnostics=result_render_diagnostics,
             )
 
     final_listing_error: Exception | None = None
@@ -298,6 +346,16 @@ def render_bundle_batch(
         exit_code=exit_code,
         error_code=final_error_code,
         error_message=final_error_message,
+        error_type=(
+            type(final_listing_error).__name__
+            if final_listing_error is not None
+            else None
+        ),
+        **(
+            _exception_summary_fields(final_listing_error)
+            if final_listing_error is not None
+            else diagnostic_summary_fields(None)
+        ),
     )
 
 
@@ -354,23 +412,67 @@ def _exception_details(exc: Exception) -> tuple[str, str]:
     )
 
 
+def _exception_summary_fields(exc: Exception) -> dict[str, str | None]:
+    try:
+        diagnostic = exception_diagnostic(exc)
+    except Exception:  # noqa: BLE001 - reporting must not mask a batch error.
+        return diagnostic_summary_fields(None)
+    return diagnostic_summary_fields(diagnostic)
+
+
 def _result_error_details(
     result: BundleRenderResult,
-) -> tuple[str | None, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    Path | None,
+]:
     value = result.value
-    code = getattr(value, "error_code", None)
-    message = getattr(value, "error_message", None)
-    if code is None or message is None:
-        for outcome in getattr(value, "outcomes", ()):
-            if getattr(outcome, "status", None) == "failed":
-                code = code or getattr(outcome, "error_code", None)
-                message = message or getattr(outcome, "error_message", None)
-                if code is not None or message is not None:
-                    break
-    return (
-        code if isinstance(code, str) else None,
-        message if isinstance(message, str) else None,
+    fields: dict[str, object] = {
+        "error_code": getattr(value, "error_code", None),
+        "error_message": getattr(value, "error_message", None),
+        "error_type": getattr(value, "error_type", None),
+        "error_stage": getattr(value, "error_stage", None),
+        "error_root_cause_type": getattr(value, "error_root_cause_type", None),
+        "error_root_cause_message": getattr(value, "error_root_cause_message", None),
+        "render_diagnostics": getattr(value, "render_diagnostics", None),
+    }
+    for outcome in getattr(value, "outcomes", ()):
+        if getattr(outcome, "status", None) != "failed":
+            continue
+        for name in (
+            "error_code",
+            "error_message",
+            "error_type",
+            "error_stage",
+            "error_root_cause_type",
+            "error_root_cause_message",
+            "render_diagnostics",
+        ):
+            if fields[name] is None:
+                fields[name] = getattr(outcome, name, None)
+        if any(fields[name] is not None for name in fields):
+            break
+
+    text_fields = (
+        "error_code",
+        "error_message",
+        "error_type",
+        "error_stage",
+        "error_root_cause_type",
+        "error_root_cause_message",
     )
+    values = tuple(
+        value if isinstance(value, str) else None
+        for value in (fields[name] for name in text_fields)
+    )
+    diagnostics = fields["render_diagnostics"]
+    diagnostics_path = diagnostics if isinstance(diagnostics, Path) else None
+    return (*values, diagnostics_path)
 
 
 __all__ = [

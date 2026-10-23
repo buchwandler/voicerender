@@ -71,11 +71,21 @@ def _result(
     kind: BundleKind = "book",
     error_code: str | None = None,
     error_message: str | None = None,
+    error_type: str | None = None,
+    error_stage: str | None = None,
+    error_root_cause_type: str | None = None,
+    error_root_cause_message: str | None = None,
+    render_diagnostics: Path | None = None,
 ) -> BundleRenderResult:
     value = SimpleNamespace(
         exit_code=exit_code,
         error_code=error_code,
         error_message=error_message,
+        error_type=error_type,
+        error_stage=error_stage,
+        error_root_cause_type=error_root_cause_type,
+        error_root_cause_message=error_root_cause_message,
+        render_diagnostics=render_diagnostics,
         to_dict=lambda: {"exit_code": exit_code},
     )
     return BundleRenderResult(kind=kind, value=cast(Any, value))
@@ -691,7 +701,14 @@ def test_batch_failure_details_are_visible_in_human_and_json_output(
         batch_module,
         "render_bundle",
         lambda *_args, **_kwargs: _result(
-            1, error_code="engine.unavailable", error_message="engine unavailable"
+            1,
+            error_code="engine.unavailable",
+            error_message="engine unavailable",
+            error_type="EngineBackendError",
+            error_stage="inference",
+            error_root_cause_type="RuntimeError",
+            error_root_cause_message="provider execution failed",
+            render_diagnostics=root / "voice" / "render-diagnostics.json",
         ),
     )
 
@@ -705,3 +722,15 @@ def test_batch_failure_details_are_visible_in_human_and_json_output(
     assert payload["variants"][0]["error_code"] == "engine.unavailable"
     assert payload["variants"][0]["error_message"] == "engine unavailable"
     assert "engine.unavailable: engine unavailable" in human_output
+    assert "root cause RuntimeError: provider execution failed" in human_output
+    assert "sidecar " in human_output and "render-diagnostics.json" in human_output
+    assert payload["variants"][0]["error_type"] == "EngineBackendError"
+    assert payload["variants"][0]["error_stage"] == "inference"
+    assert payload["variants"][0]["error_root_cause_type"] == "RuntimeError"
+    assert (
+        payload["variants"][0]["error_root_cause_message"]
+        == "provider execution failed"
+    )
+    assert payload["variants"][0]["render_diagnostics"].endswith(
+        "voice/render-diagnostics.json"
+    )

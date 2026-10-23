@@ -61,6 +61,12 @@ Engine adapters implement the request-level protocol in `voicerender.engines.bas
 
 Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
 
+## Engine failure diagnostics
+
+Preflight validates declared capabilities and request measurements; it does not perform full model inference or reference enrollment. A render can therefore pass preflight and fail later while opening an engine session, synthesizing, or writing artifacts.
+
+The `render-diagnostics.json` sidecar retains the `voicerender.render-diagnostics.v1` identifier and stores the bounded structured exception cause chain. Workflow reports, API/JSON results, and failure events carry only compact stage/root-cause fields and the sidecar path. Diagnostics omit traceback locals and sensitive speech/audio payloads, are JSON-safe and size-bounded, and cannot replace the original render failure if serialization fails. See [Engine failure diagnostics in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#engine-failure-diagnostics) for the field hierarchy, CLI behavior, and PyKokoro compatibility policy.
+
 ## Progress, ETA, and estimates
 
 The `render`, `bundle render`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.

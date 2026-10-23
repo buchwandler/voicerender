@@ -623,6 +623,28 @@ def _translate_pykokoro_error(
         )
     if failure_code is not None and error_type is EngineBackendError:
         context["code"] = failure_code
+    details: dict[str, object] = {}
+    for attribute, detail_name in (
+        ("stage", "native_stage"),
+        ("native_error_message", "native_error_message"),
+    ):
+        try:
+            value = getattr(error, attribute, None)
+        except Exception:  # noqa: BLE001 - optional diagnostic fields must not block rendering.
+            value = None
+        if isinstance(value, str):
+            details[detail_name] = value
+
+    native_diagnostic = getattr(pykokoro, "error_diagnostic", None)
+    if callable(native_diagnostic):
+        try:
+            diagnostic = native_diagnostic(error)
+        except Exception:  # noqa: BLE001 - diagnostics are best-effort.
+            diagnostic = None
+        if isinstance(diagnostic, Mapping):
+            details["native_diagnostic"] = diagnostic
+    if details:
+        context["details"] = details
     return error_type(str(error), **context)
 
 

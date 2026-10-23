@@ -59,6 +59,11 @@ class BundleVariant:
     error_code: str | None = None
     error_message: str | None = None
     output_error: str | None = None
+    render_diagnostics: Path | None = None
+    error_type: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
 
     @property
     def completed_chapters(self) -> int | None:
@@ -86,6 +91,13 @@ class BundleVariant:
             "error_code": self.error_code,
             "error_message": self.error_message,
             "output_error": self.output_error,
+            "render_diagnostics": str(self.render_diagnostics)
+            if self.render_diagnostics
+            else None,
+            "error_type": self.error_type,
+            "error_stage": self.error_stage,
+            "error_root_cause_type": self.error_root_cause_type,
+            "error_root_cause_message": self.error_root_cause_message,
         }
         if self.unit_kind == "chapters":
             result["completed_chapters"] = self.completed_units
@@ -150,6 +162,11 @@ class _Report:
     error_code: str | None
     error_message: str | None
     issue: str | None = None
+    error_type: str | None = None
+    error_stage: str | None = None
+    error_root_cause_type: str | None = None
+    error_root_cause_message: str | None = None
+    render_diagnostics: Path | None = None
 
 
 class _PlanInvalid(ValueError):
@@ -364,6 +381,11 @@ def _inspect_candidate(
         report_path=output.report_path,
         error_code=output.error_code,
         error_message=output.error_message,
+        render_diagnostics=output.render_diagnostics,
+        error_type=output.error_type,
+        error_stage=output.error_stage,
+        error_root_cause_type=output.error_root_cause_type,
+        error_root_cause_message=output.error_root_cause_message,
         output_error=output.output_error,
     )
 
@@ -470,6 +492,11 @@ class _OutputStatus:
     error_code: str | None
     error_message: str | None
     output_error: str | None
+    render_diagnostics: Path | None
+    error_type: str | None
+    error_stage: str | None
+    error_root_cause_type: str | None
+    error_root_cause_message: str | None
 
 
 def _inspect_output(
@@ -585,6 +612,15 @@ def _inspect_output(
         report_path=visible_report_path,
         error_code=code,
         error_message=message,
+        render_diagnostics=report.render_diagnostics if report is not None else None,
+        error_type=report.error_type if report is not None else None,
+        error_stage=report.error_stage if report is not None else None,
+        error_root_cause_type=(
+            report.error_root_cause_type if report is not None else None
+        ),
+        error_root_cause_message=(
+            report.error_root_cause_message if report is not None else None
+        ),
         output_error="; ".join(dict.fromkeys(errors)) or None,
     )
 
@@ -616,6 +652,29 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
             raise ValueError("render report error_code must be text")
         if message is not None and not isinstance(message, str):
             raise ValueError("render report error_message must be text")
+        error_type = data.get("error_type")
+        error_stage = data.get("error_stage")
+        error_root_cause_type = data.get("error_root_cause_type")
+        error_root_cause_message = data.get("error_root_cause_message")
+        for label, value in (
+            ("error_type", error_type),
+            ("error_stage", error_stage),
+            ("error_root_cause_type", error_root_cause_type),
+            ("error_root_cause_message", error_root_cause_message),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"render report {label} must be text")
+        raw_diagnostics = data.get("render_diagnostics")
+        if raw_diagnostics is not None and not isinstance(raw_diagnostics, str):
+            raise ValueError("render report render_diagnostics must be text")
+        render_diagnostics = None
+        if raw_diagnostics is not None:
+            diagnostics_path = Path(raw_diagnostics)
+            render_diagnostics = (
+                diagnostics_path
+                if diagnostics_path.is_absolute()
+                else path.parent / diagnostics_path
+            )
         available: int | None = None
         status: Literal["failed", "partial", "complete"] | None
         if kind == "document":
@@ -641,6 +700,24 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
                 item_status = item.get("status")
                 item_code = item.get("error_code")
                 item_message = item.get("error_message")
+                item_error_fields = {
+                    "error_type": item.get("error_type"),
+                    "error_stage": item.get("error_stage"),
+                    "error_root_cause_type": item.get("error_root_cause_type"),
+                    "error_root_cause_message": item.get("error_root_cause_message"),
+                }
+                for label, value in item_error_fields.items():
+                    if value is not None and not isinstance(value, str):
+                        raise ValueError(
+                            f"book render report item {label} must be text"
+                        )
+                item_diagnostics = item.get("render_diagnostics")
+                if item_diagnostics is not None and not isinstance(
+                    item_diagnostics, str
+                ):
+                    raise ValueError(
+                        "book render report item render_diagnostics must be text"
+                    )
                 if item_status is not None and not isinstance(item_status, str):
                     raise ValueError("book render report item status must be text")
                 if item_code is not None and not isinstance(item_code, str):
@@ -654,6 +731,25 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
                         code = item_code
                     if message is None:
                         message = item_message
+                    if error_type is None:
+                        error_type = item_error_fields["error_type"]
+                    if error_stage is None:
+                        error_stage = item_error_fields["error_stage"]
+                    if error_root_cause_type is None:
+                        error_root_cause_type = item_error_fields[
+                            "error_root_cause_type"
+                        ]
+                    if error_root_cause_message is None:
+                        error_root_cause_message = item_error_fields[
+                            "error_root_cause_message"
+                        ]
+                    if render_diagnostics is None and item_diagnostics is not None:
+                        diagnostics_path = Path(item_diagnostics)
+                        render_diagnostics = (
+                            diagnostics_path
+                            if diagnostics_path.is_absolute()
+                            else path.parent / diagnostics_path
+                        )
                 if "available_speech" in item:
                     available_values.append(
                         _nonnegative_int(
@@ -662,7 +758,18 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
                     )
             if available_values:
                 available = sum(available_values)
-        return _Report(status, pending, available, code, message)
+        return _Report(
+            status,
+            pending,
+            available,
+            code,
+            message,
+            error_type=error_type,
+            error_stage=error_stage,
+            error_root_cause_type=error_root_cause_type,
+            error_root_cause_message=error_root_cause_message,
+            render_diagnostics=render_diagnostics,
+        )
     except Exception as exc:  # noqa: BLE001 - Malformed reports become conservative status.
         return _Report(
             None,

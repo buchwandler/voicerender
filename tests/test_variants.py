@@ -258,7 +258,11 @@ def test_document_failed_report_and_pending_composition_are_preserved(
         'format = "voicerender-bundle-document-report"\n'
         'version = 1\nstatus = "failed"\nplanned_speech = 2\n'
         "available_speech = 1\npending_composition = true\n"
-        'error_code = "render.failed"\nerror_message = "backend unavailable"\n',
+        'error_code = "render.failed"\nerror_message = "backend unavailable"\n'
+        'error_type = "EngineBackendError"\nerror_stage = "inference"\n'
+        'error_root_cause_type = "RuntimeError"\n'
+        'error_root_cause_message = "provider failed"\n'
+        'render_diagnostics = "document-0001/render-diagnostics.json"\n',
         encoding="utf-8",
     )
     found = list_bundle_variants(root).variants[0]
@@ -268,6 +272,13 @@ def test_document_failed_report_and_pending_composition_are_preserved(
     assert found.pending_composition is True
     assert found.report_path == report
     assert found.available_speech == 1
+    assert found.error_type == "EngineBackendError"
+    assert found.error_stage == "inference"
+    assert found.error_root_cause_type == "RuntimeError"
+    assert found.error_root_cause_message == "provider failed"
+    assert found.render_diagnostics == (
+        report.parent / "document-0001" / "render-diagnostics.json"
+    )
 
 
 def test_book_failed_report_is_surfaced_with_existing_manifest(tmp_path: Path) -> None:
@@ -284,7 +295,11 @@ def test_book_failed_report_is_surfaced_with_existing_manifest(tmp_path: Path) -
         'format = "voicerender-bundle-book-report"\nversion = 1\n'
         "failed = 1\npartial_chapters = 0\nskipped = 0\n"
         'pending_composition = false\n[[item]]\nstatus = "failed"\n'
-        'error_code = "preflight.reject"\nerror_message = "capacity"\n',
+        'error_code = "preflight.reject"\nerror_message = "capacity"\n'
+        'error_type = "EngineBackendError"\nerror_stage = "inference"\n'
+        'error_root_cause_type = "RuntimeError"\n'
+        'error_root_cause_message = "provider failed"\n'
+        'render_diagnostics = "chapter-0001/render-diagnostics.json"\n',
         encoding="utf-8",
     )
     found = list_bundle_variants(root).variants[0]
@@ -292,6 +307,13 @@ def test_book_failed_report_is_surfaced_with_existing_manifest(tmp_path: Path) -
     assert found.error_code == "preflight.reject"
     assert found.error_message == "capacity"
     assert found.available_speech == 1
+    assert found.error_type == "EngineBackendError"
+    assert found.error_stage == "inference"
+    assert found.error_root_cause_type == "RuntimeError"
+    assert found.error_root_cause_message == "provider failed"
+    assert found.render_diagnostics == (
+        report.parent / "chapter-0001" / "render-diagnostics.json"
+    )
 
 
 def test_boolean_report_version_is_malformed(tmp_path: Path) -> None:

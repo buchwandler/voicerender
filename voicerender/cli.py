@@ -832,7 +832,9 @@ class _ProgressPrinter:
         if event.kind is RenderEventKind.SEGMENT_STARTED and event.engine:
             return f"synthesizing {event.engine}"
         if event.kind is RenderEventKind.SEGMENT_FAILED:
-            return f"failed {event.error_code or event.status or 'speech item'}"
+            failure = f"failed {event.error_code or event.status or 'speech item'}"
+            summary = _diagnostic_summary_text(event)
+            return f"{failure}; {summary}" if summary else failure
         return None
 
     def finish(self) -> None:
@@ -1147,6 +1149,7 @@ def _print_bundle_variants(result: BundleVariantsResult) -> None:
                 value for value in (variant.error_code, variant.error_message) if value
             )
             print(f"  Last render error: {error}")
+            _print_diagnostic_summary(variant, prefix="    ")
         if variant.output_error:
             print(f"  Output metadata warning: {variant.output_error}")
         if variant.report_path:
@@ -1281,8 +1284,38 @@ def _print_bundle_inspect(result: BundleInspectResult) -> None:
                 item for item in (variant.error_code, variant.error_message) if item
             )
             print(f"    render error: {error}")
+            _print_diagnostic_summary(variant, prefix="    ")
         if variant.output_error:
             print(f"    output warning: {variant.output_error}")
+
+
+def _diagnostic_summary_text(value: Any) -> str | None:
+    parts: list[str] = []
+    error_type = getattr(value, "error_type", None)
+    error_stage = getattr(value, "error_stage", None)
+    cause_type = getattr(value, "error_root_cause_type", None)
+    cause_message = getattr(value, "error_root_cause_message", None)
+    if isinstance(error_type, str) and error_type:
+        parts.append(f"type {error_type}")
+    if isinstance(error_stage, str) and error_stage:
+        parts.append(f"stage {error_stage}")
+    cause = ": ".join(
+        item for item in (cause_type, cause_message) if isinstance(item, str) and item
+    )
+    if cause:
+        parts.append(f"root cause {cause}")
+    diagnostics = getattr(value, "render_diagnostics", None)
+    if diagnostics is None:
+        diagnostics = getattr(value, "diagnostics_path", None)
+    if diagnostics is not None:
+        parts.append(f"sidecar {diagnostics}")
+    return "; ".join(parts) if parts else None
+
+
+def _print_diagnostic_summary(value: Any, *, prefix: str) -> None:
+    summary = _diagnostic_summary_text(value)
+    if summary:
+        print(f"{prefix}diagnostics: {summary}")
 
 
 def _print_bundle_result(result: BundleRenderResult) -> None:
@@ -1314,6 +1347,7 @@ def _print_bundle_result(result: BundleRenderResult) -> None:
                     f"       {outcome.error_code or 'render.failed'}: "
                     f"{outcome.error_message or 'render failed'}"
                 )
+                _print_diagnostic_summary(outcome, prefix="       ")
                 if outcome.preflight_report is not None:
                     label = (
                         "replan report"
@@ -1358,6 +1392,7 @@ def _print_bundle_result(result: BundleRenderResult) -> None:
             print(f"  preflight: {value.preflight_report}")
         if value.error_code:
             print(f"FAILED: {value.error_code}: {value.error_message or ''}")
+            _print_diagnostic_summary(value, prefix="  ")
         if value.pending_composition:
             print(
                 "WARNING: emphasis remains pending composition; see "
@@ -1418,6 +1453,7 @@ def _print_bundle_batch_result(result: BundleBatchRenderResult) -> None:
                     text for text in (variant.error_code, error_message) if text
                 )
             )
+            _print_diagnostic_summary(variant, prefix="  ")
         if variant.output_error:
             print(f"  output warning: {variant.output_error}")
         if variant.pending_composition:
@@ -1427,6 +1463,7 @@ def _print_bundle_batch_result(result: BundleBatchRenderResult) -> None:
         print(
             f"Batch inspection error: {result.error_code or 'bundle.invalid'}: {result.error_message}"
         )
+        _print_diagnostic_summary(result, prefix="  ")
     print("\nVoiceRender batch summary")
     print(f"  completed:       {summary.completed}")
     print(f"  partial:         {summary.partial}")
