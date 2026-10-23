@@ -337,7 +337,11 @@ def _is_absolute_normalized_path(value: str, *, portable: bool = False) -> bool:
         if value.startswith("/"):
             return str(posix) == value and ".." not in posix.parts
         windows = PureWindowsPath(value)
-        return windows.is_absolute() and str(windows) == value and ".." not in windows.parts
+        return (
+            windows.is_absolute()
+            and str(windows) == value
+            and ".." not in windows.parts
+        )
     path = Path(value).expanduser()
     return path.is_absolute() and str(path) == value and ".." not in path.parts
 
