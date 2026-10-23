@@ -66,6 +66,7 @@
 - Added KittenSynth model-token capacity metadata and preflight-aware request handling
 - Added typed progress, evidence-based ETA, and workload estimates
 - Added read-only RenderPlan variant discovery for book and document bundles
+- Added read-only bundle role and cast-readiness inspection
 
 ### Changed
 

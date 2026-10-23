@@ -12,7 +12,7 @@ try:
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
-from renderplan import RenderPlan, load_manifest, load_plan
+from renderplan import RenderPlan, RenderProfile, load_manifest, load_plan
 from renderplan import codec as renderplan_codec
 
 from .book_contract import (
@@ -20,7 +20,12 @@ from .book_contract import (
     validate_chapter_plan,
     validate_profile_snapshot,
 )
-from .bundle_contract import BundleContractError, BundleKind, load_bundle_identity
+from .bundle_contract import (
+    BundleContractError,
+    BundleIdentity,
+    BundleKind,
+    load_bundle_identity,
+)
 from .document_contract import load_document_workspace
 from .renderplan_render import RENDER_MANIFEST_FILENAME
 
@@ -115,6 +120,15 @@ class BundleVariantsResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BundleVariantProfile:
+    """The validated immutable RenderProfile snapshot in one bundle variant."""
+
+    name: str
+    path: Path
+    profile: RenderProfile
+
+
+@dataclass(frozen=True, slots=True)
 class _PlanUnit:
     name: str
     plan: RenderPlan
@@ -124,6 +138,8 @@ class _PlanUnit:
 class _ValidatedVariant:
     profile_id: str
     units: tuple[_PlanUnit, ...]
+    profile_path: Path
+    profile: RenderProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,19 +173,13 @@ def list_bundle_variants(
 ) -> BundleVariantsResult:
     """List every direct RenderPlan variant candidate without creating or modifying files."""
     identity = load_bundle_identity(bundle)
-    rp_input = (
-        Path(renderplan_root).expanduser()
-        if renderplan_root is not None
-        else identity.root / "renderplan"
-    )
+    rp_root = _resolve_renderplan_root(identity, renderplan_root)
     out_input = (
         Path(output_root).expanduser()
         if output_root is not None
         else identity.root / "voicerender"
     )
-    rp_root = _resolve_root(rp_input, "RenderPlan")
     out_root = _resolve_root(out_input, "VoiceRender")
-
     if renderplan_root is None and not _within(rp_root, identity.root):
         raise BundleContractError("default RenderPlan root escapes the bundle")
     output_root_error: str | None = None
@@ -218,6 +228,66 @@ def list_bundle_variants(
         output_root=out_root,
         variants=results,
     )
+
+
+def load_bundle_variant_profile(
+    bundle: str | Path,
+    variant: str,
+    *,
+    renderplan_root: str | Path | None = None,
+) -> BundleVariantProfile:
+    """Load the validated immutable RenderProfile snapshot for an exact variant."""
+    identity = load_bundle_identity(bundle)
+    rp_root = _resolve_renderplan_root(identity, renderplan_root)
+    if (
+        not isinstance(variant, str)
+        or not variant
+        or variant in {".", ".."}
+        or "/" in variant
+        or "\\" in variant
+        or "\x00" in variant
+    ):
+        raise BundleContractError(
+            "variant must name one direct child of the RenderPlan root",
+            code="path.unsafe",
+        )
+    candidate = rp_root / variant
+    if candidate.is_symlink():
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise BundleContractError(
+                f"cannot resolve bundle variant {variant!r}: {exc}",
+                code="variant.invalid",
+            ) from exc
+        if not _within(resolved, rp_root):
+            raise BundleContractError(
+                "variant directory symlink escapes the RenderPlan root",
+                code="path.unsafe",
+            )
+        raise BundleContractError(
+            "variant directory must not be a symlink", code="path.unsafe"
+        )
+    try:
+        resolved_candidate = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise BundleContractError(
+            f"cannot resolve bundle variant {variant!r}: {exc}", code="variant.invalid"
+        ) from exc
+    if not resolved_candidate.is_dir() or not _within(resolved_candidate, rp_root):
+        raise BundleContractError(
+            f"bundle variant is not a direct safe directory: {variant!r}",
+            code="path.unsafe",
+        )
+    try:
+        validated = (
+            _validate_book_variant(resolved_candidate, variant)
+            if identity.kind == "book"
+            else _validate_document_variant(identity.root, resolved_candidate, variant)
+        )
+    except _PlanInvalid as exc:
+        raise BundleContractError(str(exc), code=exc.code) from exc
+    return BundleVariantProfile(variant, validated.profile_path, validated.profile)
 
 
 def _inspect_candidate(
@@ -329,7 +399,12 @@ def _validate_book_variant(variant_dir: Path, name: str) -> _ValidatedVariant:
                 raise TypeError(f"RenderPlan for {entry.id} has an invalid type")
             validate_chapter_plan(renderplan_set, entry, plan)
             units.append(_PlanUnit(entry.id, plan))
-        return _ValidatedVariant(profile_id=profile_id, units=tuple(units))
+        return _ValidatedVariant(
+            profile_id=profile_id,
+            units=tuple(units),
+            profile_path=profile_path,
+            profile=profile,
+        )
     except _PlanInvalid:
         raise
     except Exception as exc:
@@ -372,6 +447,8 @@ def _validate_document_variant(
         return _ValidatedVariant(
             profile_id=profile_id,
             units=(_PlanUnit("document-0001", plan),),
+            profile_path=profile_path,
+            profile=profile,
         )
     except _PlanInvalid:
         raise
@@ -611,6 +688,23 @@ def _resolve_root(path: Path, label: str) -> Path:
     return resolved
 
 
+def _resolve_renderplan_root(
+    identity: BundleIdentity,
+    renderplan_root: str | Path | None,
+) -> Path:
+    path = (
+        Path(renderplan_root).expanduser()
+        if renderplan_root is not None
+        else identity.root / "renderplan"
+    )
+    resolved = _resolve_root(path, "RenderPlan")
+    if renderplan_root is None and not _within(resolved, identity.root):
+        raise BundleContractError("default RenderPlan root escapes the bundle")
+    if resolved.exists() and not resolved.is_dir():
+        raise BundleContractError(f"RenderPlan root is not a directory: {resolved}")
+    return resolved
+
+
 def _safe_directory(path: Path, root: Path, label: str) -> Path:
     if path.is_symlink():
         raise ValueError(f"{label} must not be a symlink: {path}")
@@ -659,4 +753,10 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
-__all__ = ["BundleVariant", "BundleVariantsResult", "list_bundle_variants"]
+__all__ = [
+    "BundleVariant",
+    "BundleVariantProfile",
+    "BundleVariantsResult",
+    "list_bundle_variants",
+    "load_bundle_variant_profile",
+]

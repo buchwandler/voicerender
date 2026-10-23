@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO, cast
 
-from renderplan import load_manifest, load_plan
+from renderplan import RoleProfile, load_manifest, load_plan
 
 from . import __version__
 from .bundle import BundleRenderResult, render_bundle
@@ -22,6 +22,8 @@ from .bundle_batch import (
     BundleBatchRenderResult,
     render_bundle_batch,
 )
+from .bundle_inspect import BundleInspectResult, inspect_bundle
+from .bundle_roles import BundleRolesError, BundleRolesResult, inspect_bundle_roles
 from .engines.options import engine_option_to_dict, engine_options
 from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
 from .engines.registry import (
@@ -74,6 +76,7 @@ from .renderprofile import (
     save_render_profile,
     validate_render_profile,
 )
+from .role_bindings import role_voice_selector
 from .runtime import (
     OnnxRuntimeStatus,
     clear_onnx_runtime_providers,
@@ -547,6 +550,61 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_variants.add_argument("--renderplan-root", type=Path)
     bundle_variants.add_argument("--output-root", type=Path)
     bundle_variants.add_argument("--json", action="store_true")
+    bundle_roles = bundle_commands.add_parser(
+        "roles",
+        help="List source-required roles and optionally compare a cast",
+        description=(
+            "List logical speech roles from the UtterPlan inventory and optionally "
+            "compare them with an authored RenderProfile or exact RenderPlan variant."
+        ),
+    )
+    bundle_roles.add_argument(
+        "bundle",
+        type=Path,
+        help="path resolving to a canonical NAME.ssmd-bundle directory",
+    )
+    role_selection = bundle_roles.add_mutually_exclusive_group()
+    role_selection.add_argument(
+        "--profile", type=Path, help="authored mutable RenderProfile"
+    )
+    role_selection.add_argument(
+        "--variant", help="exact variant's immutable RenderProfile snapshot"
+    )
+    bundle_roles.add_argument("--utterplan-root", type=Path)
+    bundle_roles.add_argument("--renderplan-root", type=Path)
+    bundle_roles.add_argument(
+        "--check", action="store_true", help="exit 1 unless the selected cast is ready"
+    )
+    bundle_roles.add_argument("--json", action="store_true")
+
+    bundle_inspect = bundle_commands.add_parser(
+        "inspect",
+        help="Inspect bundle roles, cast readiness, variants, and render state",
+        description=(
+            "Compose the UtterPlan source-role inventory and optional cast inspection "
+            "with the existing RenderPlan variant and VoiceRender render-state listing."
+        ),
+    )
+    bundle_inspect.add_argument(
+        "bundle",
+        type=Path,
+        help="path resolving to a canonical NAME.ssmd-bundle directory",
+    )
+    inspect_selection = bundle_inspect.add_mutually_exclusive_group()
+    inspect_selection.add_argument(
+        "--profile", type=Path, help="authored mutable RenderProfile"
+    )
+    inspect_selection.add_argument(
+        "--variant", help="exact variant's immutable RenderProfile snapshot"
+    )
+    bundle_inspect.add_argument("--utterplan-root", type=Path)
+    bundle_inspect.add_argument("--renderplan-root", type=Path)
+    bundle_inspect.add_argument("--output-root", type=Path)
+    bundle_inspect.add_argument(
+        "--check", action="store_true", help="exit 1 unless the selected cast is ready"
+    )
+    bundle_inspect.add_argument("--json", action="store_true")
+
     inspect = commands.add_parser(
         "inspect-manifest", help="Verify a render manifest and its WAVs"
     )
@@ -803,25 +861,6 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _profile_role_selector(binding: dict[str, Any]) -> str:
-    voice = binding.get("voice")
-    if voice is not None:
-        return _display_cli_value(voice)
-    speaker = binding.get("speaker")
-    if speaker is not None:
-        return f"speaker:{_display_cli_value(speaker)}"
-    source = binding.get("voice_source")
-    options = binding.get("options")
-    if source is None and isinstance(options, dict):
-        source = options.get("voice_source")
-    if isinstance(source, dict):
-        kind = source.get("kind") or source.get("type")
-        return f"source:{_display_cli_value(kind)}" if kind else "source"
-    if source is not None:
-        return "source"
-    return "unknown"
-
-
 def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
     print("  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE")
     for item in roles:
@@ -830,7 +869,9 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
         engine = _display_cli_value(binding.get("renderer", "unknown"))
         target = _display_cli_value(binding.get("target_id", "unknown"))
         language = _display_cli_value(item["language"])
-        selector = _profile_role_selector(binding)
+        selector = role_voice_selector(
+            RoleProfile(language=item["language"], binding=binding)
+        )
         print(
             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
             f"{target:<18} {selector}"
@@ -1007,6 +1048,138 @@ def _print_bundle_variants(result: BundleVariantsResult) -> None:
             print(f"  Output metadata warning: {variant.output_error}")
         if variant.report_path:
             print(f"  report: {variant.report_path}")
+
+
+def _print_bundle_role_cast(
+    result: BundleRolesResult, *, heading: str = "Cast"
+) -> None:
+    if result.profile_source is None:
+        return
+    print(heading)
+    print(f"  profile:          {result.profile_path}")
+    print(f"  profile-id:       {result.profile_id}")
+    if result.profile_source == "variant":
+        print(f"  variant snapshot: {result.variant}")
+    print(f"  default role:     {result.profile_default_role}")
+    assert result.coverage is not None and result.distinctness is not None
+    print(
+        f"  coverage:         {'complete' if result.coverage.complete else 'incomplete'}"
+    )
+    print(f"  distinct voices:  {'yes' if result.distinctness.distinct else 'no'}")
+    print(f"  readiness:        {'ready' if result.ready else 'not ready'}")
+    print()
+    print(
+        "  ROLE       OCCUR  DEFAULT  BOUND  LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE  UNIQUE"
+    )
+    for role in result.roles:
+        bound = "yes" if role.bound else "no"
+        default = "*" if role.required_by_default else ""
+        unique = (
+            "-"
+            if role.bound is not True or role.binding_valid is not True
+            else "no"
+            if role.duplicate_roles
+            else "yes"
+        )
+        print(
+            f"  {role.role:<10} {role.occurrences:<6} {default:<8} {bound:<6} "
+            f"{role.language or '-':<9} {role.renderer or '-':<8} "
+            f"{role.target_id or '-':<18} {role.selector or '-':<21} {unique}"
+        )
+        if role.binding_error:
+            print(f"    invalid binding: {role.binding_error}")
+    assert result.coverage is not None
+    if result.coverage.missing:
+        print(f"  missing roles: {', '.join(result.coverage.missing)}")
+    if result.coverage.unused:
+        print(f"  unused profile roles: {', '.join(result.coverage.unused)}")
+    assert result.distinctness is not None
+    if result.distinctness.duplicate_groups:
+        print("  Duplicate voices")
+        for group in result.distinctness.duplicate_groups:
+            identity = group.identity
+            selector = (
+                identity.voice
+                if identity.voice is not None
+                else f"speaker:{identity.speaker}"
+                if identity.speaker is not None
+                else "source"
+                if identity.source is not None
+                else "target-only"
+            )
+            print(f"    {', '.join(group.roles)}")
+            print(
+                f"      engine: {identity.renderer}; target: {identity.target_id}; voice: {selector}"
+            )
+
+
+def _print_bundle_roles(result: BundleRolesResult) -> None:
+    print("VoiceRender bundle roles")
+    print(f"  bundle:        {result.bundle}")
+    print(f"  kind:          {result.kind}")
+    print(f"  inventory:     {result.inventory_path}")
+    print(f"  required:      {len(result.inventory.roles)} explicit roles")
+    if result.inventory.uses_default_role:
+        if result.profile_source is None:
+            default_status = (
+                f"required by {result.inventory.implicit_occurrences} speech segments; "
+                "resolves after a profile is selected"
+            )
+        else:
+            default_status = (
+                f"required by {result.inventory.implicit_occurrences} speech segments; "
+                f"resolves to {result.profile_default_role}"
+            )
+    else:
+        default_status = "not required"
+    print(f"  default-role:  {default_status}")
+    if result.profile_source is not None:
+        _print_bundle_role_cast(result)
+        return
+    print()
+    print("ROLE")
+    for role in result.inventory.roles:
+        print(role.name)
+
+
+def _print_bundle_inspect(result: BundleInspectResult) -> None:
+    roles = result.roles
+    print("VoiceRender bundle inspect")
+    print(f"  bundle:           {result.bundle}")
+    print(f"  kind:             {result.kind}")
+    print(f"  role inventory:   fresh ({roles.inventory_path})")
+    role_names = ", ".join(role.name for role in roles.inventory.roles) or "(none)"
+    print(f"  explicit roles:   {role_names}")
+    default_use = (
+        f"yes ({roles.inventory.implicit_occurrences} speech segments)"
+        if roles.inventory.uses_default_role
+        else "no"
+    )
+    print(f"  default-role use: {default_use}")
+    if roles.profile_source is not None:
+        print()
+        _print_bundle_role_cast(roles)
+    print()
+    print("Variants")
+    if not result.variants.variants:
+        print("  No RenderPlan variants found.")
+        return
+    print("  VARIANT                          PLAN      RENDER         SPEECH")
+    for variant in result.variants.variants:
+        speech = f"{variant.available_speech}/{variant.planned_speech}"
+        print(
+            f"  {variant.name:<32} {variant.plan_status:<9} "
+            f"{variant.render_status:<14} {speech}"
+        )
+        if variant.validation_error:
+            print(f"    invalid: {variant.validation_error}")
+        if variant.error_code or variant.error_message:
+            error = ": ".join(
+                item for item in (variant.error_code, variant.error_message) if item
+            )
+            print(f"    render error: {error}")
+        if variant.output_error:
+            print(f"    output warning: {variant.output_error}")
 
 
 def _print_bundle_result(result: BundleRenderResult) -> None:
@@ -2316,6 +2489,47 @@ def main(argv: list[str] | None = None) -> int:
                 _print_bundle_result(bundle_result)
             return bundle_result.exit_code
 
+        if args.command == "bundle" and args.bundle_command == "roles":
+            if args.check and args.profile is None and args.variant is None:
+                raise BundleRolesError(
+                    "--check requires --profile or --variant",
+                    code="bundle.roles_invalid",
+                )
+            result = inspect_bundle_roles(
+                args.bundle,
+                profile=args.profile,
+                variant=args.variant,
+                utterplan_root=args.utterplan_root,
+                renderplan_root=args.renderplan_root,
+            )
+            if args.json:
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                _print_bundle_roles(result)
+            return 1 if args.check and result.ready is not True else 0
+
+        if args.command == "bundle" and args.bundle_command == "inspect":
+            if args.check and args.profile is None and args.variant is None:
+                raise BundleRolesError(
+                    "--check requires --profile or --variant",
+                    code="bundle.roles_invalid",
+                )
+            inspect_result = inspect_bundle(
+                args.bundle,
+                profile=args.profile,
+                variant=args.variant,
+                utterplan_root=args.utterplan_root,
+                renderplan_root=args.renderplan_root,
+                output_root=args.output_root,
+            )
+            if args.json:
+                print(
+                    json.dumps(inspect_result.to_dict(), ensure_ascii=False, indent=2)
+                )
+            else:
+                _print_bundle_inspect(inspect_result)
+            return 1 if args.check and inspect_result.roles.ready is not True else 0
+
         if args.command == "bundle" and args.bundle_command == "variants":
             listing = list_bundle_variants(
                 args.bundle,
@@ -2344,6 +2558,32 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if valid else 1
 
     except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
+        if args.command == "bundle" and args.bundle_command in {"roles", "inspect"}:
+            error_code = getattr(exc, "code", None)
+            if not isinstance(error_code, str):
+                error_code = "bundle.invalid"
+            if args.json:
+                format_name = (
+                    "voicerender-bundle-roles"
+                    if args.bundle_command == "roles"
+                    else "voicerender-bundle-inspect"
+                )
+                print(
+                    json.dumps(
+                        {
+                            "format": format_name,
+                            "version": 1,
+                            "error": str(exc),
+                            "error_code": error_code,
+                            "exit_code": 2,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"error: {exc}", file=sys.stderr)
+            return 2
         if (
             getattr(args, "json", False)
             and args.command == "bundle"

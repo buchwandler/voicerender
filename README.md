@@ -327,6 +327,31 @@ The path must resolve to the bundle root itself; VoiceRender does not search par
 
 `bundle variants` is read-only discovery: it validates existing book or document plans and reports their render state without compiling variants or synthesizing speech. UtterPlan remains responsible for producing RenderPlan variants.
 
+## Inspecting bundle roles and cast readiness
+
+`utterplan bundle compile` writes a bounded `utterplan/role-inventory.toml` sidecar. `voicerender bundle roles` reads that artifact without importing UtterPlan, parsing SSMD, compiling plans, or creating output. It verifies that the inventory still matches the bundle manifest and source bytes before reporting the explicit roles and any use of the profile's default role.
+
+```bash
+# Discover source roles before a profile or render variant exists.
+voicerender bundle roles story.ssmd-bundle
+
+# Check an authored cast while editing it.
+voicerender bundle roles story.ssmd-bundle \
+  --profile story-cast.renderprofile.toml --check
+
+# Inspect the exact immutable profile snapshot in an existing variant.
+voicerender bundle roles story.ssmd-bundle \
+  --variant narration--<profile-fingerprint> --check
+
+# Combine cast status with existing variant/render-state discovery.
+voicerender bundle inspect story.ssmd-bundle \
+  --profile story-cast.renderprofile.toml --output-root renders --json
+```
+
+`--profile` and `--variant` are mutually exclusive. `--profile` inspects the authored, mutable RenderProfile; `--variant` loads the validated snapshot stored in that exact existing variant. `bundle inspect` adds the existing variant and render-state listing, but does not synthesize or create the output root. Neither command writes to the bundle. A missing or stale inventory is not displayed as current—run `utterplan bundle compile` again.
+
+Readiness is structural, not an engine or render check. Explicit inventory roles are required, and the selected profile's `default_role` is also required only when the inventory reports implicit/default-role speech. Every required role must have a valid canonical binding, and required roles must resolve to distinct canonical voice identities; language, delivery options, and unused extra roles do not make voices distinct. No engine SDK/session, model availability, preflight, or completed render is required. With `--check`, exit status is `0` for a ready cast, `1` for an incomplete or duplicate cast, and `2` for invalid input or inventory/profile/variant contracts. Without `--check`, incomplete findings remain ordinary inspection data. JSON mode emits only the result object.
+
 For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
 
 ```bash

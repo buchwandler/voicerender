@@ -25,6 +25,18 @@ from .bundle_batch import (
     render_bundle_batch,
 )
 from .bundle_contract import BundleContractError
+from .bundle_inspect import BundleInspectResult, inspect_bundle
+from .bundle_roles import (
+    BundleRequiredRole,
+    BundleRoleBinding,
+    BundleRoleCoverage,
+    BundleRoleDistinctness,
+    BundleRoleInventory,
+    BundleRoleInventoryItem,
+    BundleRolesError,
+    BundleRolesResult,
+    inspect_bundle_roles,
+)
 from .document import DocumentRenderRequest, DocumentRenderResult
 from .engines.api_probe import EngineApiProbe
 from .engines.assets import (
@@ -124,6 +136,13 @@ from .renderprofile import (
     save_render_profile,
     validate_render_profile,
 )
+from .role_bindings import (
+    DuplicateVoiceGroup,
+    RoleVoiceIdentity,
+    duplicate_voice_groups,
+    role_voice_identity,
+    role_voice_selector,
+)
 from .runtime import (
     OnnxRuntimeStatus,
     RuntimeDistribution,
@@ -131,7 +150,13 @@ from .runtime import (
     onnx_runtime_status,
     set_onnx_runtime_providers,
 )
-from .variants import BundleVariant, BundleVariantsResult, list_bundle_variants
+from .variants import (
+    BundleVariant,
+    BundleVariantProfile,
+    BundleVariantsResult,
+    list_bundle_variants,
+    load_bundle_variant_profile,
+)
 from .voice_clone import VoiceCloneRequest, clone_voice_profile
 from .voice_source_codec import load_voice_source, save_voice_source
 from .voice_sources import (
@@ -171,8 +196,18 @@ __all__ = [
     "BundleBatchRenderResult",
     "BundleBatchRenderSummary",
     "BundleContractError",
+    "BundleInspectResult",
     "BundleRenderResult",
+    "BundleRequiredRole",
+    "BundleRoleBinding",
+    "BundleRoleCoverage",
+    "BundleRoleDistinctness",
+    "BundleRoleInventory",
+    "BundleRoleInventoryItem",
+    "BundleRolesError",
+    "BundleRolesResult",
     "BundleVariant",
+    "BundleVariantProfile",
     "BundleVariantRenderOutcome",
     "BundleVariantsResult",
     "CatalogRequest",
@@ -181,6 +216,7 @@ __all__ = [
     "DocumentRenderError",
     "DocumentRenderRequest",
     "DocumentRenderResult",
+    "DuplicateVoiceGroup",
     "EngineAdapter",
     "EngineApiIncompatibleError",
     "EngineApiProbe",
@@ -228,6 +264,7 @@ __all__ = [
     "ResolvedPreparedVoice",
     "ResolvedReferenceAudio",
     "RoleProfile",
+    "RoleVoiceIdentity",
     "RuntimeControlError",
     "RuntimeDistribution",
     "SpeechItem",
@@ -255,11 +292,14 @@ __all__ = [
     "create_render_profile",
     "create_voice_source",
     "discover_targets",
+    "duplicate_voice_groups",
     "engine_options",
     "engine_status",
     "estimate_render_book",
     "estimate_render_document",
     "estimate_renderplan",
+    "inspect_bundle",
+    "inspect_bundle_roles",
     "inspect_voice",
     "install_model",
     "list_bundle_variants",
@@ -267,6 +307,7 @@ __all__ = [
     "list_models",
     "list_profile_roles",
     "list_voices",
+    "load_bundle_variant_profile",
     "load_render_profile",
     "load_voice_source",
     "local_prepared_voice_source",
@@ -289,6 +330,8 @@ __all__ = [
     "resolve_prepared_voice",
     "resolve_reference_audio",
     "resolve_voice",
+    "role_voice_identity",
+    "role_voice_selector",
     "save_render_profile",
     "save_voice_source",
     "set_default_profile_role",

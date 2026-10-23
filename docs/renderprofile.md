@@ -152,6 +152,33 @@ voicerender bundle render story.ssmd-bundle \
 
 VoiceRender writes below `<bundle>/voicerender/<variant>/`, preserving the existing kind-specific output layout. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots. Failures continue by default for books; `--fail-fast` skips remaining chapters. `--reset-stale` replaces stale owned output while preserving verified cache reuse. `--force` synthesizes every selected request and bypasses cache.
 
+## Inspect source roles and cast readiness
+
+Before authoring a cast, compile the SSMD bundle with UtterPlan. Its role inventory at `<bundle>/utterplan/role-inventory.toml` is the source of truth for explicit roles and implicit/default-role occurrences. VoiceRender reads and freshness-checks this sidecar; it does not import UtterPlan or parse SSMD. A missing or stale sidecar is an error rather than permission to guess from plans.
+
+```bash
+# Read source requirements, even before any RenderPlan variant exists.
+voicerender bundle roles story.ssmd-bundle --json
+
+# Inspect the mutable profile as the cast is authored.
+voicerender bundle roles story.ssmd-bundle \
+  --profile story-cast.renderprofile.toml
+
+# Check the cast against all required source roles.
+voicerender bundle roles story.ssmd-bundle \
+  --profile story-cast.renderprofile.toml --check
+
+# Inspect a previously projected variant and its immutable profile snapshot.
+voicerender bundle inspect story.ssmd-bundle \
+  --variant narration--<profile-fingerprint> --check
+```
+
+`--profile` and `--variant` cannot be combined. The former reads the authored RenderProfile; the latter resolves the exact validated variant and inspects its stored `renderprofile.toml`, not a potentially changed source profile. `bundle inspect` also reuses VoiceRender's existing variant/render-state report. It is read-only: no variant compilation, rendering, or output-directory creation occurs.
+
+For readiness, inventory roles are required in their recorded order. If any speech uses the default role, the selected profile's `default_role` is required too; source-only discovery does not invent a default role. A cast is structurally ready only when every required role exists with a valid canonical binding and each required role has a distinct canonical voice identity. Renderer/target and named voice, speaker, or normalized source content define that identity—not language, delivery options, or unused extra roles. This check does not require engine SDKs, installed models, synthesis, or a completed render. `--check` returns `0` when ready, `1` when coverage/binding/distinctness is not ready, and `2` for invalid paths or contracts. Ordinary inspection without `--check` still returns incomplete cast findings as data.
+
+The manual workflow is therefore: convert the source to a canonical `.ssmd-bundle`, run `utterplan bundle compile`, use `bundle roles` to discover requirements, create/bind every required role in a RenderProfile, verify with `bundle roles --profile ... --check`, then project/render variants through UtterPlan and VoiceRender. Use `bundle inspect` to compare the authored profile against the exact variant snapshot and current render state.
+
 VoiceRender consumes each RenderPlan independently as well. The bundle collection directory does not change the single-plan execution contract; the set index is not passed to generic preflight or render:
 
 ```bash
