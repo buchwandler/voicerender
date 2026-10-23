@@ -85,7 +85,9 @@ def role_voice_identity(role: RoleProfile) -> RoleVoiceIdentity:
         if not isinstance(source_value, Mapping):
             raise ValueError("binding.voice_source must be a table")
         try:
-            normalized = normalize_voice_source(source_value, allow_named=False)
+            normalized = normalize_voice_source(
+                source_value, allow_named=False, portable_paths=True
+            )
             source_identity = MappingProxyType(dict(voice_source_identity(normalized)))
         except (EngineError, ValueError, TypeError) as exc:
             raise ValueError(

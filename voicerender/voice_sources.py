@@ -8,7 +8,7 @@ import re
 import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal
 
 import voicefolio
@@ -330,8 +330,23 @@ def _normalize_qwen_origin(origin: Any) -> dict[str, Any]:
     return normalized
 
 
+def _is_absolute_normalized_path(value: str, *, portable: bool = False) -> bool:
+    """Check persisted local-path syntax without requiring the path to exist."""
+    if portable:
+        posix = PurePosixPath(value)
+        if value.startswith("/"):
+            return str(posix) == value and ".." not in posix.parts
+        windows = PureWindowsPath(value)
+        return windows.is_absolute() and str(windows) == value and ".." not in windows.parts
+    path = Path(value).expanduser()
+    return path.is_absolute() and str(path) == value and ".." not in path.parts
+
+
 def normalize_voice_source(
-    source: Mapping[str, Any], *, allow_named: bool = True
+    source: Mapping[str, Any],
+    *,
+    allow_named: bool = True,
+    portable_paths: bool = False,
 ) -> VoiceSource:
     """Validate persisted source shape and return its canonical value object."""
     if not isinstance(source, Mapping):
@@ -402,8 +417,7 @@ def normalize_voice_source(
                 "voice_source.invalid",
                 "HTTP and HTTPS reference URLs are not supported; use a local WAV or Voicefolio",
             )
-        path = Path(value).expanduser()
-        if not path.is_absolute() or str(path) != value or ".." in path.parts:
+        if not _is_absolute_normalized_path(value, portable=portable_paths):
             raise _voice_error(
                 "voice_source.invalid",
                 "Local reference value must be an absolute normalized path",
@@ -438,8 +452,7 @@ def normalize_voice_source(
                 "Prepared voice source contains unsupported fields",
                 details={"fields": unknown},
             )
-        path = Path(value).expanduser()
-        if not path.is_absolute() or str(path) != value or ".." in path.parts:
+        if not _is_absolute_normalized_path(value, portable=portable_paths):
             raise _voice_error(
                 "voice_source.prepared_invalid",
                 "Prepared voice value must be an absolute normalized path",
