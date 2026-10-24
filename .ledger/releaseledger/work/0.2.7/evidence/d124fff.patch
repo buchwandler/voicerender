@@ -1,0 +1,77 @@
+ voicerender/role_bindings.py |  4 +++-
+ voicerender/voice_sources.py | 25 +++++++++++++++++++------
+ 2 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/voicerender/role_bindings.py b/voicerender/role_bindings.py
+index 9ac91e1..145d1f4 100644
+--- a/voicerender/role_bindings.py
++++ b/voicerender/role_bindings.py
+@@ -85,7 +85,9 @@ def role_voice_identity(role: RoleProfile) -> RoleVoiceIdentity:
+         if not isinstance(source_value, Mapping):
+             raise ValueError("binding.voice_source must be a table")
+         try:
+-            normalized = normalize_voice_source(source_value, allow_named=False)
++            normalized = normalize_voice_source(
++                source_value, allow_named=False, portable_paths=True
++            )
+             source_identity = MappingProxyType(dict(voice_source_identity(normalized)))
+         except (EngineError, ValueError, TypeError) as exc:
+             raise ValueError(
+diff --git a/voicerender/voice_sources.py b/voicerender/voice_sources.py
+index c7064d6..4fbfd1a 100644
+--- a/voicerender/voice_sources.py
++++ b/voicerender/voice_sources.py
+@@ -8,7 +8,7 @@ import re
+ import warnings
+ from collections.abc import Iterable, Mapping
+ from dataclasses import dataclass, field
+-from pathlib import Path
++from pathlib import Path, PurePosixPath, PureWindowsPath
+ from typing import TYPE_CHECKING, Any, Literal
+
+ import voicefolio
+@@ -330,8 +330,23 @@ def _normalize_qwen_origin(origin: Any) -> dict[str, Any]:
+     return normalized
+
+
++def _is_absolute_normalized_path(value: str, *, portable: bool = False) -> bool:
++    """Check persisted local-path syntax without requiring the path to exist."""
++    if portable:
++        posix = PurePosixPath(value)
++        if value.startswith("/"):
++            return str(posix) == value and ".." not in posix.parts
++        windows = PureWindowsPath(value)
++        return windows.is_absolute() and str(windows) == value and ".." not in windows.parts
++    path = Path(value).expanduser()
++    return path.is_absolute() and str(path) == value and ".." not in path.parts
++
++
+ def normalize_voice_source(
+-    source: Mapping[str, Any], *, allow_named: bool = True
++    source: Mapping[str, Any],
++    *,
++    allow_named: bool = True,
++    portable_paths: bool = False,
+ ) -> VoiceSource:
+     """Validate persisted source shape and return its canonical value object."""
+     if not isinstance(source, Mapping):
+@@ -402,8 +417,7 @@ def normalize_voice_source(
+                 "voice_source.invalid",
+                 "HTTP and HTTPS reference URLs are not supported; use a local WAV or Voicefolio",
+             )
+-        path = Path(value).expanduser()
+-        if not path.is_absolute() or str(path) != value or ".." in path.parts:
++        if not _is_absolute_normalized_path(value, portable=portable_paths):
+             raise _voice_error(
+                 "voice_source.invalid",
+                 "Local reference value must be an absolute normalized path",
+@@ -438,8 +452,7 @@ def normalize_voice_source(
+                 "Prepared voice source contains unsupported fields",
+                 details={"fields": unknown},
+             )
+-        path = Path(value).expanduser()
+-        if not path.is_absolute() or str(path) != value or ".." in path.parts:
++        if not _is_absolute_normalized_path(value, portable=portable_paths):
+             raise _voice_error(
+                 "voice_source.prepared_invalid",
+                 "Prepared voice value must be an absolute normalized path",

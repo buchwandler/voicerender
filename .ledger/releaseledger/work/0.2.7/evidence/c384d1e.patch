@@ -1,0 +1,3053 @@
+ .../data/ledgers/main/events/events.jsonl          |   1 +
+ .../main/releases/0.2.1/entries/entry-0009.md      |  32 +
+ .../data/ledgers/main/releases/0.2.1/release.md    |   4 +-
+ README.md                                          |  25 +
+ docs/changelog.md                                  |   1 +
+ docs/index.md                                      |   4 +
+ docs/renderprofile.md                              |  27 +
+ tests/test_bundle_inspect.py                       | 256 ++++++
+ tests/test_bundle_roles.py                         | 778 ++++++++++++++++++
+ voicerender/__init__.py                            |  45 +-
+ voicerender/bundle_inspect.py                      |  64 ++
+ voicerender/bundle_roles.py                        | 901 +++++++++++++++++++++
+ voicerender/cli.py                                 | 282 ++++++-
+ voicerender/role_bindings.py                       | 170 ++++
+ voicerender/variants.py                            | 122 ++-
+ 15 files changed, 2677 insertions(+), 35 deletions(-)
+
+diff --git a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+index bff5aea..420c739 100644
+--- a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
++++ b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+@@ -54,3 +54,4 @@
+ {"data":{"updated_rows":6},"event":"audit.updated","event_id":"event-0054","record_revisions":{"commit_audit_sheet":2},"release_version":"0.2.6","schema_version":2}
+ {"data":{"entry_ids":["entry-0001","entry-0002","entry-0003","entry-0004","entry-0005","entry-0006"],"synced_audit_rows":6},"event":"entry.batch_added","event_id":"event-0055","record_revisions":{"commit_audit_sheet":3,"entry:0.2.6/entry-0001":1,"entry:0.2.6/entry-0002":1,"entry:0.2.6/entry-0003":1,"entry:0.2.6/entry-0004":1,"entry:0.2.6/entry-0005":1,"entry:0.2.6/entry-0006":1,"release:0.2.6":3},"release_version":"0.2.6","schema_version":2}
+ {"data":{"released_at":"2026-10-22"},"event":"release.finalized","event_id":"event-0056","record_revisions":{"release:0.2.6":4},"release_version":"0.2.6","schema_version":2}
++{"data":{"kind":"added","status":"accepted"},"entry_id":"entry-0009","event":"entry.added","event_id":"event-0057","record_revisions":{"entry:0.2.1/entry-0009":1,"release:0.2.1":7},"release_version":"0.2.1","schema_version":2}
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0009.md b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0009.md
+new file mode 100644
+index 0000000..13eca6a
+--- /dev/null
++++ b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0009.md
+@@ -0,0 +1,32 @@
++---
++schema_version: 2
++object_type: release_entry
++versioning:
++  schema_version: 1
++  revision: 1
++entry_id: entry-0009
++release_version: 0.2.1
++kind: added
++summary: Added read-only bundle role and cast-readiness inspection
++status: accepted
++audience: null
++scopes: []
++source_refs:
++  - tl:task-0032
++paths:
++  - README.md
++  - docs/index.md
++  - docs/renderprofile.md
++  - voicerender/bundle_roles.py
++  - voicerender/bundle_inspect.py
++  - voicerender/cli.py
++issues: []
++prs: []
++sources: []
++contributors: []
++breaking: false
++internal: false
++order: 9
++---
++
++Introduced bundle roles for fresh source-role discovery and profile/variant cast checks, plus bundle inspect for integrated variant and render-state reporting.
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+index 115dd8a..0a0772f 100644
+--- a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
++++ b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+@@ -3,7 +3,7 @@ schema_version: 2
+ object_type: release
+ versioning:
+   schema_version: 1
+-  revision: 6
++  revision: 7
+ version: 0.2.1
+ status: planned
+ history_state: curated
+@@ -16,7 +16,7 @@ changelog_file: null
+ boundary_ref: null
+ source_refs: []
+ source_count: null
+-entry_count: 8
++entry_count: 9
+ artifact_count: 0
+ git_base_ref: v0.2.0
+ git_base_sha: a627d2d625bc3e6daae8e3bee58abb77231918ec
+diff --git a/README.md b/README.md
+index 8682401..4744ce0 100644
+--- a/README.md
++++ b/README.md
+@@ -327,6 +327,31 @@ The path must resolve to the bundle root itself; VoiceRender does not search par
+
+ `bundle variants` is read-only discovery: it validates existing book or document plans and reports their render state without compiling variants or synthesizing speech. UtterPlan remains responsible for producing RenderPlan variants.
+
++## Inspecting bundle roles and cast readiness
++
++`utterplan bundle compile` writes a bounded `utterplan/role-inventory.toml` sidecar. `voicerender bundle roles` reads that artifact without importing UtterPlan, parsing SSMD, compiling plans, or creating output. It verifies that the inventory still matches the bundle manifest and source bytes before reporting the explicit roles and any use of the profile's default role.
++
++```bash
++# Discover source roles before a profile or render variant exists.
++voicerender bundle roles story.ssmd-bundle
++
++# Check an authored cast while editing it.
++voicerender bundle roles story.ssmd-bundle \
++  --profile story-cast.renderprofile.toml --check
++
++# Inspect the exact immutable profile snapshot in an existing variant.
++voicerender bundle roles story.ssmd-bundle \
++  --variant narration--<profile-fingerprint> --check
++
++# Combine cast status with existing variant/render-state discovery.
++voicerender bundle inspect story.ssmd-bundle \
++  --profile story-cast.renderprofile.toml --output-root renders --json
++```
++
++`--profile` and `--variant` are mutually exclusive. `--profile` inspects the authored, mutable RenderProfile; `--variant` loads the validated snapshot stored in that exact existing variant. `bundle inspect` adds the existing variant and render-state listing, but does not synthesize or create the output root. Neither command writes to the bundle. A missing or stale inventory is not displayed as current—run `utterplan bundle compile` again.
++
++Readiness is structural, not an engine or render check. Explicit inventory roles are required, and the selected profile's `default_role` is also required only when the inventory reports implicit/default-role speech. Every required role must have a valid canonical binding, and required roles must resolve to distinct canonical voice identities; language, delivery options, and unused extra roles do not make voices distinct. No engine SDK/session, model availability, preflight, or completed render is required. With `--check`, exit status is `0` for a ready cast, `1` for an incomplete or duplicate cast, and `2` for invalid input or inventory/profile/variant contracts. Without `--check`, incomplete findings remain ordinary inspection data. JSON mode emits only the result object.
++
+ For a book, render selected source chapters from the ordered RenderPlan set. The variant is the exact profile-fingerprinted directory name:
+
+ ```bash
+diff --git a/docs/changelog.md b/docs/changelog.md
+index da906bd..df652df 100644
+--- a/docs/changelog.md
++++ b/docs/changelog.md
+@@ -66,6 +66,7 @@
+ - Added KittenSynth model-token capacity metadata and preflight-aware request handling
+ - Added typed progress, evidence-based ETA, and workload estimates
+ - Added read-only RenderPlan variant discovery for book and document bundles
++- Added read-only bundle role and cast-readiness inspection
+
+ ### Changed
+
+diff --git a/docs/index.md b/docs/index.md
+index 18f9f09..cb4aab6 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -41,6 +41,10 @@ voicerender bundle render story.ssmd-bundle --variant narration--<profile-finger
+
+ `manifest.json` decides whether the root holds a book or a single document. VoiceRender detects the kind automatically; the same command takes a canonical `.ssmd-bundle/` root for either. It does not accept an inner source file or a chapter directory. Documents are one render item and require `--chapters all`; books support chapter and speech selectors. The canonical packed transport artifact is `<name>.ssmd-bundle.zip`; VoiceRender renders from the editable bundle directory.
+
++### Bundle role discovery and readiness
++
++`voicerender bundle roles BUNDLE` reads UtterPlan's fresh `utterplan/role-inventory.toml` without parsing SSMD or importing UtterPlan. Add `--profile PROFILE --check` to verify authored cast coverage, or `--variant NAME --check` to check the exact immutable profile snapshot in an existing variant. Those selectors are mutually exclusive. Readiness requires every explicit role (plus the profile default role when implicit speech exists) to have a valid binding and a distinct canonical voice identity; it does not require engine availability or completed renders. `voicerender bundle inspect BUNDLE` composes this role view with existing variant/render-state discovery and remains read-only. Missing or stale inventories should be refreshed with `utterplan bundle compile`.
++
+ For books, UtterPlan owns the `renderplan-set.toml` collection index and its per-invocation report; VoiceRender consumes the ordered plans and never compiles variants. With no `--variant`, `bundle render` discovers direct variants and renders valid variants whose state is not complete, including partial, failed, and unknown states. Completed variants are skipped, invalid variants are reported and cause a nonzero exit, and no-variant/all-complete runs are successful no-ops. A speech window can succeed while the whole-book state remains partial; a later batch run may select it again.
+
+ `--chapters`, `--speech`, `--renderplan-root`, `--output-root`, and `--cache-dir` apply to each selected variant. `--fail-fast` skips remaining chapters within the active book and stops scheduling later variants after a batch failure. In batch mode, `--force` includes every valid variant, including completed ones. With `--variant NAME`, `--force` bypasses verified-output reuse/cache for that exact render work; it never deletes the output directory. `--reset-stale` remains the separate stale-output operation.
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 911ba49..185bbdf 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -152,6 +152,33 @@ voicerender bundle render story.ssmd-bundle \
+
+ VoiceRender writes below `<bundle>/voicerender/<variant>/`, preserving the existing kind-specific output layout. `--renderplan-root`, `--output-root`, and `--cache-dir` override their respective roots. Failures continue by default for books; `--fail-fast` skips remaining chapters. `--reset-stale` replaces stale owned output while preserving verified cache reuse. `--force` synthesizes every selected request and bypasses cache.
+
++## Inspect source roles and cast readiness
++
++Before authoring a cast, compile the SSMD bundle with UtterPlan. Its role inventory at `<bundle>/utterplan/role-inventory.toml` is the source of truth for explicit roles and implicit/default-role occurrences. VoiceRender reads and freshness-checks this sidecar; it does not import UtterPlan or parse SSMD. A missing or stale sidecar is an error rather than permission to guess from plans.
++
++```bash
++# Read source requirements, even before any RenderPlan variant exists.
++voicerender bundle roles story.ssmd-bundle --json
++
++# Inspect the mutable profile as the cast is authored.
++voicerender bundle roles story.ssmd-bundle \
++  --profile story-cast.renderprofile.toml
++
++# Check the cast against all required source roles.
++voicerender bundle roles story.ssmd-bundle \
++  --profile story-cast.renderprofile.toml --check
++
++# Inspect a previously projected variant and its immutable profile snapshot.
++voicerender bundle inspect story.ssmd-bundle \
++  --variant narration--<profile-fingerprint> --check
++```
++
++`--profile` and `--variant` cannot be combined. The former reads the authored RenderProfile; the latter resolves the exact validated variant and inspects its stored `renderprofile.toml`, not a potentially changed source profile. `bundle inspect` also reuses VoiceRender's existing variant/render-state report. It is read-only: no variant compilation, rendering, or output-directory creation occurs.
++
++For readiness, inventory roles are required in their recorded order. If any speech uses the default role, the selected profile's `default_role` is required too; source-only discovery does not invent a default role. A cast is structurally ready only when every required role exists with a valid canonical binding and each required role has a distinct canonical voice identity. Renderer/target and named voice, speaker, or normalized source content define that identity—not language, delivery options, or unused extra roles. This check does not require engine SDKs, installed models, synthesis, or a completed render. `--check` returns `0` when ready, `1` when coverage/binding/distinctness is not ready, and `2` for invalid paths or contracts. Ordinary inspection without `--check` still returns incomplete cast findings as data.
++
++The manual workflow is therefore: convert the source to a canonical `.ssmd-bundle`, run `utterplan bundle compile`, use `bundle roles` to discover requirements, create/bind every required role in a RenderProfile, verify with `bundle roles --profile ... --check`, then project/render variants through UtterPlan and VoiceRender. Use `bundle inspect` to compare the authored profile against the exact variant snapshot and current render state.
++
+ VoiceRender consumes each RenderPlan independently as well. The bundle collection directory does not change the single-plan execution contract; the set index is not passed to generic preflight or render:
+
+ ```bash
+diff --git a/tests/test_bundle_inspect.py b/tests/test_bundle_inspect.py
+new file mode 100644
+index 0000000..61e36f8
+--- /dev/null
++++ b/tests/test_bundle_inspect.py
+@@ -0,0 +1,256 @@
++from __future__ import annotations
++
++import hashlib
++import json
++from pathlib import Path
++from typing import Any
++
++import pytest
++import tomlkit
++from renderplan import (
++    RenderPlan,
++    RoleProfile,
++    SourceSpan,
++    SpeechItem,
++    save_plan,
++    save_profile,
++)
++
++from voicerender import cli
++from voicerender.bundle_contract import BundleContractError
++from voicerender.bundle_inspect import inspect_bundle
++from voicerender.variants import list_bundle_variants
++
++
++def _write_bundle(tmp_path: Path, name: str = "bundle") -> Path:
++    root = tmp_path / f"{name}.ssmd-bundle"
++    root.mkdir()
++    manifest = root / "manifest.json"
++    manifest.write_text(
++        json.dumps(
++            {
++                "format": "ssmdconvert.document",
++                "schema_version": 1,
++                "ssmd_version": "0.9",
++                "document": {"id": "document-0001", "path": "document.ssmd.md"},
++            }
++        ),
++        encoding="utf-8",
++    )
++    source = root / "document.ssmd.md"
++    source.write_text("A small document.", encoding="utf-8")
++    utterplan = root / "utterplan"
++    utterplan.mkdir()
++    inventory: dict[str, Any] = {
++        "format": "utterplan.bundle-role-inventory",
++        "version": 1,
++        "bundle_kind": "document",
++        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
++        "uses_default_role": False,
++        "implicit_occurrences": 0,
++        "roles": [{"name": "narrator", "occurrences": 1}],
++        "items": [
++            {
++                "id": "document-0001",
++                "source": "document.ssmd.md",
++                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
++                "plan": "utterplan/document.utterplan.toml",
++                "plan_id": "sha256:" + "1" * 64,
++                "explicit_roles": ["narrator"],
++                "uses_default_role": False,
++                "implicit_occurrences": 0,
++                "explicit_occurrences": {"narrator": 1},
++            }
++        ],
++    }
++    (utterplan / "role-inventory.toml").write_text(
++        tomlkit.dumps(inventory), encoding="utf-8"
++    )
++    return root
++
++
++def _make_profile(voice: str, *, target: str = "model-a"):
++    from renderplan import RenderProfile
++
++    return RenderProfile(
++        roles={
++            "narrator": RoleProfile(
++                language="en-US",
++                binding={"renderer": "kokoro", "target_id": target, "voice": voice},
++            )
++        },
++        default_role="narrator",
++    ).with_identity()
++
++
++def _write_variant(root: Path, voice: str) -> tuple[str, Any]:
++    profile = _make_profile(voice)
++    profile_id = profile.profile_id or profile.computed_id()
++    variant_name = f"narration--{profile_id.removeprefix('sha256:')[:12]}"
++    variant_dir = root / "renderplan" / variant_name
++    variant_dir.mkdir(parents=True)
++    save_profile(profile, variant_dir / "renderprofile.toml")
++    speech = SpeechItem(
++        number=1,
++        text="This is a fixture.",
++        language="en-US",
++        role="narrator",
++        binding={"renderer": "kokoro", "target_id": "model-a"},
++        source=(SourceSpan(locator="document.ssmd.md", start=1, end=2),),
++    )
++    plan = RenderPlan(
++        source_plan_id="sha256:" + "2" * 64,
++        render_profile_id=profile_id,
++        flow=(speech,),
++    ).with_identity()
++    save_plan(plan, variant_dir / "document.renderplan.toml")
++    return variant_name, profile
++
++
++def test_inspect_without_profile_or_variants_is_read_only(tmp_path: Path) -> None:
++    root = _write_bundle(tmp_path)
++    result = inspect_bundle(root)
++    assert result.roles.ready is None
++    assert result.roles.coverage is None
++    assert result.variants.variants == ()
++    assert not (root / "renderplan").exists()
++    assert not (root / "voicerender").exists()
++    assert result.to_dict()["format"] == "voicerender-bundle-inspect"
++
++
++def test_inspect_lists_multiple_variants_and_reuses_existing_render_state(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    first, _ = _write_variant(root, "voice-a")
++    second, _ = _write_variant(root, "voice-b")
++    invalid = root / "renderplan" / "broken--variant"
++    invalid.mkdir()
++    output_root = tmp_path / "custom-output-root"
++
++    result = inspect_bundle(root, output_root=output_root)
++    assert {variant.name for variant in result.variants.variants} >= {first, second}
++    assert result.variants.output_root == output_root.resolve()
++    assert all(
++        variant.render_status == "not_rendered"
++        for variant in result.variants.variants
++        if variant.name in {first, second}
++    )
++    invalid_result = next(
++        variant for variant in result.variants.variants if variant.name == invalid.name
++    )
++    assert invalid_result.plan_status == "invalid"
++    assert invalid_result.validation_error
++    assert not output_root.exists()
++    assert not (root / "voicerender").exists()
++    assert (
++        result.variants.to_dict()
++        == list_bundle_variants(root, output_root=output_root).to_dict()
++    )
++
++
++def test_selected_variant_uses_immutable_profile_snapshot_not_authored_file(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, snapshot = _write_variant(root, "snapshot-voice")
++    authored_path = tmp_path / "mutable.renderprofile.toml"
++    authored = _make_profile("current-voice", target="current-model")
++    save_profile(authored, authored_path)
++
++    selected = inspect_bundle(root, variant=variant_name)
++    assert selected.roles.profile_source == "variant"
++    assert selected.roles.profile_path == (
++        root / "renderplan" / variant_name / "renderprofile.toml"
++    )
++    assert selected.roles.profile_id == snapshot.profile_id
++    assert selected.roles.roles[0].voice_identity is not None
++    assert selected.roles.roles[0].voice_identity.voice == "snapshot-voice"
++    assert selected.roles.ready is True
++
++    current = inspect_bundle(root, profile=authored_path)
++    assert current.roles.profile_source == "profile"
++    assert current.roles.roles[0].voice_identity is not None
++    assert current.roles.roles[0].voice_identity.voice == "current-voice"
++
++
++def test_inspect_profile_with_no_variants_reports_readiness(tmp_path: Path) -> None:
++    root = _write_bundle(tmp_path)
++    authored_path = tmp_path / "cast.renderprofile.toml"
++    save_profile(_make_profile("ready-without-variant"), authored_path)
++
++    result = inspect_bundle(root, profile=authored_path)
++    assert result.roles.ready is True
++    assert result.roles.profile_source == "profile"
++    assert result.variants.variants == ()
++    assert not (root / "renderplan").exists()
++    assert not (root / "voicerender").exists()
++
++
++def test_check_readiness_does_not_require_render_completion(tmp_path: Path) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, _ = _write_variant(root, "ready-voice")
++    result = inspect_bundle(root, variant=variant_name)
++    assert result.roles.ready is True
++    assert result.variants.variants[0].render_status == "not_rendered"
++
++
++def test_invalid_selected_variant_is_actionable(tmp_path: Path) -> None:
++    root = _write_bundle(tmp_path)
++    with pytest.raises(BundleContractError) as error:
++        inspect_bundle(root, variant="missing--variant")
++    assert error.value.code == "variant.invalid"
++    assert "missing--variant" in str(error.value)
++
++
++def test_render_state_matches_existing_variants_api(tmp_path: Path) -> None:
++    root = _write_bundle(tmp_path)
++    _write_variant(root, "same-state")
++    inspected = inspect_bundle(root)
++    listed = list_bundle_variants(root)
++    assert [item.to_dict() for item in inspected.variants.variants] == [
++        item.to_dict() for item in listed.variants
++    ]
++
++
++def test_bundle_roles_and_inspect_cli_variant_human_json_and_check(
++    tmp_path: Path, capsys
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, _ = _write_variant(root, "cli-snapshot")
++
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "roles",
++                str(root),
++                "--variant",
++                variant_name,
++                "--check",
++                "--json",
++            ]
++        )
++        == 0
++    )
++    roles_json = capsys.readouterr().out
++    roles_payload = json.loads(roles_json)
++    assert roles_payload["profile"]["source"] == "variant"
++    assert roles_payload["ready"] is True
++    assert "VoiceRender bundle roles" not in roles_json
++
++    assert cli.main(["bundle", "inspect", str(root), "--json"]) == 0
++    inspect_json = capsys.readouterr().out
++    inspect_payload = json.loads(inspect_json)
++    assert inspect_payload["format"] == "voicerender-bundle-inspect"
++    assert len(inspect_payload["variants"]["variants"]) == 1
++
++    assert cli.main(["bundle", "inspect", str(root)]) == 0
++    human = capsys.readouterr().out
++    assert "VoiceRender bundle inspect" in human
++    assert "Variants" in human
++    assert "\nCast\n" not in human
++
++    assert cli.main(["bundle", "inspect", str(root), "--check", "--json"]) == 2
++    error = json.loads(capsys.readouterr().out)
++    assert error["error_code"] == "bundle.roles_invalid"
+diff --git a/tests/test_bundle_roles.py b/tests/test_bundle_roles.py
+new file mode 100644
+index 0000000..b8b2f69
+--- /dev/null
++++ b/tests/test_bundle_roles.py
+@@ -0,0 +1,778 @@
++from __future__ import annotations
++
++import hashlib
++import json
++from pathlib import Path
++from typing import Any
++
++import pytest
++import tomlkit
++from renderplan import RenderProfile, RoleProfile, save_profile
++
++from voicerender import cli
++from voicerender.bundle_roles import (
++    BundleRolesError,
++    inspect_bundle_roles,
++    read_bundle_role_inventory,
++)
++from voicerender.role_bindings import (
++    duplicate_voice_groups,
++    role_voice_identity,
++    role_voice_selector,
++)
++
++
++def _make_bundle(
++    tmp_path: Path,
++    *,
++    kind: str = "document",
++    items: tuple[dict[str, Any], ...] | None = None,
++    name: str = "sample",
++) -> tuple[Path, Path]:
++    root = tmp_path / f"{name}.ssmd-bundle"
++    root.mkdir()
++    manifest = root / "manifest.json"
++    bundle_format = "ssmdconvert.book" if kind == "book" else "ssmdconvert.document"
++    manifest.write_text(
++        json.dumps({"format": bundle_format, "schema_version": 1}), encoding="utf-8"
++    )
++    source_specs: tuple[dict[str, Any], ...] = items or (
++        {"id": "document-0001", "source": "document.ssmd.md", "roles": {"narrator": 2}},
++    )
++    aggregate_order: list[str] = []
++    aggregate_counts: dict[str, int] = {}
++    implicit_total = 0
++    item_records: list[dict[str, Any]] = []
++    for index, spec in enumerate(source_specs):
++        source_relative = spec["source"]
++        source_path = root / source_relative
++        source_path.parent.mkdir(parents=True, exist_ok=True)
++        source_path.write_text(f"source-{index}", encoding="utf-8")
++        roles = dict(spec.get("roles", {}))
++        implicit = spec.get("implicit", 0)
++        for role, count in roles.items():
++            if role not in aggregate_counts:
++                aggregate_order.append(role)
++                aggregate_counts[role] = 0
++            aggregate_counts[role] += count
++        implicit_total += implicit
++        item_records.append(
++            {
++                "id": spec["id"],
++                "source": source_relative,
++                "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
++                "plan": spec.get("plan", f"utterplan/{spec['id']}.utterplan.toml"),
++                "plan_id": spec.get("plan_id", "sha256:" + str(index + 1) * 64),
++                "explicit_roles": list(roles),
++                "uses_default_role": implicit > 0,
++                "implicit_occurrences": implicit,
++                "explicit_occurrences": roles,
++            }
++        )
++    inventory = {
++        "format": "utterplan.bundle-role-inventory",
++        "version": 1,
++        "bundle_kind": kind,
++        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
++        "uses_default_role": implicit_total > 0,
++        "implicit_occurrences": implicit_total,
++        "roles": [
++            {"name": name, "occurrences": aggregate_counts[name]}
++            for name in aggregate_order
++        ],
++        "items": item_records,
++    }
++    inventory_dir = root / "utterplan"
++    inventory_dir.mkdir()
++    inventory_path = inventory_dir / "role-inventory.toml"
++    inventory_path.write_text(tomlkit.dumps(inventory), encoding="utf-8")
++    return root, inventory_path
++
++
++def _rewrite_inventory(path: Path, change) -> None:
++    document = tomlkit.parse(path.read_text(encoding="utf-8"))
++    change(document)
++    path.write_text(tomlkit.dumps(document), encoding="utf-8")
++
++
++def _profile(
++    path: Path,
++    roles: dict[str, tuple[str, dict[str, Any]]],
++    *,
++    default_role: str,
++) -> RenderProfile:
++    profile = RenderProfile(
++        roles={
++            name: RoleProfile(language=language, binding=binding)
++            for name, (language, binding) in roles.items()
++        },
++        default_role=default_role,
++    ).with_identity()
++    save_profile(profile, path)
++    return profile
++
++
++def _binding(
++    *,
++    renderer: str = "kokoro",
++    target: str = "v1.0",
++    voice: str | None = "voice-a",
++    speaker: str | int | None = None,
++    options: dict[str, Any] | None = None,
++) -> dict[str, Any]:
++    result: dict[str, Any] = {"renderer": renderer, "target_id": target}
++    if voice is not None:
++        result["voice"] = voice
++    if speaker is not None:
++        result["speaker"] = speaker
++    if options is not None:
++        result["options"] = options
++    return result
++
++
++def test_document_and_book_inventory_models_preserve_role_order_and_default_counts(
++    tmp_path: Path,
++) -> None:
++    for kind in ("document", "book"):
++        root, _ = _make_bundle(
++            tmp_path,
++            kind=kind,
++            name=kind,
++            items=(
++                {
++                    "id": "first",
++                    "source": "parts/first.md",
++                    "roles": {"narrator": 2, "host": 3},
++                    "implicit": 4,
++                },
++                {
++                    "id": "second",
++                    "source": "parts/second.md",
++                    "roles": {"guest": 5, "narrator": 1},
++                    "implicit": 2,
++                },
++            ),
++        )
++        loaded = read_bundle_role_inventory(root)
++        assert loaded.inventory.bundle_kind == kind
++        assert [role.name for role in loaded.inventory.roles] == [
++            "narrator",
++            "host",
++            "guest",
++        ]
++        assert [role.occurrences for role in loaded.inventory.roles] == [3, 3, 5]
++        assert loaded.inventory.uses_default_role is True
++        assert loaded.inventory.implicit_occurrences == 6
++        assert [item.id for item in loaded.inventory.items] == ["first", "second"]
++
++
++def test_missing_inventory_has_actionable_stable_error(tmp_path: Path) -> None:
++    root, inventory_path = _make_bundle(tmp_path)
++    inventory_path.unlink()
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "bundle.roles_missing"
++    assert "utterplan bundle compile" in str(error.value)
++
++
++def test_inventory_symlink_and_oversize_are_rejected(tmp_path: Path) -> None:
++    root, inventory_path = _make_bundle(tmp_path)
++    external = tmp_path / "external.toml"
++    external.write_bytes(inventory_path.read_bytes())
++    inventory_path.unlink()
++    inventory_path.symlink_to(external)
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "path.unsafe"
++
++    inventory_path.unlink()
++    inventory_path.write_bytes(b" " * (2 * 1024 * 1024 + 1))
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "bundle.roles_invalid"
++    assert "size limit" in str(error.value)
++
++
++def test_inventory_requires_strict_utf8_toml_format_and_supported_version(
++    tmp_path: Path,
++) -> None:
++    root, inventory_path = _make_bundle(tmp_path)
++    inventory_path.write_bytes(b"\xff")
++    with pytest.raises(BundleRolesError, match="UTF-8"):
++        read_bundle_role_inventory(root)
++
++    for field, value in (("format", "unknown"), ("version", 2)):
++        root, inventory_path = _make_bundle(tmp_path, name=f"bad-{field}")
++        _rewrite_inventory(
++            inventory_path,
++            lambda data, key=field, new=value: data.__setitem__(key, new),
++        )
++        with pytest.raises(BundleRolesError) as error:
++            read_bundle_role_inventory(root)
++        assert error.value.code == "bundle.roles_invalid"
++
++
++def test_inventory_rejects_duplicate_roles_items_negative_counts_and_bad_aggregates(
++    tmp_path: Path,
++) -> None:
++    mutations = (
++        ("duplicate-role", lambda data: data["roles"].append(dict(data["roles"][0]))),
++        ("duplicate-item", lambda data: data["items"].append(dict(data["items"][0]))),
++        (
++            "negative-count",
++            lambda data: data["items"][0]["explicit_occurrences"].__setitem__(
++                "narrator", -1
++            ),
++        ),
++        (
++            "aggregate-order",
++            lambda data: data["roles"].append({"name": "extra", "occurrences": 1}),
++        ),
++    )
++    for name, mutation in mutations:
++        root, inventory_path = _make_bundle(tmp_path, name=name)
++        _rewrite_inventory(inventory_path, mutation)
++        with pytest.raises(BundleRolesError) as error:
++            read_bundle_role_inventory(root)
++        assert error.value.code == "bundle.roles_invalid"
++
++
++def test_manifest_and_source_content_hashes_detect_stale_inventory(
++    tmp_path: Path,
++) -> None:
++    root, _ = _make_bundle(tmp_path, name="manifest-stale")
++    (root / "manifest.json").write_text(
++        json.dumps(
++            {"format": "ssmdconvert.document", "schema_version": 1, "changed": True}
++        ),
++        encoding="utf-8",
++    )
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "bundle.roles_stale"
++    assert "utterplan bundle compile" in str(error.value)
++
++    root, _ = _make_bundle(tmp_path, name="source-stale")
++    (root / "document.ssmd.md").write_text("edited", encoding="utf-8")
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "bundle.roles_stale"
++
++    root, _ = _make_bundle(tmp_path, name="source-missing")
++    (root / "document.ssmd.md").unlink()
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "bundle.roles_stale"
++
++
++def test_inventory_paths_are_posix_relative_and_source_symlinks_cannot_escape(
++    tmp_path: Path,
++) -> None:
++    unsafe_paths = (
++        "/absolute.md",
++        "../outside.md",
++        "C:/outside.md",
++        "a\\b.md",
++        "a//b.md",
++    )
++    for index, unsafe_path in enumerate(unsafe_paths):
++        root, inventory_path = _make_bundle(tmp_path, name=f"unsafe-{index}")
++        _rewrite_inventory(
++            inventory_path,
++            lambda data, value=unsafe_path: data["items"][0].__setitem__(
++                "source", value
++            ),
++        )
++        with pytest.raises(BundleRolesError) as error:
++            read_bundle_role_inventory(root)
++        assert error.value.code == "path.unsafe"
++
++    root, _ = _make_bundle(tmp_path, name="symlink-escape")
++    external = tmp_path / "outside.md"
++    external.write_text("source-0", encoding="utf-8")
++    (root / "document.ssmd.md").unlink()
++    (root / "document.ssmd.md").symlink_to(external)
++    with pytest.raises(BundleRolesError) as error:
++        read_bundle_role_inventory(root)
++    assert error.value.code == "path.unsafe"
++
++
++def test_nested_source_and_custom_utterplan_directory_are_supported(
++    tmp_path: Path,
++) -> None:
++    root, default_inventory = _make_bundle(
++        tmp_path,
++        items=(
++            {"id": "part-1", "source": "chapters/one.md", "roles": {"narrator": 1}},
++        ),
++    )
++    custom = tmp_path / "custom-utterplan"
++    custom.mkdir()
++    custom_inventory = custom / "role-inventory.toml"
++    custom_inventory.write_bytes(default_inventory.read_bytes())
++    loaded = read_bundle_role_inventory(root, utterplan_root=custom)
++    assert loaded.path == custom_inventory.resolve()
++    assert loaded.inventory.items[0].source == "chapters/one.md"
++
++
++def test_source_only_mode_does_not_create_default_role_and_profile_coverage_is_ordered(
++    tmp_path: Path,
++) -> None:
++    root, _ = _make_bundle(
++        tmp_path,
++        items=(
++            {
++                "id": "doc",
++                "source": "document.ssmd.md",
++                "roles": {"host": 2},
++                "implicit": 3,
++            },
++        ),
++    )
++    source_only = inspect_bundle_roles(root)
++    assert [row.role for row in source_only.roles] == ["host"]
++    assert source_only.ready is None
++
++    profile_path = tmp_path / "cast.renderprofile.toml"
++    _profile(
++        profile_path,
++        {
++            "narrator": (
++                "en-US",
++                _binding(renderer="piper", target="v2", voice="narrator"),
++            ),
++            "host": ("en-GB", _binding(renderer="kokoro", target="v1", voice="host")),
++            "unused": ("en-US", _binding(renderer="piper", target="v3", voice="extra")),
++        },
++        default_role="narrator",
++    )
++    result = inspect_bundle_roles(root, profile=profile_path)
++    assert result.coverage is not None
++    assert result.coverage.required == ("host", "narrator")
++    assert result.coverage.missing == ()
++    assert result.coverage.unused == ("unused",)
++    default_row = result.roles[1]
++    assert default_row.required_by_default is True
++    assert default_row.implicit_occurrences == 3
++    assert result.ready is True
++    assert json.loads(json.dumps(result.to_dict()))["ready"] is True
++
++
++def test_missing_roles_are_reported_together_and_explicit_default_is_not_duplicated(
++    tmp_path: Path,
++) -> None:
++    root, _ = _make_bundle(
++        tmp_path,
++        items=(
++            {
++                "id": "doc",
++                "source": "document.ssmd.md",
++                "roles": {"narrator": 4, "guest": 2, "analyst": 3},
++                "implicit": 7,
++            },
++        ),
++    )
++    profile_path = tmp_path / "partial.renderprofile.toml"
++    _profile(
++        profile_path,
++        {"narrator": ("en-US", _binding())},
++        default_role="narrator",
++    )
++    result = inspect_bundle_roles(root, profile=profile_path)
++    assert result.coverage is not None
++    assert result.coverage.required == ("narrator", "guest", "analyst")
++    assert result.coverage.missing == ("guest", "analyst")
++    assert [row.role for row in result.roles] == ["narrator", "guest", "analyst"]
++    assert result.roles[0].required_by_default is True
++    assert result.roles[0].occurrences == 4
++    assert result.roles[0].implicit_occurrences == 7
++    assert result.ready is False
++
++
++def test_duplicate_named_speaker_and_target_only_voice_identities() -> None:
++    named_a = RoleProfile(
++        language="en-US", binding=_binding(options={"speed": 1, "gain": 0.5})
++    )
++    named_b = RoleProfile(
++        language="fr-FR", binding=_binding(options={"speed": 2, "gain": 0.8})
++    )
++    assert role_voice_selector(named_a) == "voice-a"
++    groups = duplicate_voice_groups(
++        (
++            ("narrator", role_voice_identity(named_a)),
++            ("analyst", role_voice_identity(named_b)),
++        )
++    )
++    assert [group.roles for group in groups] == [("narrator", "analyst")]
++
++    diff_renderer = RoleProfile(language="en-US", binding=_binding(renderer="piper"))
++    diff_target = RoleProfile(language="en-US", binding=_binding(target="v2"))
++    assert (
++        duplicate_voice_groups(
++            (
++                ("one", role_voice_identity(named_a)),
++                ("two", role_voice_identity(diff_renderer)),
++            )
++        )
++        == ()
++    )
++    assert (
++        duplicate_voice_groups(
++            (
++                ("one", role_voice_identity(named_a)),
++                ("two", role_voice_identity(diff_target)),
++            )
++        )
++        == ()
++    )
++
++    speaker_a = RoleProfile(language="en-US", binding=_binding(voice=None, speaker=3))
++    speaker_b = RoleProfile(language="en-US", binding=_binding(voice=None, speaker=3))
++    speaker_c = RoleProfile(language="en-US", binding=_binding(voice=None, speaker=4))
++    assert role_voice_selector(speaker_a) == "speaker:3"
++    assert (
++        len(
++            duplicate_voice_groups(
++                (
++                    ("a", role_voice_identity(speaker_a)),
++                    ("b", role_voice_identity(speaker_b)),
++                )
++            )
++        )
++        == 1
++    )
++    assert (
++        duplicate_voice_groups(
++            (
++                ("a", role_voice_identity(speaker_a)),
++                ("c", role_voice_identity(speaker_c)),
++            )
++        )
++        == ()
++    )
++
++    target_only_a = RoleProfile(
++        language="en-US", binding={"renderer": "piper", "target_id": "fixed"}
++    )
++    target_only_b = RoleProfile(
++        language="en-US", binding={"renderer": "piper", "target_id": "fixed"}
++    )
++    target_only_c = RoleProfile(
++        language="en-US", binding={"renderer": "piper", "target_id": "other"}
++    )
++    assert (
++        len(
++            duplicate_voice_groups(
++                (
++                    ("a", role_voice_identity(target_only_a)),
++                    ("b", role_voice_identity(target_only_b)),
++                )
++            )
++        )
++        == 1
++    )
++    assert (
++        duplicate_voice_groups(
++            (
++                ("a", role_voice_identity(target_only_a)),
++                ("c", role_voice_identity(target_only_c)),
++            )
++        )
++        == ()
++    )
++
++
++def test_reference_and_prepared_voice_identity_ignores_local_paths() -> None:
++    digest_a = "a" * 64
++    ref_a = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "chatterbox",
++            "target_id": "model-a",
++            "options": {
++                "voice_source": {
++                    "kind": "reference",
++                    "value": "/tmp/one.wav",
++                    "sha256": digest_a,
++                }
++            },
++        },
++    )
++    ref_copy = RoleProfile(
++        language="en-GB",
++        binding={
++            "renderer": "chatterbox",
++            "target_id": "model-a",
++            "options": {
++                "voice_source": {
++                    "kind": "reference",
++                    "value": "/elsewhere/copy.wav",
++                    "sha256": digest_a,
++                }
++            },
++        },
++    )
++    ref_other = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "chatterbox",
++            "target_id": "model-a",
++            "options": {
++                "voice_source": {
++                    "kind": "reference",
++                    "value": "/tmp/other.wav",
++                    "sha256": "b" * 64,
++                }
++            },
++        },
++    )
++    assert (
++        len(
++            duplicate_voice_groups(
++                (
++                    ("one", role_voice_identity(ref_a)),
++                    ("copy", role_voice_identity(ref_copy)),
++                )
++            )
++        )
++        == 1
++    )
++    assert (
++        duplicate_voice_groups(
++            (
++                ("one", role_voice_identity(ref_a)),
++                ("other", role_voice_identity(ref_other)),
++            )
++        )
++        == ()
++    )
++
++    prepared_a = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "qwen3",
++            "target_id": "model-a",
++            "voice_source": {
++                "kind": "prepared",
++                "value": "/tmp/a.qvoice",
++                "sha256": digest_a,
++                "format": "qwen3-qvoice",
++            },
++        },
++    )
++    prepared_copy = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "qwen3",
++            "target_id": "model-a",
++            "voice_source": {
++                "kind": "prepared",
++                "value": "/tmp/b.qvoice",
++                "sha256": digest_a,
++                "format": "qwen3-qvoice",
++            },
++        },
++    )
++    assert (
++        len(
++            duplicate_voice_groups(
++                (
++                    ("one", role_voice_identity(prepared_a)),
++                    ("copy", role_voice_identity(prepared_copy)),
++                )
++            )
++        )
++        == 1
++    )
++
++
++def test_extra_unused_role_sharing_required_voice_does_not_affect_distinctness(
++    tmp_path: Path,
++) -> None:
++    root, _ = _make_bundle(
++        tmp_path,
++        items=({"id": "doc", "source": "document.ssmd.md", "roles": {"narrator": 1}},),
++    )
++    same = _binding()
++    profile_path = tmp_path / "cast.renderprofile.toml"
++    _profile(
++        profile_path,
++        {
++            "narrator": ("en-US", same),
++            "unused": ("en-US", same),
++        },
++        default_role="narrator",
++    )
++    result = inspect_bundle_roles(root, profile=profile_path)
++    assert result.coverage is not None and result.coverage.unused == ("unused",)
++    assert result.distinctness is not None and result.distinctness.distinct
++    assert result.ready is True
++
++
++def test_invalid_required_binding_is_reported_without_engine_validation(
++    tmp_path: Path,
++) -> None:
++    root, _ = _make_bundle(tmp_path)
++    profile_path = tmp_path / "invalid.renderprofile.toml"
++    _profile(
++        profile_path,
++        {"narrator": ("en-US", {"voice": "voice-without-target"})},
++        default_role="narrator",
++    )
++    result = inspect_bundle_roles(root, profile=profile_path)
++    assert result.roles[0].bound is True
++    assert result.roles[0].binding_valid is False
++    assert result.ready is False
++
++
++def test_bundle_roles_cli_outputs_and_readiness_exit_codes(
++    tmp_path: Path, capsys
++) -> None:
++    root, _ = _make_bundle(
++        tmp_path,
++        items=(
++            {
++                "id": "doc",
++                "source": "document.ssmd.md",
++                "roles": {"narrator": 1, "host": 1},
++            },
++        ),
++    )
++    assert cli.main(["bundle", "roles", str(root)]) == 0
++    human = capsys.readouterr().out
++    assert "VoiceRender bundle roles" in human
++    assert "narrator" in human and "host" in human
++    assert "VOICE/SPEAKER/SOURCE" not in human
++
++    assert cli.main(["bundle", "roles", str(root), "--json"]) == 0
++    source_json = capsys.readouterr().out
++    source_payload = json.loads(source_json)
++    assert source_payload["format"] == "voicerender-bundle-roles"
++    assert source_payload["profile"] is None
++    assert "VoiceRender bundle roles" not in source_json
++
++    complete_path = tmp_path / "complete.renderprofile.toml"
++    _profile(
++        complete_path,
++        {
++            "narrator": (
++                "en-US",
++                _binding(renderer="kokoro", target="v1", voice="one"),
++            ),
++            "host": ("en-GB", _binding(renderer="piper", target="v2", voice="two")),
++        },
++        default_role="narrator",
++    )
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "roles",
++                str(root),
++                "--profile",
++                str(complete_path),
++                "--check",
++                "--json",
++            ]
++        )
++        == 0
++    )
++    complete_payload = json.loads(capsys.readouterr().out)
++    assert complete_payload["coverage"]["complete"] is True
++    assert complete_payload["ready"] is True
++
++    partial_path = tmp_path / "partial.renderprofile.toml"
++    _profile(
++        partial_path,
++        {"narrator": ("en-US", _binding())},
++        default_role="narrator",
++    )
++
++    assert (
++        cli.main(
++            ["bundle", "roles", str(root), "--profile", str(partial_path), "--json"]
++        )
++        == 0
++    )
++    partial_inspection = json.loads(capsys.readouterr().out)
++    assert partial_inspection["ready"] is False
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "roles",
++                str(root),
++                "--profile",
++                str(partial_path),
++                "--check",
++                "--json",
++            ]
++        )
++        == 1
++    )
++    partial_payload = json.loads(capsys.readouterr().out)
++    assert partial_payload["coverage"]["missing"] == ["host"]
++    assert partial_payload["ready"] is False
++
++    duplicate_path = tmp_path / "duplicate.renderprofile.toml"
++    shared = _binding(renderer="kokoro", target="v1", voice="shared")
++    _profile(
++        duplicate_path,
++        {"narrator": ("en-US", shared), "host": ("en-US", shared)},
++        default_role="narrator",
++    )
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "roles",
++                str(root),
++                "--profile",
++                str(duplicate_path),
++                "--check",
++                "--json",
++            ]
++        )
++        == 1
++    )
++    duplicate_payload = json.loads(capsys.readouterr().out)
++    assert duplicate_payload["distinctness"]["distinct"] is False
++
++    assert (
++        cli.main(
++            ["bundle", "roles", str(root), "--profile", str(duplicate_path), "--json"]
++        )
++        == 0
++    )
++    duplicate_inspection = json.loads(capsys.readouterr().out)
++    assert duplicate_inspection["ready"] is False
++    assert duplicate_payload["distinctness"]["duplicate_groups"][0]["roles"] == [
++        "narrator",
++        "host",
++    ]
++
++    assert cli.main(["bundle", "roles", str(root), "--check", "--json"]) == 2
++    error_json = capsys.readouterr().out
++    assert json.loads(error_json)["error_code"] == "bundle.roles_invalid"
++    assert "error_code" in error_json and "VoiceRender bundle roles" not in error_json
++
++    with pytest.raises(SystemExit) as error:
++        cli.main(
++            [
++                "bundle",
++                "roles",
++                str(root),
++                "--profile",
++                str(complete_path),
++                "--variant",
++                "variant",
++            ]
++        )
++    assert error.value.code == 2
++    assert "not allowed with argument" in capsys.readouterr().err
++
++    stale_root, _ = _make_bundle(tmp_path, name="cli-stale")
++    (stale_root / "document.ssmd.md").write_text("changed", encoding="utf-8")
++    assert cli.main(["bundle", "roles", str(stale_root), "--json"]) == 2
++    stale_payload = json.loads(capsys.readouterr().out)
++    assert stale_payload["error_code"] == "bundle.roles_stale"
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index bdb1bd9..23e414f 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -25,6 +25,18 @@ from .bundle_batch import (
+     render_bundle_batch,
+ )
+ from .bundle_contract import BundleContractError
++from .bundle_inspect import BundleInspectResult, inspect_bundle
++from .bundle_roles import (
++    BundleRequiredRole,
++    BundleRoleBinding,
++    BundleRoleCoverage,
++    BundleRoleDistinctness,
++    BundleRoleInventory,
++    BundleRoleInventoryItem,
++    BundleRolesError,
++    BundleRolesResult,
++    inspect_bundle_roles,
++)
+ from .document import DocumentRenderRequest, DocumentRenderResult
+ from .engines.api_probe import EngineApiProbe
+ from .engines.assets import (
+@@ -124,6 +136,13 @@ from .renderprofile import (
+     save_render_profile,
+     validate_render_profile,
+ )
++from .role_bindings import (
++    DuplicateVoiceGroup,
++    RoleVoiceIdentity,
++    duplicate_voice_groups,
++    role_voice_identity,
++    role_voice_selector,
++)
+ from .runtime import (
+     OnnxRuntimeStatus,
+     RuntimeDistribution,
+@@ -131,7 +150,13 @@ from .runtime import (
+     onnx_runtime_status,
+     set_onnx_runtime_providers,
+ )
+-from .variants import BundleVariant, BundleVariantsResult, list_bundle_variants
++from .variants import (
++    BundleVariant,
++    BundleVariantProfile,
++    BundleVariantsResult,
++    list_bundle_variants,
++    load_bundle_variant_profile,
++)
+ from .voice_clone import VoiceCloneRequest, clone_voice_profile
+ from .voice_source_codec import load_voice_source, save_voice_source
+ from .voice_sources import (
+@@ -171,8 +196,18 @@ __all__ = [
+     "BundleBatchRenderResult",
+     "BundleBatchRenderSummary",
+     "BundleContractError",
++    "BundleInspectResult",
+     "BundleRenderResult",
++    "BundleRequiredRole",
++    "BundleRoleBinding",
++    "BundleRoleCoverage",
++    "BundleRoleDistinctness",
++    "BundleRoleInventory",
++    "BundleRoleInventoryItem",
++    "BundleRolesError",
++    "BundleRolesResult",
+     "BundleVariant",
++    "BundleVariantProfile",
+     "BundleVariantRenderOutcome",
+     "BundleVariantsResult",
+     "CatalogRequest",
+@@ -181,6 +216,7 @@ __all__ = [
+     "DocumentRenderError",
+     "DocumentRenderRequest",
+     "DocumentRenderResult",
++    "DuplicateVoiceGroup",
+     "EngineAdapter",
+     "EngineApiIncompatibleError",
+     "EngineApiProbe",
+@@ -228,6 +264,7 @@ __all__ = [
+     "ResolvedPreparedVoice",
+     "ResolvedReferenceAudio",
+     "RoleProfile",
++    "RoleVoiceIdentity",
+     "RuntimeControlError",
+     "RuntimeDistribution",
+     "SpeechItem",
+@@ -255,11 +292,14 @@ __all__ = [
+     "create_render_profile",
+     "create_voice_source",
+     "discover_targets",
++    "duplicate_voice_groups",
+     "engine_options",
+     "engine_status",
+     "estimate_render_book",
+     "estimate_render_document",
+     "estimate_renderplan",
++    "inspect_bundle",
++    "inspect_bundle_roles",
+     "inspect_voice",
+     "install_model",
+     "list_bundle_variants",
+@@ -267,6 +307,7 @@ __all__ = [
+     "list_models",
+     "list_profile_roles",
+     "list_voices",
++    "load_bundle_variant_profile",
+     "load_render_profile",
+     "load_voice_source",
+     "local_prepared_voice_source",
+@@ -289,6 +330,8 @@ __all__ = [
+     "resolve_prepared_voice",
+     "resolve_reference_audio",
+     "resolve_voice",
++    "role_voice_identity",
++    "role_voice_selector",
+     "save_render_profile",
+     "save_voice_source",
+     "set_default_profile_role",
+diff --git a/voicerender/bundle_inspect.py b/voicerender/bundle_inspect.py
+new file mode 100644
+index 0000000..81df6d4
+--- /dev/null
++++ b/voicerender/bundle_inspect.py
+@@ -0,0 +1,64 @@
++"""Read-only composition of bundle cast requirements and render state."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++from .bundle_contract import BundleKind
++from .bundle_roles import BundleRolesResult, inspect_bundle_roles
++from .variants import BundleVariantsResult, list_bundle_variants
++
++
++@dataclass(frozen=True, slots=True)
++class BundleInspectResult:
++    """Complete read-only bundle status from source roles through render state."""
++
++    bundle: Path
++    kind: BundleKind
++    roles: BundleRolesResult
++    variants: BundleVariantsResult
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "format": "voicerender-bundle-inspect",
++            "version": 1,
++            "bundle": str(self.bundle),
++            "kind": self.kind,
++            "roles": self.roles.to_dict(),
++            "variants": self.variants.to_dict(),
++        }
++
++
++def inspect_bundle(
++    bundle: str | Path,
++    *,
++    profile: str | Path | None = None,
++    variant: str | None = None,
++    utterplan_root: str | Path | None = None,
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++) -> BundleInspectResult:
++    """Inspect role/cast state and compose it with the existing variant listing."""
++    roles = inspect_bundle_roles(
++        bundle,
++        profile=profile,
++        variant=variant,
++        utterplan_root=utterplan_root,
++        renderplan_root=renderplan_root,
++    )
++    variants = list_bundle_variants(
++        bundle,
++        renderplan_root=renderplan_root,
++        output_root=output_root,
++    )
++    return BundleInspectResult(
++        bundle=roles.bundle,
++        kind=roles.kind,
++        roles=roles,
++        variants=variants,
++    )
++
++
++__all__ = ["BundleInspectResult", "inspect_bundle"]
+diff --git a/voicerender/bundle_roles.py b/voicerender/bundle_roles.py
+new file mode 100644
+index 0000000..ccaf2e0
+--- /dev/null
++++ b/voicerender/bundle_roles.py
+@@ -0,0 +1,901 @@
++"""Read and verify the renderer-neutral role inventory in an SSMD bundle.
++
++This module intentionally implements the serialized UtterPlan contract locally;
++VoiceRender does not parse SSMD or import UtterPlan.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import re
++import stat
++from collections.abc import Mapping
++from dataclasses import dataclass
++from pathlib import Path, PurePosixPath
++from types import MappingProxyType
++from typing import Any, Literal, cast
++
++from renderplan import RenderProfile
++
++try:
++    import tomllib
++except ModuleNotFoundError:  # Python 3.10
++    import tomli as tomllib  # type: ignore[no-redef]
++
++from .bundle_contract import BundleIdentity, BundleKind, load_bundle_identity
++from .errors import VoiceRenderError
++from .renderprofile import load_render_profile
++from .role_bindings import (
++    DuplicateVoiceGroup,
++    RoleVoiceIdentity,
++    duplicate_roles_by_role,
++    duplicate_voice_groups,
++    role_voice_identity,
++    role_voice_selector,
++)
++from .variants import load_bundle_variant_profile
++
++BUNDLE_ROLE_INVENTORY_FORMAT = "utterplan.bundle-role-inventory"
++BUNDLE_ROLE_INVENTORY_VERSION = 1
++ROLE_INVENTORY_FILENAME = "role-inventory.toml"
++MAX_ROLE_INVENTORY_BYTES = 2 * 1024 * 1024
++_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
++_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
++
++
++class BundleRolesError(VoiceRenderError, ValueError):
++    """A bundle role inventory is missing, stale, unsafe, or invalid."""
++
++    def __init__(
++        self,
++        message: str,
++        *,
++        code: str = "bundle.roles_invalid",
++        details: Mapping[str, Any] | None = None,
++    ) -> None:
++        super().__init__(message)
++        self.message = message
++        self.code = code
++        self.details = dict(details or {})
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRequiredRole:
++    """An explicit logical role and its bundle-wide occurrence count."""
++
++    name: str
++    occurrences: int
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRoleInventoryItem:
++    """Role and freshness metadata for one compiled bundle item."""
++
++    id: str
++    source: str
++    source_sha256: str
++    plan: str
++    plan_id: str
++    explicit_roles: tuple[str, ...]
++    explicit_occurrences: Mapping[str, int]
++    uses_default_role: bool
++    implicit_occurrences: int
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRoleInventory:
++    """Validated aggregate role inventory for a book or document bundle."""
++
++    bundle_kind: BundleKind
++    manifest_sha256: str
++    roles: tuple[BundleRequiredRole, ...]
++    uses_default_role: bool
++    implicit_occurrences: int
++    items: tuple[BundleRoleInventoryItem, ...]
++
++
++@dataclass(frozen=True, slots=True)
++class LoadedBundleRoleInventory:
++    """Canonical bundle identity and its fresh, validated role inventory."""
++
++    bundle: BundleIdentity
++    path: Path
++    inventory: BundleRoleInventory
++
++
++def role_inventory_path(
++    bundle: str | Path,
++    *,
++    utterplan_root: str | Path | None = None,
++) -> tuple[BundleIdentity, Path]:
++    """Resolve the canonical bundle and selected directory's inventory path.
++
++    ``utterplan_root`` means the directory containing ``role-inventory.toml``;
++    it does not replace or relax canonical bundle root detection.
++    """
++    identity = load_bundle_identity(bundle)
++    directory = (
++        Path(utterplan_root).expanduser()
++        if utterplan_root is not None
++        else identity.root / "utterplan"
++    )
++    try:
++        directory = directory.resolve(strict=False)
++    except (OSError, RuntimeError) as exc:
++        raise BundleRolesError(
++            f"cannot resolve UtterPlan inventory directory {directory}: {exc}",
++            code="path.unsafe",
++        ) from exc
++    return identity, directory / ROLE_INVENTORY_FILENAME
++
++
++def read_bundle_role_inventory(
++    bundle: str | Path,
++    *,
++    utterplan_root: str | Path | None = None,
++) -> LoadedBundleRoleInventory:
++    """Read a role inventory and verify it still describes the current bundle."""
++    identity, path = role_inventory_path(bundle, utterplan_root=utterplan_root)
++    if path.is_symlink():
++        raise BundleRolesError(
++            f"bundle role inventory must not be a symlink: {path}",
++            code="path.unsafe",
++        )
++    try:
++        info = path.lstat()
++    except FileNotFoundError as exc:
++        raise BundleRolesError(
++            "bundle role inventory is missing:\n"
++            f"  {path}\n"
++            f"run `utterplan bundle compile {identity.root}` first",
++            code="bundle.roles_missing",
++        ) from exc
++    except OSError as exc:
++        raise BundleRolesError(
++            f"cannot inspect bundle role inventory {path}: {exc}",
++            code="bundle.roles_invalid",
++        ) from exc
++    if not stat.S_ISREG(info.st_mode):
++        raise BundleRolesError(
++            f"bundle role inventory must be a regular file: {path}",
++            code="bundle.roles_invalid",
++        )
++    if info.st_size > MAX_ROLE_INVENTORY_BYTES:
++        raise BundleRolesError(
++            f"bundle role inventory exceeds the {MAX_ROLE_INVENTORY_BYTES}-byte size limit: {path}",
++            code="bundle.roles_invalid",
++        )
++    try:
++        with path.open("rb") as stream:
++            opened_info = os.fstat(stream.fileno())
++            if not stat.S_ISREG(opened_info.st_mode):
++                raise BundleRolesError(
++                    f"bundle role inventory must be a regular file: {path}",
++                    code="bundle.roles_invalid",
++                )
++            raw = stream.read(MAX_ROLE_INVENTORY_BYTES + 1)
++    except BundleRolesError:
++        raise
++    except OSError as exc:
++        raise BundleRolesError(
++            f"cannot read bundle role inventory {path}: {exc}",
++            code="bundle.roles_invalid",
++        ) from exc
++    if len(raw) > MAX_ROLE_INVENTORY_BYTES:
++        raise BundleRolesError(
++            f"bundle role inventory exceeds the {MAX_ROLE_INVENTORY_BYTES}-byte size limit: {path}",
++            code="bundle.roles_invalid",
++        )
++    try:
++        text = raw.decode("utf-8", errors="strict")
++    except UnicodeDecodeError as exc:
++        raise BundleRolesError(
++            f"bundle role inventory is not valid UTF-8: {path}",
++            code="bundle.roles_invalid",
++        ) from exc
++    try:
++        data = tomllib.loads(text)
++    except (ValueError, TypeError) as exc:
++        raise BundleRolesError(
++            f"invalid bundle role inventory TOML in {path}: {exc}",
++            code="bundle.roles_invalid",
++        ) from exc
++    inventory = _parse_inventory(data)
++    _verify_inventory_freshness(identity, inventory)
++    return LoadedBundleRoleInventory(identity, path, inventory)
++
++
++def load_bundle_role_inventory(
++    bundle: str | Path,
++    *,
++    utterplan_root: str | Path | None = None,
++) -> BundleRoleInventory:
++    """Convenience API returning the validated inventory model."""
++    return read_bundle_role_inventory(bundle, utterplan_root=utterplan_root).inventory
++
++
++def sha256_file(path: str | Path) -> str:
++    """Hash a file incrementally, without loading its contents into memory."""
++    digest = hashlib.sha256()
++    with Path(path).open("rb") as stream:
++        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def _parse_inventory(data: object) -> BundleRoleInventory:
++    root = _mapping(data, "inventory")
++    _exact_keys(
++        root,
++        {
++            "format",
++            "version",
++            "bundle_kind",
++            "manifest_sha256",
++            "uses_default_role",
++            "implicit_occurrences",
++            "roles",
++            "items",
++        },
++        "inventory",
++    )
++    if root["format"] != BUNDLE_ROLE_INVENTORY_FORMAT:
++        raise _invalid("unsupported bundle role inventory format")
++    version = root["version"]
++    if type(version) is not int or version != BUNDLE_ROLE_INVENTORY_VERSION:
++        raise _invalid(f"unsupported bundle role inventory version {version!r}")
++    kind = root["bundle_kind"]
++    if not isinstance(kind, str) or kind not in {"book", "document"}:
++        raise _invalid("bundle_kind must be 'book' or 'document'")
++    manifest_sha256 = _sha256(root["manifest_sha256"], "manifest_sha256")
++    uses_default = _boolean(root["uses_default_role"], "uses_default_role")
++    implicit_count = _count(root["implicit_occurrences"], "implicit_occurrences")
++    if uses_default != (implicit_count > 0):
++        raise _invalid(
++            "uses_default_role must match whether implicit_occurrences is positive"
++        )
++
++    roles_data = _array(root["roles"], "roles")
++    roles: list[BundleRequiredRole] = []
++    for index, value in enumerate(roles_data):
++        location = f"roles[{index}]"
++        role_record = _mapping(value, location)
++        _exact_keys(role_record, {"name", "occurrences"}, location)
++        roles.append(
++            BundleRequiredRole(
++                name=_nonempty_string(role_record["name"], f"{location}.name"),
++                occurrences=_count(
++                    role_record["occurrences"], f"{location}.occurrences"
++                ),
++            )
++        )
++    if len({role.name for role in roles}) != len(roles):
++        raise _invalid("duplicate aggregate role name")
++
++    items_data = _array(root["items"], "items")
++    items: list[BundleRoleInventoryItem] = []
++    for index, value in enumerate(items_data):
++        location = f"items[{index}]"
++        item = _mapping(value, location)
++        _exact_keys(
++            item,
++            {
++                "id",
++                "source",
++                "source_sha256",
++                "plan",
++                "plan_id",
++                "explicit_roles",
++                "uses_default_role",
++                "implicit_occurrences",
++                "explicit_occurrences",
++            },
++            location,
++        )
++        explicit_roles_data = _array(
++            item["explicit_roles"], f"{location}.explicit_roles"
++        )
++        explicit_roles = tuple(
++            _nonempty_string(role, f"{location}.explicit_roles[{role_index}]")
++            for role_index, role in enumerate(explicit_roles_data)
++        )
++        if len(set(explicit_roles)) != len(explicit_roles):
++            raise _invalid(f"duplicate explicit role name within {location}")
++        counts_data = _mapping(
++            item["explicit_occurrences"], f"{location}.explicit_occurrences"
++        )
++        if set(counts_data) != set(explicit_roles):
++            raise _invalid(
++                f"{location}.explicit_occurrences must contain exactly the roles in explicit_roles"
++            )
++        counts: dict[str, int] = {}
++        for role in explicit_roles:
++            counts[role] = _count(
++                counts_data[role], f"{location}.explicit_occurrences[{role!r}]"
++            )
++        item_uses_default = _boolean(
++            item["uses_default_role"], f"{location}.uses_default_role"
++        )
++        item_implicit_count = _count(
++            item["implicit_occurrences"], f"{location}.implicit_occurrences"
++        )
++        if item_uses_default != (item_implicit_count > 0):
++            raise _invalid(
++                f"{location}.uses_default_role must match whether implicit_occurrences is positive"
++            )
++        source = _bundle_relative_path(item["source"], f"{location}.source")
++        plan = _bundle_relative_path(item["plan"], f"{location}.plan")
++        items.append(
++            BundleRoleInventoryItem(
++                id=_nonempty_string(item["id"], f"{location}.id"),
++                source=source,
++                source_sha256=_sha256(
++                    item["source_sha256"], f"{location}.source_sha256"
++                ),
++                plan=plan,
++                plan_id=_nonempty_string(item["plan_id"], f"{location}.plan_id"),
++                explicit_roles=explicit_roles,
++                explicit_occurrences=MappingProxyType(counts),
++                uses_default_role=item_uses_default,
++                implicit_occurrences=item_implicit_count,
++            )
++        )
++    if len({item.id for item in items}) != len(items):
++        raise _invalid("duplicate bundle item id")
++
++    inventory = BundleRoleInventory(
++        bundle_kind=cast(BundleKind, kind),
++        manifest_sha256=manifest_sha256,
++        roles=tuple(roles),
++        uses_default_role=uses_default,
++        implicit_occurrences=implicit_count,
++        items=tuple(items),
++    )
++    _validate_aggregate(inventory)
++    return inventory
++
++
++def _validate_aggregate(inventory: BundleRoleInventory) -> None:
++    expected_order: list[str] = []
++    expected_counts: dict[str, int] = {}
++    expected_implicit = 0
++    for item in inventory.items:
++        for role in item.explicit_roles:
++            if role not in expected_counts:
++                expected_order.append(role)
++                expected_counts[role] = 0
++            expected_counts[role] += item.explicit_occurrences[role]
++        expected_implicit += item.implicit_occurrences
++    actual_counts = {role.name: role.occurrences for role in inventory.roles}
++    if tuple(role.name for role in inventory.roles) != tuple(expected_order):
++        raise _invalid("aggregate role order does not match bundle items")
++    if actual_counts != expected_counts:
++        raise _invalid("aggregate role counts do not match bundle items")
++    if inventory.implicit_occurrences != expected_implicit:
++        raise _invalid("aggregate implicit_occurrences do not match bundle items")
++
++
++def _verify_inventory_freshness(
++    identity: BundleIdentity, inventory: BundleRoleInventory
++) -> None:
++    if inventory.bundle_kind != identity.kind:
++        raise _invalid(
++            f"role inventory bundle_kind {inventory.bundle_kind!r} does not match "
++            f"bundle kind {identity.kind!r}"
++        )
++    try:
++        current_manifest_sha = sha256_file(identity.manifest_path)
++    except OSError as exc:
++        raise _invalid(
++            f"cannot hash bundle manifest {identity.manifest_path}: {exc}"
++        ) from exc
++    if current_manifest_sha != inventory.manifest_sha256:
++        raise _stale(identity.root, "bundle manifest changed")
++
++    for item in inventory.items:
++        source_path = _resolve_source_path(identity.root, item.source)
++        try:
++            source_info = source_path.stat()
++        except FileNotFoundError as exc:
++            raise _stale(
++                identity.root, f"bundle source is missing: {item.source}"
++            ) from exc
++        except OSError as exc:
++            raise _invalid(
++                f"cannot inspect bundle source {item.source!r}: {exc}"
++            ) from exc
++        if not stat.S_ISREG(source_info.st_mode):
++            raise _invalid(f"bundle source is not a regular file: {item.source}")
++        try:
++            current_source_sha = sha256_file(source_path)
++        except OSError as exc:
++            if isinstance(exc, FileNotFoundError):
++                raise _stale(
++                    identity.root, f"bundle source is missing: {item.source}"
++                ) from exc
++            raise _invalid(f"cannot hash bundle source {item.source!r}: {exc}") from exc
++        if current_source_sha != item.source_sha256:
++            raise _stale(identity.root, f"bundle source changed: {item.source}")
++
++
++def _resolve_source_path(bundle_root: Path, relative: str) -> Path:
++    candidate = bundle_root.joinpath(*PurePosixPath(relative).parts)
++    try:
++        resolved = candidate.resolve(strict=False)
++    except (OSError, RuntimeError) as exc:
++        if isinstance(exc, FileNotFoundError):
++            raise
++        raise BundleRolesError(
++            f"cannot safely resolve bundle source {relative!r}: {exc}",
++            code="path.unsafe",
++        ) from exc
++    try:
++        resolved.relative_to(bundle_root)
++    except ValueError as exc:
++        raise BundleRolesError(
++            f"bundle source path escapes the canonical bundle: {relative!r}",
++            code="path.unsafe",
++        ) from exc
++    return resolved
++
++
++def _bundle_relative_path(value: object, field: str) -> str:
++    if not isinstance(value, str) or not value:
++        raise _invalid(f"{field} must be a non-empty bundle-relative POSIX path")
++    if "\\" in value or "\x00" in value:
++        raise BundleRolesError(
++            f"{field} is not a safe POSIX bundle-relative path: {value!r}",
++            code="path.unsafe",
++        )
++    path = PurePosixPath(value)
++    parts = value.split("/")
++    if (
++        path.is_absolute()
++        or _WINDOWS_DRIVE_RE.match(value) is not None
++        or any(part in {"", ".", ".."} for part in parts)
++    ):
++        raise BundleRolesError(
++            f"{field} is not a safe bundle-relative path: {value!r}",
++            code="path.unsafe",
++        )
++    return path.as_posix()
++
++
++def _mapping(value: object, field: str) -> Mapping[str, Any]:
++    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
++        raise _invalid(f"{field} must be a TOML table")
++    return cast(Mapping[str, Any], value)
++
++
++def _array(value: object, field: str) -> list[Any]:
++    if not isinstance(value, list):
++        raise _invalid(f"{field} must be an array")
++    return value
++
++
++def _exact_keys(value: Mapping[str, Any], expected: set[str], field: str) -> None:
++    missing = expected - set(value)
++    unknown = set(value) - expected
++    if missing or unknown:
++        details: list[str] = []
++        if missing:
++            details.append(f"missing {sorted(missing)}")
++        if unknown:
++            details.append(f"unknown {sorted(unknown)}")
++        raise _invalid(f"{field} has {' and '.join(details)} fields")
++
++
++def _nonempty_string(value: object, field: str) -> str:
++    if not isinstance(value, str) or not value.strip():
++        raise _invalid(f"{field} must be a non-empty string")
++    return value
++
++
++def _count(value: object, field: str) -> int:
++    if type(value) is not int or value < 0:
++        raise _invalid(f"{field} must be a non-negative integer")
++    return value
++
++
++def _boolean(value: object, field: str) -> bool:
++    if type(value) is not bool:
++        raise _invalid(f"{field} must be a boolean")
++    return value
++
++
++def _sha256(value: object, field: str) -> str:
++    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
++        raise _invalid(f"{field} must be a 64-character hexadecimal SHA-256")
++    return value.lower()
++
++
++def _invalid(message: str) -> BundleRolesError:
++    return BundleRolesError(message, code="bundle.roles_invalid")
++
++
++def _stale(bundle: Path, reason: str) -> BundleRolesError:
++    return BundleRolesError(
++        "bundle role inventory is stale; rerun\n"
++        f"`utterplan bundle compile {bundle}`\n"
++        f"reason: {reason}",
++        code="bundle.roles_stale",
++    )
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRoleCoverage:
++    """Profile role coverage against source requirements."""
++
++    required: tuple[str, ...]
++    available: tuple[str, ...]
++    missing: tuple[str, ...]
++    unused: tuple[str, ...]
++    complete: bool
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "required": list(self.required),
++            "available": list(self.available),
++            "missing": list(self.missing),
++            "unused": list(self.unused),
++            "complete": self.complete,
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRoleDistinctness:
++    """Distinctness findings for all required bound roles."""
++
++    distinct: bool
++    duplicate_groups: tuple[DuplicateVoiceGroup, ...]
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "distinct": self.distinct,
++            "duplicate_groups": [
++                {
++                    "roles": list(group.roles),
++                    "identity": _identity_to_dict(group.identity),
++                }
++                for group in self.duplicate_groups
++            ],
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRoleBinding:
++    """One source-required logical role and its optional concrete profile binding."""
++
++    role: str
++    occurrences: int
++    required_by_default: bool
++    profile_default: bool | None
++    bound: bool | None
++    language: str | None
++    renderer: str | None
++    target_id: str | None
++    selector: str | None
++    binding: Mapping[str, Any] | None
++    voice_identity: RoleVoiceIdentity | None
++    duplicate_roles: tuple[str, ...]
++    binding_valid: bool | None
++    binding_error: str | None
++    explicit_occurrences: int
++    implicit_occurrences: int
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "role": self.role,
++            "occurrences": self.occurrences,
++            "required_by_default": self.required_by_default,
++            "profile_default": self.profile_default,
++            "bound": self.bound,
++            "language": self.language,
++            "renderer": self.renderer,
++            "target_id": self.target_id,
++            "selector": self.selector,
++            "binding": _json_value(self.binding),
++            "voice_identity": (
++                _identity_to_dict(self.voice_identity) if self.voice_identity else None
++            ),
++            "duplicate_roles": list(self.duplicate_roles),
++            "binding_valid": self.binding_valid,
++            "binding_error": self.binding_error,
++            "explicit_occurrences": self.explicit_occurrences,
++            "implicit_occurrences": self.implicit_occurrences,
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRolesResult:
++    """Source role requirements and optional cast coverage/readiness."""
++
++    bundle: Path
++    kind: BundleKind
++    inventory_path: Path
++    inventory: BundleRoleInventory
++    profile_path: Path | None
++    profile_id: str | None
++    profile_default_role: str | None
++    profile_source: Literal["profile", "variant"] | None
++    variant: str | None
++    coverage: BundleRoleCoverage | None
++    distinctness: BundleRoleDistinctness | None
++    roles: tuple[BundleRoleBinding, ...]
++    ready: bool | None
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "format": "voicerender-bundle-roles",
++            "version": 1,
++            "bundle": str(self.bundle),
++            "kind": self.kind,
++            "inventory": {
++                "path": str(self.inventory_path),
++                "fresh": True,
++                "explicit_roles": [role.name for role in self.inventory.roles],
++                "uses_default_role": self.inventory.uses_default_role,
++                "implicit_occurrences": self.inventory.implicit_occurrences,
++                "items": len(self.inventory.items),
++            },
++            "profile": (
++                {
++                    "path": str(self.profile_path) if self.profile_path else None,
++                    "profile_id": self.profile_id,
++                    "default_role": self.profile_default_role,
++                    "source": self.profile_source,
++                    "variant": self.variant,
++                }
++                if self.profile_source is not None
++                else None
++            ),
++            "coverage": self.coverage.to_dict() if self.coverage else None,
++            "distinctness": self.distinctness.to_dict() if self.distinctness else None,
++            "roles": [role.to_dict() for role in self.roles],
++            "ready": self.ready,
++        }
++
++
++def inspect_bundle_roles(
++    bundle: str | Path,
++    *,
++    profile: str | Path | None = None,
++    variant: str | None = None,
++    utterplan_root: str | Path | None = None,
++    renderplan_root: str | Path | None = None,
++) -> BundleRolesResult:
++    """Inspect source roles and optionally compare an authored profile or variant."""
++    if profile is not None and variant is not None:
++        raise BundleRolesError(
++            "--profile and --variant are mutually exclusive",
++            code="bundle.roles_invalid",
++        )
++    loaded = read_bundle_role_inventory(bundle, utterplan_root=utterplan_root)
++    selected_profile: RenderProfile | None = None
++    profile_path: Path | None = None
++    profile_source: Literal["profile", "variant"] | None = None
++    selected_variant: str | None = None
++    if profile is not None:
++        profile_path = Path(profile).expanduser().resolve(strict=False)
++        selected_profile = load_render_profile(profile_path)
++        profile_source = "profile"
++    elif variant is not None:
++        selected = load_bundle_variant_profile(
++            loaded.bundle.root, variant, renderplan_root=renderplan_root
++        )
++        profile_path = selected.path
++        selected_profile = selected.profile
++        profile_source = "variant"
++        selected_variant = selected.name
++
++    explicit_counts = {role.name: role.occurrences for role in loaded.inventory.roles}
++    required = list(explicit_counts)
++    default_required = False
++    if selected_profile is not None and loaded.inventory.uses_default_role:
++        default_required = True
++        if selected_profile.default_role not in required:
++            required.append(selected_profile.default_role)
++    required_tuple = tuple(required)
++
++    coverage: BundleRoleCoverage | None = None
++    distinctness: BundleRoleDistinctness | None = None
++    role_rows: list[BundleRoleBinding] = []
++    if selected_profile is None:
++        role_rows.extend(
++            BundleRoleBinding(
++                role=name,
++                occurrences=explicit_counts[name],
++                required_by_default=False,
++                profile_default=None,
++                bound=None,
++                language=None,
++                renderer=None,
++                target_id=None,
++                selector=None,
++                binding=None,
++                voice_identity=None,
++                duplicate_roles=(),
++                binding_valid=None,
++                binding_error=None,
++                explicit_occurrences=explicit_counts[name],
++                implicit_occurrences=0,
++            )
++            for name in required_tuple
++        )
++        ready: bool | None = None
++    else:
++        available = tuple(selected_profile.roles)
++        available_set = set(available)
++        missing = tuple(name for name in required_tuple if name not in available_set)
++        required_set = set(required_tuple)
++        unused = tuple(name for name in available if name not in required_set)
++        coverage = BundleRoleCoverage(
++            required=required_tuple,
++            available=available,
++            missing=missing,
++            unused=unused,
++            complete=not missing,
++        )
++        identities: list[tuple[str, RoleVoiceIdentity]] = []
++        for name in required_tuple:
++            is_default_required = (
++                default_required and name == selected_profile.default_role
++            )
++            explicit_occurrences = explicit_counts.get(name, 0)
++            implicit_occurrences = (
++                loaded.inventory.implicit_occurrences if is_default_required else 0
++            )
++            role_profile = selected_profile.roles.get(name)
++            if role_profile is None:
++                role_rows.append(
++                    BundleRoleBinding(
++                        role=name,
++                        occurrences=explicit_occurrences or implicit_occurrences,
++                        required_by_default=is_default_required,
++                        profile_default=name == selected_profile.default_role,
++                        bound=False,
++                        language=None,
++                        renderer=None,
++                        target_id=None,
++                        selector=None,
++                        binding=None,
++                        voice_identity=None,
++                        duplicate_roles=(),
++                        binding_valid=None,
++                        binding_error=None,
++                        explicit_occurrences=explicit_occurrences,
++                        implicit_occurrences=implicit_occurrences,
++                    )
++                )
++                continue
++            binding = MappingProxyType(dict(role_profile.binding))
++            renderer = binding.get("renderer")
++            target_id = binding.get("target_id")
++            voice_identity: RoleVoiceIdentity | None = None
++            binding_error: str | None = None
++            try:
++                voice_identity = role_voice_identity(role_profile)
++            except (ValueError, TypeError) as exc:
++                binding_error = str(exc)
++            if voice_identity is not None:
++                identities.append((name, voice_identity))
++            role_rows.append(
++                BundleRoleBinding(
++                    role=name,
++                    occurrences=explicit_occurrences or implicit_occurrences,
++                    required_by_default=is_default_required,
++                    profile_default=name == selected_profile.default_role,
++                    bound=True,
++                    language=role_profile.language,
++                    renderer=renderer if isinstance(renderer, str) else None,
++                    target_id=target_id if isinstance(target_id, str) else None,
++                    selector=role_voice_selector(role_profile),
++                    binding=binding,
++                    voice_identity=voice_identity,
++                    duplicate_roles=(),
++                    binding_valid=voice_identity is not None,
++                    binding_error=binding_error,
++                    explicit_occurrences=explicit_occurrences,
++                    implicit_occurrences=implicit_occurrences,
++                )
++            )
++        duplicate_groups = duplicate_voice_groups(identities)
++        duplicate_map = duplicate_roles_by_role(duplicate_groups)
++        role_rows = [
++            BundleRoleBinding(
++                role=row.role,
++                occurrences=row.occurrences,
++                required_by_default=row.required_by_default,
++                profile_default=row.profile_default,
++                bound=row.bound,
++                language=row.language,
++                renderer=row.renderer,
++                target_id=row.target_id,
++                selector=row.selector,
++                binding=row.binding,
++                voice_identity=row.voice_identity,
++                duplicate_roles=duplicate_map.get(row.role, ()),
++                binding_valid=row.binding_valid,
++                binding_error=row.binding_error,
++                explicit_occurrences=row.explicit_occurrences,
++                implicit_occurrences=row.implicit_occurrences,
++            )
++            for row in role_rows
++        ]
++        distinctness = BundleRoleDistinctness(
++            distinct=not duplicate_groups, duplicate_groups=duplicate_groups
++        )
++        ready = (
++            coverage.complete
++            and all(
++                row.bound is True and row.binding_valid is True for row in role_rows
++            )
++            and distinctness.distinct
++        )
++
++    return BundleRolesResult(
++        bundle=loaded.bundle.root,
++        kind=loaded.bundle.kind,
++        inventory_path=loaded.path,
++        inventory=loaded.inventory,
++        profile_path=profile_path,
++        profile_id=(
++            selected_profile.profile_id or selected_profile.computed_id()
++            if selected_profile is not None
++            else None
++        ),
++        profile_default_role=(
++            selected_profile.default_role if selected_profile is not None else None
++        ),
++        profile_source=profile_source,
++        variant=selected_variant,
++        coverage=coverage,
++        distinctness=distinctness,
++        roles=tuple(role_rows),
++        ready=ready,
++    )
++
++
++def _identity_to_dict(identity: RoleVoiceIdentity) -> dict[str, Any]:
++    return {
++        "renderer": identity.renderer,
++        "target_id": identity.target_id,
++        "voice": identity.voice,
++        "speaker": identity.speaker,
++        "source": dict(identity.source) if identity.source is not None else None,
++    }
++
++
++def _json_value(value: Any) -> Any:
++    if isinstance(value, Mapping):
++        return {str(key): _json_value(item) for key, item in value.items()}
++    if isinstance(value, (tuple, list)):
++        return [_json_value(item) for item in value]
++    if isinstance(value, Path):
++        return str(value)
++    return value
++
++
++__all__ = [
++    "BUNDLE_ROLE_INVENTORY_FORMAT",
++    "BUNDLE_ROLE_INVENTORY_VERSION",
++    "MAX_ROLE_INVENTORY_BYTES",
++    "ROLE_INVENTORY_FILENAME",
++    "BundleRequiredRole",
++    "BundleRoleBinding",
++    "BundleRoleCoverage",
++    "BundleRoleDistinctness",
++    "BundleRoleInventory",
++    "BundleRoleInventoryItem",
++    "BundleRolesError",
++    "BundleRolesResult",
++    "DuplicateVoiceGroup",
++    "LoadedBundleRoleInventory",
++    "RoleVoiceIdentity",
++    "inspect_bundle_roles",
++    "load_bundle_role_inventory",
++    "read_bundle_role_inventory",
++    "role_inventory_path",
++    "sha256_file",
++]
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 66b7121..7d6eaea 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -14,7 +14,7 @@ from collections.abc import Callable
+ from pathlib import Path
+ from typing import Any, TextIO, cast
+
+-from renderplan import load_manifest, load_plan
++from renderplan import RoleProfile, load_manifest, load_plan
+
+ from . import __version__
+ from .bundle import BundleRenderResult, render_bundle
+@@ -22,6 +22,8 @@ from .bundle_batch import (
+     BundleBatchRenderResult,
+     render_bundle_batch,
+ )
++from .bundle_inspect import BundleInspectResult, inspect_bundle
++from .bundle_roles import BundleRolesError, BundleRolesResult, inspect_bundle_roles
+ from .engines.options import engine_option_to_dict, engine_options
+ from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
+ from .engines.registry import (
+@@ -74,6 +76,7 @@ from .renderprofile import (
+     save_render_profile,
+     validate_render_profile,
+ )
++from .role_bindings import role_voice_selector
+ from .runtime import (
+     OnnxRuntimeStatus,
+     clear_onnx_runtime_providers,
+@@ -547,6 +550,61 @@ def build_parser() -> argparse.ArgumentParser:
+     bundle_variants.add_argument("--renderplan-root", type=Path)
+     bundle_variants.add_argument("--output-root", type=Path)
+     bundle_variants.add_argument("--json", action="store_true")
++    bundle_roles = bundle_commands.add_parser(
++        "roles",
++        help="List source-required roles and optionally compare a cast",
++        description=(
++            "List logical speech roles from the UtterPlan inventory and optionally "
++            "compare them with an authored RenderProfile or exact RenderPlan variant."
++        ),
++    )
++    bundle_roles.add_argument(
++        "bundle",
++        type=Path,
++        help="path resolving to a canonical NAME.ssmd-bundle directory",
++    )
++    role_selection = bundle_roles.add_mutually_exclusive_group()
++    role_selection.add_argument(
++        "--profile", type=Path, help="authored mutable RenderProfile"
++    )
++    role_selection.add_argument(
++        "--variant", help="exact variant's immutable RenderProfile snapshot"
++    )
++    bundle_roles.add_argument("--utterplan-root", type=Path)
++    bundle_roles.add_argument("--renderplan-root", type=Path)
++    bundle_roles.add_argument(
++        "--check", action="store_true", help="exit 1 unless the selected cast is ready"
++    )
++    bundle_roles.add_argument("--json", action="store_true")
++
++    bundle_inspect = bundle_commands.add_parser(
++        "inspect",
++        help="Inspect bundle roles, cast readiness, variants, and render state",
++        description=(
++            "Compose the UtterPlan source-role inventory and optional cast inspection "
++            "with the existing RenderPlan variant and VoiceRender render-state listing."
++        ),
++    )
++    bundle_inspect.add_argument(
++        "bundle",
++        type=Path,
++        help="path resolving to a canonical NAME.ssmd-bundle directory",
++    )
++    inspect_selection = bundle_inspect.add_mutually_exclusive_group()
++    inspect_selection.add_argument(
++        "--profile", type=Path, help="authored mutable RenderProfile"
++    )
++    inspect_selection.add_argument(
++        "--variant", help="exact variant's immutable RenderProfile snapshot"
++    )
++    bundle_inspect.add_argument("--utterplan-root", type=Path)
++    bundle_inspect.add_argument("--renderplan-root", type=Path)
++    bundle_inspect.add_argument("--output-root", type=Path)
++    bundle_inspect.add_argument(
++        "--check", action="store_true", help="exit 1 unless the selected cast is ready"
++    )
++    bundle_inspect.add_argument("--json", action="store_true")
++
+     inspect = commands.add_parser(
+         "inspect-manifest", help="Verify a render manifest and its WAVs"
+     )
+@@ -803,25 +861,6 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
+     ]
+
+
+-def _profile_role_selector(binding: dict[str, Any]) -> str:
+-    voice = binding.get("voice")
+-    if voice is not None:
+-        return _display_cli_value(voice)
+-    speaker = binding.get("speaker")
+-    if speaker is not None:
+-        return f"speaker:{_display_cli_value(speaker)}"
+-    source = binding.get("voice_source")
+-    options = binding.get("options")
+-    if source is None and isinstance(options, dict):
+-        source = options.get("voice_source")
+-    if isinstance(source, dict):
+-        kind = source.get("kind") or source.get("type")
+-        return f"source:{_display_cli_value(kind)}" if kind else "source"
+-    if source is not None:
+-        return "source"
+-    return "unknown"
+-
+-
+ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+     print("  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE")
+     for item in roles:
+@@ -830,7 +869,9 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+         engine = _display_cli_value(binding.get("renderer", "unknown"))
+         target = _display_cli_value(binding.get("target_id", "unknown"))
+         language = _display_cli_value(item["language"])
+-        selector = _profile_role_selector(binding)
++        selector = role_voice_selector(
++            RoleProfile(language=item["language"], binding=binding)
++        )
+         print(
+             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
+             f"{target:<18} {selector}"
+@@ -1009,6 +1050,138 @@ def _print_bundle_variants(result: BundleVariantsResult) -> None:
+             print(f"  report: {variant.report_path}")
+
+
++def _print_bundle_role_cast(
++    result: BundleRolesResult, *, heading: str = "Cast"
++) -> None:
++    if result.profile_source is None:
++        return
++    print(heading)
++    print(f"  profile:          {result.profile_path}")
++    print(f"  profile-id:       {result.profile_id}")
++    if result.profile_source == "variant":
++        print(f"  variant snapshot: {result.variant}")
++    print(f"  default role:     {result.profile_default_role}")
++    assert result.coverage is not None and result.distinctness is not None
++    print(
++        f"  coverage:         {'complete' if result.coverage.complete else 'incomplete'}"
++    )
++    print(f"  distinct voices:  {'yes' if result.distinctness.distinct else 'no'}")
++    print(f"  readiness:        {'ready' if result.ready else 'not ready'}")
++    print()
++    print(
++        "  ROLE       OCCUR  DEFAULT  BOUND  LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE  UNIQUE"
++    )
++    for role in result.roles:
++        bound = "yes" if role.bound else "no"
++        default = "*" if role.required_by_default else ""
++        unique = (
++            "-"
++            if role.bound is not True or role.binding_valid is not True
++            else "no"
++            if role.duplicate_roles
++            else "yes"
++        )
++        print(
++            f"  {role.role:<10} {role.occurrences:<6} {default:<8} {bound:<6} "
++            f"{role.language or '-':<9} {role.renderer or '-':<8} "
++            f"{role.target_id or '-':<18} {role.selector or '-':<21} {unique}"
++        )
++        if role.binding_error:
++            print(f"    invalid binding: {role.binding_error}")
++    assert result.coverage is not None
++    if result.coverage.missing:
++        print(f"  missing roles: {', '.join(result.coverage.missing)}")
++    if result.coverage.unused:
++        print(f"  unused profile roles: {', '.join(result.coverage.unused)}")
++    assert result.distinctness is not None
++    if result.distinctness.duplicate_groups:
++        print("  Duplicate voices")
++        for group in result.distinctness.duplicate_groups:
++            identity = group.identity
++            selector = (
++                identity.voice
++                if identity.voice is not None
++                else f"speaker:{identity.speaker}"
++                if identity.speaker is not None
++                else "source"
++                if identity.source is not None
++                else "target-only"
++            )
++            print(f"    {', '.join(group.roles)}")
++            print(
++                f"      engine: {identity.renderer}; target: {identity.target_id}; voice: {selector}"
++            )
++
++
++def _print_bundle_roles(result: BundleRolesResult) -> None:
++    print("VoiceRender bundle roles")
++    print(f"  bundle:        {result.bundle}")
++    print(f"  kind:          {result.kind}")
++    print(f"  inventory:     {result.inventory_path}")
++    print(f"  required:      {len(result.inventory.roles)} explicit roles")
++    if result.inventory.uses_default_role:
++        if result.profile_source is None:
++            default_status = (
++                f"required by {result.inventory.implicit_occurrences} speech segments; "
++                "resolves after a profile is selected"
++            )
++        else:
++            default_status = (
++                f"required by {result.inventory.implicit_occurrences} speech segments; "
++                f"resolves to {result.profile_default_role}"
++            )
++    else:
++        default_status = "not required"
++    print(f"  default-role:  {default_status}")
++    if result.profile_source is not None:
++        _print_bundle_role_cast(result)
++        return
++    print()
++    print("ROLE")
++    for role in result.inventory.roles:
++        print(role.name)
++
++
++def _print_bundle_inspect(result: BundleInspectResult) -> None:
++    roles = result.roles
++    print("VoiceRender bundle inspect")
++    print(f"  bundle:           {result.bundle}")
++    print(f"  kind:             {result.kind}")
++    print(f"  role inventory:   fresh ({roles.inventory_path})")
++    role_names = ", ".join(role.name for role in roles.inventory.roles) or "(none)"
++    print(f"  explicit roles:   {role_names}")
++    default_use = (
++        f"yes ({roles.inventory.implicit_occurrences} speech segments)"
++        if roles.inventory.uses_default_role
++        else "no"
++    )
++    print(f"  default-role use: {default_use}")
++    if roles.profile_source is not None:
++        print()
++        _print_bundle_role_cast(roles)
++    print()
++    print("Variants")
++    if not result.variants.variants:
++        print("  No RenderPlan variants found.")
++        return
++    print("  VARIANT                          PLAN      RENDER         SPEECH")
++    for variant in result.variants.variants:
++        speech = f"{variant.available_speech}/{variant.planned_speech}"
++        print(
++            f"  {variant.name:<32} {variant.plan_status:<9} "
++            f"{variant.render_status:<14} {speech}"
++        )
++        if variant.validation_error:
++            print(f"    invalid: {variant.validation_error}")
++        if variant.error_code or variant.error_message:
++            error = ": ".join(
++                item for item in (variant.error_code, variant.error_message) if item
++            )
++            print(f"    render error: {error}")
++        if variant.output_error:
++            print(f"    output warning: {variant.output_error}")
++
++
+ def _print_bundle_result(result: BundleRenderResult) -> None:
+     value: Any = result.value
+     if result.kind == "book":
+@@ -2316,6 +2489,47 @@ def main(argv: list[str] | None = None) -> int:
+                 _print_bundle_result(bundle_result)
+             return bundle_result.exit_code
+
++        if args.command == "bundle" and args.bundle_command == "roles":
++            if args.check and args.profile is None and args.variant is None:
++                raise BundleRolesError(
++                    "--check requires --profile or --variant",
++                    code="bundle.roles_invalid",
++                )
++            result = inspect_bundle_roles(
++                args.bundle,
++                profile=args.profile,
++                variant=args.variant,
++                utterplan_root=args.utterplan_root,
++                renderplan_root=args.renderplan_root,
++            )
++            if args.json:
++                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
++            else:
++                _print_bundle_roles(result)
++            return 1 if args.check and result.ready is not True else 0
++
++        if args.command == "bundle" and args.bundle_command == "inspect":
++            if args.check and args.profile is None and args.variant is None:
++                raise BundleRolesError(
++                    "--check requires --profile or --variant",
++                    code="bundle.roles_invalid",
++                )
++            inspect_result = inspect_bundle(
++                args.bundle,
++                profile=args.profile,
++                variant=args.variant,
++                utterplan_root=args.utterplan_root,
++                renderplan_root=args.renderplan_root,
++                output_root=args.output_root,
++            )
++            if args.json:
++                print(
++                    json.dumps(inspect_result.to_dict(), ensure_ascii=False, indent=2)
++                )
++            else:
++                _print_bundle_inspect(inspect_result)
++            return 1 if args.check and inspect_result.roles.ready is not True else 0
++
+         if args.command == "bundle" and args.bundle_command == "variants":
+             listing = list_bundle_variants(
+                 args.bundle,
+@@ -2344,6 +2558,32 @@ def main(argv: list[str] | None = None) -> int:
+             return 0 if valid else 1
+
+     except (VoiceRenderError, OSError, ValueError, TypeError) as exc:
++        if args.command == "bundle" and args.bundle_command in {"roles", "inspect"}:
++            error_code = getattr(exc, "code", None)
++            if not isinstance(error_code, str):
++                error_code = "bundle.invalid"
++            if args.json:
++                format_name = (
++                    "voicerender-bundle-roles"
++                    if args.bundle_command == "roles"
++                    else "voicerender-bundle-inspect"
++                )
++                print(
++                    json.dumps(
++                        {
++                            "format": format_name,
++                            "version": 1,
++                            "error": str(exc),
++                            "error_code": error_code,
++                            "exit_code": 2,
++                        },
++                        ensure_ascii=False,
++                        indent=2,
++                    )
++                )
++            else:
++                print(f"error: {exc}", file=sys.stderr)
++            return 2
+         if (
+             getattr(args, "json", False)
+             and args.command == "bundle"
+diff --git a/voicerender/role_bindings.py b/voicerender/role_bindings.py
+new file mode 100644
+index 0000000..9ac91e1
+--- /dev/null
++++ b/voicerender/role_bindings.py
+@@ -0,0 +1,170 @@
++"""Shared role binding display and canonical voice-identity helpers."""
++
++from __future__ import annotations
++
++import json
++from collections.abc import Iterable, Mapping
++from dataclasses import dataclass
++from types import MappingProxyType
++from typing import Any
++
++from renderplan import RoleProfile
++
++from .errors import EngineError
++from .voice_sources import normalize_voice_source, voice_source_identity
++
++
++@dataclass(frozen=True, slots=True)
++class RoleVoiceIdentity:
++    """Stable synthesis identity for a role, excluding delivery settings."""
++
++    renderer: str
++    target_id: str
++    voice: str | None
++    speaker: str | int | None
++    source: Mapping[str, str] | None
++
++
++@dataclass(frozen=True, slots=True)
++class DuplicateVoiceGroup:
++    """Required logical roles that resolve to the same canonical voice."""
++
++    roles: tuple[str, ...]
++    identity: RoleVoiceIdentity
++
++
++def role_voice_selector(role: RoleProfile) -> str:
++    """Return the established human selector used in profile role tables."""
++    binding = role.binding
++    voice = binding.get("voice")
++    if voice is not None:
++        return _display_value(voice)
++    speaker = binding.get("speaker")
++    if speaker is not None:
++        return f"speaker:{_display_value(speaker)}"
++    source = binding.get("voice_source")
++    options = binding.get("options")
++    if source is None and isinstance(options, Mapping):
++        source = options.get("voice_source")
++    if isinstance(source, Mapping):
++        kind = source.get("kind") or source.get("type")
++        return f"source:{_display_value(kind)}" if kind else "source"
++    if source is not None:
++        return "source"
++    return "unknown"
++
++
++def role_voice_identity(role: RoleProfile) -> RoleVoiceIdentity:
++    """Normalize the role's canonical voice identity without engine probing."""
++    binding = role.binding
++    renderer = _required_binding_string(binding.get("renderer"), "renderer")
++    target_id = _required_binding_string(binding.get("target_id"), "target_id")
++
++    voice_value = binding.get("voice")
++    if voice_value is not None and (
++        not isinstance(voice_value, str) or not voice_value
++    ):
++        raise ValueError("binding.voice must be a non-empty string when present")
++    speaker_value = binding.get("speaker")
++    if speaker_value is not None and (
++        isinstance(speaker_value, bool)
++        or not isinstance(speaker_value, (str, int))
++        or isinstance(speaker_value, str)
++        and not speaker_value
++    ):
++        raise ValueError(
++            "binding.speaker must be a non-empty string or integer when present"
++        )
++
++    source_value = binding.get("voice_source")
++    options = binding.get("options")
++    if source_value is None and isinstance(options, Mapping):
++        source_value = options.get("voice_source")
++    source_identity: Mapping[str, str] | None = None
++    if source_value is not None:
++        if not isinstance(source_value, Mapping):
++            raise ValueError("binding.voice_source must be a table")
++        try:
++            normalized = normalize_voice_source(source_value, allow_named=False)
++            source_identity = MappingProxyType(dict(voice_source_identity(normalized)))
++        except (EngineError, ValueError, TypeError) as exc:
++            raise ValueError(
++                f"binding.voice_source cannot form a canonical identity: {exc}"
++            ) from exc
++
++    return RoleVoiceIdentity(
++        renderer=renderer,
++        target_id=target_id,
++        voice=voice_value,
++        speaker=speaker_value,
++        source=source_identity,
++    )
++
++
++def duplicate_voice_groups(
++    identities: Iterable[tuple[str, RoleVoiceIdentity]],
++) -> tuple[DuplicateVoiceGroup, ...]:
++    """Group duplicate identities while preserving first-required-role order."""
++    groups: dict[tuple[Any, ...], tuple[RoleVoiceIdentity, list[str]]] = {}
++    for role, identity in identities:
++        key = _identity_key(identity)
++        if key not in groups:
++            groups[key] = (identity, [])
++        groups[key][1].append(role)
++    return tuple(
++        DuplicateVoiceGroup(tuple(roles), identity)
++        for identity, roles in groups.values()
++        if len(roles) > 1
++    )
++
++
++def duplicate_roles_by_role(
++    groups: Iterable[DuplicateVoiceGroup],
++) -> Mapping[str, tuple[str, ...]]:
++    """Map each duplicated role to the other roles in its duplicate group."""
++    result: dict[str, tuple[str, ...]] = {}
++    for group in groups:
++        for role in group.roles:
++            result[role] = tuple(other for other in group.roles if other != role)
++    return MappingProxyType(result)
++
++
++def _identity_key(identity: RoleVoiceIdentity) -> tuple[Any, ...]:
++    source_key = (
++        tuple(sorted(identity.source.items())) if identity.source is not None else None
++    )
++    return (
++        identity.renderer,
++        identity.target_id,
++        identity.voice,
++        identity.speaker,
++        source_key,
++    )
++
++
++def _required_binding_string(value: object, field: str) -> str:
++    if not isinstance(value, str) or not value.strip():
++        raise ValueError(f"binding.{field} must be a non-empty string")
++    return value
++
++
++def _display_value(value: Any) -> str:
++    if value is None:
++        return "unknown"
++    if isinstance(value, str):
++        return value
++    if isinstance(value, bool):
++        return "true" if value else "false"
++    if isinstance(value, (int, float)):
++        return str(value)
++    return json.dumps(value, ensure_ascii=False, sort_keys=True)
++
++
++__all__ = [
++    "DuplicateVoiceGroup",
++    "RoleVoiceIdentity",
++    "duplicate_roles_by_role",
++    "duplicate_voice_groups",
++    "role_voice_identity",
++    "role_voice_selector",
++]
+diff --git a/voicerender/variants.py b/voicerender/variants.py
+index e649d19..b3de0b8 100644
+--- a/voicerender/variants.py
++++ b/voicerender/variants.py
+@@ -12,7 +12,7 @@ try:
+ except ModuleNotFoundError:  # Python 3.10
+     import tomli as tomllib  # type: ignore[no-redef]
+
+-from renderplan import RenderPlan, load_manifest, load_plan
++from renderplan import RenderPlan, RenderProfile, load_manifest, load_plan
+ from renderplan import codec as renderplan_codec
+
+ from .book_contract import (
+@@ -20,7 +20,12 @@ from .book_contract import (
+     validate_chapter_plan,
+     validate_profile_snapshot,
+ )
+-from .bundle_contract import BundleContractError, BundleKind, load_bundle_identity
++from .bundle_contract import (
++    BundleContractError,
++    BundleIdentity,
++    BundleKind,
++    load_bundle_identity,
++)
+ from .document_contract import load_document_workspace
+ from .renderplan_render import RENDER_MANIFEST_FILENAME
+
+@@ -114,6 +119,15 @@ class BundleVariantsResult:
+         }
+
+
++@dataclass(frozen=True, slots=True)
++class BundleVariantProfile:
++    """The validated immutable RenderProfile snapshot in one bundle variant."""
++
++    name: str
++    path: Path
++    profile: RenderProfile
++
++
+ @dataclass(frozen=True, slots=True)
+ class _PlanUnit:
+     name: str
+@@ -124,6 +138,8 @@ class _PlanUnit:
+ class _ValidatedVariant:
+     profile_id: str
+     units: tuple[_PlanUnit, ...]
++    profile_path: Path
++    profile: RenderProfile
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -157,19 +173,13 @@ def list_bundle_variants(
+ ) -> BundleVariantsResult:
+     """List every direct RenderPlan variant candidate without creating or modifying files."""
+     identity = load_bundle_identity(bundle)
+-    rp_input = (
+-        Path(renderplan_root).expanduser()
+-        if renderplan_root is not None
+-        else identity.root / "renderplan"
+-    )
++    rp_root = _resolve_renderplan_root(identity, renderplan_root)
+     out_input = (
+         Path(output_root).expanduser()
+         if output_root is not None
+         else identity.root / "voicerender"
+     )
+-    rp_root = _resolve_root(rp_input, "RenderPlan")
+     out_root = _resolve_root(out_input, "VoiceRender")
+-
+     if renderplan_root is None and not _within(rp_root, identity.root):
+         raise BundleContractError("default RenderPlan root escapes the bundle")
+     output_root_error: str | None = None
+@@ -220,6 +230,66 @@ def list_bundle_variants(
+     )
+
+
++def load_bundle_variant_profile(
++    bundle: str | Path,
++    variant: str,
++    *,
++    renderplan_root: str | Path | None = None,
++) -> BundleVariantProfile:
++    """Load the validated immutable RenderProfile snapshot for an exact variant."""
++    identity = load_bundle_identity(bundle)
++    rp_root = _resolve_renderplan_root(identity, renderplan_root)
++    if (
++        not isinstance(variant, str)
++        or not variant
++        or variant in {".", ".."}
++        or "/" in variant
++        or "\\" in variant
++        or "\x00" in variant
++    ):
++        raise BundleContractError(
++            "variant must name one direct child of the RenderPlan root",
++            code="path.unsafe",
++        )
++    candidate = rp_root / variant
++    if candidate.is_symlink():
++        try:
++            resolved = candidate.resolve(strict=True)
++        except (OSError, RuntimeError) as exc:
++            raise BundleContractError(
++                f"cannot resolve bundle variant {variant!r}: {exc}",
++                code="variant.invalid",
++            ) from exc
++        if not _within(resolved, rp_root):
++            raise BundleContractError(
++                "variant directory symlink escapes the RenderPlan root",
++                code="path.unsafe",
++            )
++        raise BundleContractError(
++            "variant directory must not be a symlink", code="path.unsafe"
++        )
++    try:
++        resolved_candidate = candidate.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise BundleContractError(
++            f"cannot resolve bundle variant {variant!r}: {exc}", code="variant.invalid"
++        ) from exc
++    if not resolved_candidate.is_dir() or not _within(resolved_candidate, rp_root):
++        raise BundleContractError(
++            f"bundle variant is not a direct safe directory: {variant!r}",
++            code="path.unsafe",
++        )
++    try:
++        validated = (
++            _validate_book_variant(resolved_candidate, variant)
++            if identity.kind == "book"
++            else _validate_document_variant(identity.root, resolved_candidate, variant)
++        )
++    except _PlanInvalid as exc:
++        raise BundleContractError(str(exc), code=exc.code) from exc
++    return BundleVariantProfile(variant, validated.profile_path, validated.profile)
++
++
+ def _inspect_candidate(
+     bundle: Path,
+     kind: BundleKind,
+@@ -329,7 +399,12 @@ def _validate_book_variant(variant_dir: Path, name: str) -> _ValidatedVariant:
+                 raise TypeError(f"RenderPlan for {entry.id} has an invalid type")
+             validate_chapter_plan(renderplan_set, entry, plan)
+             units.append(_PlanUnit(entry.id, plan))
+-        return _ValidatedVariant(profile_id=profile_id, units=tuple(units))
++        return _ValidatedVariant(
++            profile_id=profile_id,
++            units=tuple(units),
++            profile_path=profile_path,
++            profile=profile,
++        )
+     except _PlanInvalid:
+         raise
+     except Exception as exc:
+@@ -372,6 +447,8 @@ def _validate_document_variant(
+         return _ValidatedVariant(
+             profile_id=profile_id,
+             units=(_PlanUnit("document-0001", plan),),
++            profile_path=profile_path,
++            profile=profile,
+         )
+     except _PlanInvalid:
+         raise
+@@ -611,6 +688,23 @@ def _resolve_root(path: Path, label: str) -> Path:
+     return resolved
+
+
++def _resolve_renderplan_root(
++    identity: BundleIdentity,
++    renderplan_root: str | Path | None,
++) -> Path:
++    path = (
++        Path(renderplan_root).expanduser()
++        if renderplan_root is not None
++        else identity.root / "renderplan"
++    )
++    resolved = _resolve_root(path, "RenderPlan")
++    if renderplan_root is None and not _within(resolved, identity.root):
++        raise BundleContractError("default RenderPlan root escapes the bundle")
++    if resolved.exists() and not resolved.is_dir():
++        raise BundleContractError(f"RenderPlan root is not a directory: {resolved}")
++    return resolved
++
++
+ def _safe_directory(path: Path, root: Path, label: str) -> Path:
+     if path.is_symlink():
+         raise ValueError(f"{label} must not be a symlink: {path}")
+@@ -659,4 +753,10 @@ def _within(path: Path, root: Path) -> bool:
+         return False
+
+
+-__all__ = ["BundleVariant", "BundleVariantsResult", "list_bundle_variants"]
++__all__ = [
++    "BundleVariant",
++    "BundleVariantProfile",
++    "BundleVariantsResult",
++    "list_bundle_variants",
++    "load_bundle_variant_profile",
++]

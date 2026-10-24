@@ -1,0 +1,19 @@
+ voicerender/voice_sources.py | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/voicerender/voice_sources.py b/voicerender/voice_sources.py
+index 4fbfd1a..10c4298 100644
+--- a/voicerender/voice_sources.py
++++ b/voicerender/voice_sources.py
+@@ -337,7 +337,11 @@ def _is_absolute_normalized_path(value: str, *, portable: bool = False) -> bool:
+         if value.startswith("/"):
+             return str(posix) == value and ".." not in posix.parts
+         windows = PureWindowsPath(value)
+-        return windows.is_absolute() and str(windows) == value and ".." not in windows.parts
++        return (
++            windows.is_absolute()
++            and str(windows) == value
++            and ".." not in windows.parts
++        )
+     path = Path(value).expanduser()
+     return path.is_absolute() and str(path) == value and ".." not in path.parts

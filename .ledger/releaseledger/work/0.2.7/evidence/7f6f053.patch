@@ -1,0 +1,1911 @@
+ README.md                          |  36 +++++--
+ docs/renderprofile.md              |  32 ++++--
+ examples/README.md                 |  39 +++++--
+ pyproject.toml                     |   1 +
+ tests/test_cli.py                  |   4 +
+ tests/test_kokoro_reference.py     |  46 ++++++++
+ tests/test_managed_voices.py       |  57 ++++++++--
+ tests/test_pocketsynth_managed.py  |  12 ++-
+ tests/test_profile_roles.py        | 189 +++++++++++++++++++++++++++++++-
+ tests/test_profile_roles_cli.py    |  47 ++++++--
+ tests/test_renderprofile.py        |   2 +-
+ tests/test_voice_clone.py          | 103 ++++--------------
+ tests/test_voice_source_codec.py   |  35 ++++++
+ tests/test_voice_sources.py        |  59 ++++++++++
+ voicerender/cli.py                 | 121 +++++++++++++++++++--
+ voicerender/engines/pocketsynth.py |   2 +-
+ voicerender/managed_voices.py      |  32 ++++--
+ voicerender/profile_roles.py       |   2 +
+ voicerender/renderprofile.py       | 215 ++++++++++++++++++++++++++++++++++---
+ voicerender/voice_clone.py         |  79 +-------------
+ voicerender/voice_source_codec.py  |   1 +
+ voicerender/voice_sources.py       |  79 +++++++++++++-
+ 22 files changed, 954 insertions(+), 239 deletions(-)
+
+diff --git a/README.md b/README.md
+index 4744ce0..a61e2d6 100644
+--- a/README.md
++++ b/README.md
+@@ -179,25 +179,39 @@ voicerender runtime reset
+
+ ## Reference voices
+
+-Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A Voicefolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
++Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source` bindings. A local `kind="reference"` source stores an absolute path and computed SHA-256: it is usable in a local profile but is machine-specific, and changed or missing bytes fail validation instead of being silently repinned. A VoiceFolio `kind="managed_reference"` source adds resolver, source revision, repository, and path pins so another machine can resolve the same asset.
+
+-Create a local Inno voice or a portable AkinVox voice with the CLI. AkinVox requires the exact spoken transcript; Inno does not use a transcript and may accept an `fmax` option:
++Create a local Inno voice or use a portable VoiceFolio reference for AkinVox. A local `kind="reference"` pins an absolute path and SHA-256, so it is machine-specific. A managed `kind="managed_reference"` pins the VoiceFolio ref, source digest, source format, revision, repository, and path without storing a cache path.
++
++### Primary multi-role VoiceFolio workflow
++
++When the VoiceFolio catalog entry contains its transcript, the profile commands bind it automatically. No local reference WAV or Kokoro-specific `voice_enrollment` JSON is needed:
+
+ ```bash
+ voicerender profile create \
+-  --engine kokoro --target v1.0 --language en-US \
+-  --reference-wav ./speaker.wav \
+-  --option 'voice_enrollment={"engine":"auto","fmax":8000}' \
+-  --output local-kokoro.renderprofile.toml
++  --role narrator --engine kokoro \
++  --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref fine-read-it-voices:S5339 \
++  -o story-cast.renderprofile.toml
+
+-voicerender profile create \
++voicerender profile bind story-cast.renderprofile.toml analyst \
+   --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
+-  --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
+-  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact words spoken in the clip."}' \
+-  --output managed-kokoro.renderprofile.toml
++  --voicefolio-ref fine-read-it-voices:S5393 --in-place
++```
++
++If an entry has no catalog transcript, supply the exact spoken words through the generic fallback:
++
++```bash
++voicerender profile create \
++  --role narrator --engine kokoro \
++  --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref other:voice --transcript "Exact words spoken in the reference." \
++  -o narrator.renderprofile.toml
+ ```
+
+-`engine="auto"` selects Inno for a static target advertising the `inno-v0.2` enroller, or AkinVox for a reference-only target. AkinVox is English-only. Install `.[kokoro]` for Kokoro or `.[sopro]` for SoproSynth and make model assets available using the engine's supported process; VoiceRender does not download models implicitly.
++AkinVox requires a non-empty exact transcript, supports English, and requires synthesis speed `1.0`. VoiceRender rejects conflicting catalog, `--transcript`, or advanced enrollment transcripts without printing their text. Catalog lookup and profile create/bind/validate are metadata-only: VoiceFolio resolves and verifies the audio lazily at render time. Inno remains available for static targets advertising its enroller; it does not require a transcript and may accept `fmax`. Install `.[kokoro]` for Kokoro or `.[sopro]` for SoproSynth and make model assets available using the engine's supported process; VoiceRender does not download models implicitly.
++
++Advanced/manual engine options remain supported when needed, for example `--option 'voice_enrollment={"engine":"auto","fmax":8000}'` for Inno or an explicit Kokoro enrollment configuration. Prefer the generic VoiceFolio source and `--transcript` options for ordinary cloning.
+
+ Preflight validates local content pins and managed catalog metadata, and measures text without fetching managed audio, enrolling a voice, or conditioning a reference. Rendering resolves the verified reference and enrolls it lazily; the enrolled voice is reused within that synthesis session. Canonical identity retains content/provenance pins and the exact AkinVox transcript digest, but excludes local/cache paths and raw transcript text. See the [RenderProfile lifecycle](docs/renderprofile.md) and [examples](examples/README.md) for details.
+
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 185bbdf..f4357a7 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -194,21 +194,39 @@ Parsing a RenderProfile is engine-independent. `voicerender profile validate` ch
+
+ ## Reference-voice sources
+
+-A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They can be used in a local RenderProfile but are machine-specific; do not share a local profile unless that path and file are intentionally available on the other machine. Validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references; persist the Voicefolio reference, content digest, source revision, repository, and source path pins.
++A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They are machine-specific; validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references. The profile stores the VoiceFolio ref, source digest and format, revision, repository, and path—not a cache or materialized-audio path. Older managed profiles without `source_format` remain valid.
+
+-The CLI creates local sources with `--reference-wav PATH` and managed sources with `--voicefolio-ref REF`. For example:
++### Preferred multi-role Kokoro/AkinVox workflow
++
++When a VoiceFolio catalog entry has transcript metadata, VoiceRender binds it automatically. Create the first role and add further cast members without copying audio or constructing Kokoro's nested `voice_enrollment` option:
+
+ ```bash
+ voicerender profile create \
++  --role narrator --engine kokoro \
++  --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref fine-read-it-voices:S5339 \
++  -o story-cast.renderprofile.toml
++
++voicerender profile bind story-cast.renderprofile.toml analyst \
+   --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
+-  --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
+-  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact words spoken in the clip."}' \
+-  --output narrator.renderprofile.toml
++  --voicefolio-ref fine-read-it-voices:S5393 --in-place
++```
++
++For an entry without a catalog transcript, pass the exact spoken words using the generic fallback:
++
++```bash
++voicerender profile create \
++  --role narrator --engine kokoro \
++  --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref other:voice --transcript "Exact words spoken in the reference." \
++  -o narrator.renderprofile.toml
+ ```
+
+-Kokoro selects enrollment based on the target's discovered capabilities. `engine = "auto"` chooses Inno for a static target advertising the `inno-v0.2` enroller and AkinVox for a reference-only target. Inno accepts optional `fmax` and no transcript. AkinVox requires a non-empty exact `reference_text` and currently supports English only. A profile may also set `voice_enrollment` explicitly to `inno` or `akinvox`; unsupported target/engine combinations fail validation.
++AkinVox requires a non-empty exact transcript, currently supports English only, and requires synthesis speed `1.0`. A catalog transcript, explicit `--transcript`, and an advanced `voice_enrollment.reference_text` must agree; conflicts are rejected without echoing transcript text. A missing transcript fails before the profile is saved with an actionable `--transcript` hint. Transcript text remains in the profile for enrollment, while routine inspection and canonical identity expose its SHA-256 instead.
++
++Kokoro owns enrollment selection and validation. `engine = "auto"` chooses Inno for a static target advertising `inno-v0.2`, or AkinVox for a reference-only target. Inno does not require or accept a transcript and may accept `fmax`. Existing advanced engine-specific options such as `--option 'voice_enrollment={"engine":"auto","fmax":8000}'` remain supported; they are not needed for the normal VoiceFolio AkinVox path.
+
+-Preflight verifies local hashes and Voicefolio catalog metadata, then measures the request without fetching managed audio or enrolling/conditioning a voice. At synthesis time, the engine resolves the verified audio and lazily enrolls it; the enrolled voice is reused within that session. Canonical synthesis identity includes content/provenance pins, the selected enrollment engine/options, and the exact AkinVox transcript hash, but excludes local/cache paths and raw transcript text.
++Profile create, bind, inspect, and validate read VoiceFolio catalog metadata but do not fetch or materialize reference audio. Preflight checks local hashes and managed catalog pins, then measures requests without enrolling a voice. At synthesis time, VoiceFolio resolves and verifies the pinned source; FLAC materialization and AkinVox enrollment remain lazy. The enrolled voice is reused within the render session. Canonical synthesis identity retains source provenance and the exact transcript digest, but excludes cache paths and raw transcript text.
+
+ ## Kokoro quality and voice-level options
+
+diff --git a/examples/README.md b/examples/README.md
+index 1d29796..8926930 100644
+--- a/examples/README.md
++++ b/examples/README.md
+@@ -20,7 +20,7 @@ The profile is a discovery snapshot. If engine-derived metadata is stale, create
+
+ ## Reference-voice profile examples
+
+-Discover the available Sopro bundles and install the extra before creating a profile. A local or Voicefolio-managed source can be selected; managed audio is resolved only when synthesis begins:
++Discover the available Sopro bundles and install the extra before creating a profile. VoiceFolio-managed audio is resolved only when synthesis begins:
+
+ ```bash
+ python -m pip install -e '.[sopro]'
+@@ -30,22 +30,43 @@ voicerender profile create --engine sopro --target BUNDLE_ID --language en-US \
+   --output sopro.renderprofile.toml
+ ```
+
+-Kokoro supports Inno on static targets that advertise `inno-v0.2`, and AkinVox on a reference-only target. Inno does not need a transcript; AkinVox requires the exact reference transcript:
++### Kokoro multi-role VoiceFolio AkinVox
++
++When a VoiceFolio catalog entry contains its transcript, create and bind cast roles without a local reference WAV or engine-specific enrollment JSON:
++
++```bash
++voicerender profile create \
++  --role narrator --engine kokoro \
++  --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref fine-read-it-voices:S5339 \
++  -o story-cast.renderprofile.toml
++
++voicerender profile bind story-cast.renderprofile.toml analyst \
++  --engine kokoro --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref fine-read-it-voices:S5393 --in-place
++```
++
++For a reference without catalog transcript metadata, pass the exact spoken words with the generic `--transcript` fallback:
++
++```bash
++voicerender profile create \
++  --role narrator --engine kokoro \
++  --target en-akinvox-cloning-v1 --language en-US \
++  --voicefolio-ref other:voice --transcript "Exact spoken words." \
++  -o narrator.renderprofile.toml
++```
++
++AkinVox requires a non-empty exact transcript, supports English only, and requires speed `1.0`. Conflicting transcript sources are rejected. Profile create, bind, and validate read catalog metadata but do not fetch audio; VoiceFolio resolves/verifies the pinned source and AkinVox enrolls lazily during rendering. The profile keeps portable source pins, not cache or materialized WAV paths. Existing advanced `voice_enrollment` options remain available when required.
++
++Inno remains a separate option for static targets that advertise its enroller. It needs no transcript and may accept `fmax`:
+
+ ```bash
+ voicerender profile create --engine kokoro --target STATIC_TARGET_WITH_INNO \
+   --language en-US --reference-wav ./speaker.wav \
+   --option 'voice_enrollment={"engine":"auto","fmax":8000}' \
+   --output local-inno.renderprofile.toml
+-
+-voicerender profile create --engine kokoro --target en-akinvox-cloning-v1 \
+-  --language en-US --voicefolio-ref kyutai-tts-voices:alba-mackenna/a-moment-by \
+-  --option 'voice_enrollment={"engine":"akinvox","reference_text":"Exact spoken words."}' \
+-  --output managed-akinvox.renderprofile.toml
+ ```
+
+-Preflight checks source pins and measures requests without fetching managed WAVs or enrolling voices. The render session resolves and enrolls a reference lazily, then reuses the enrolled voice for that session. Local references are path-specific; use Voicefolio pins when profiles must travel between machines.
+-
+ ## Compatibility API
+
+ `plans/chapter.voiceplan.toml` and `voices/piper.toml` remain examples for the older VoicePlan-oriented Python API. The primary CLI consumes shared RenderPlan files.
+diff --git a/pyproject.toml b/pyproject.toml
+index ed9dc64..394b255 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -75,6 +75,7 @@ module = [
+   "chatterboxsynth",
+   "inflectsynth",
+   "kittensynth",
++  "onnxvoice",
+   "pipersynth",
+   "pocketsynth",
+   "pykokoro",
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 4f55676..fba5376 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -253,6 +253,8 @@ def test_cli_profile_create_reference_wav_persists_computed_pin(
+             "en-US",
+             "--reference-wav",
+             str(reference),
++            "--transcript",
++            "Exact reference words.",
+             "--output",
+             str(tmp_path / "speaker.renderprofile.toml"),
+             "--json",
+@@ -266,6 +268,8 @@ def test_cli_profile_create_reference_wav_persists_computed_pin(
+         "sha256": hashlib.sha256(audio).hexdigest(),
+     }
+
++    assert captured["transcript"] == "Exact reference words."
++
+
+ def test_cli_profile_create_voicefolio_ref_uses_full_pinned_source(
+     monkeypatch, tmp_path: Path
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index b956d67..29393bd 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -762,6 +762,52 @@ def test_akinvox_rejects_non_unit_speed_during_selection_validation(
+     assert speed_diagnostic.field == "render.options.speed"
+
+
++def test_akinvox_binding_rejects_missing_transcript_before_profile_persistence() -> (
++    None
++):
++    adapter = PyKokoroEngineAdapter()
++    with pytest.raises(
++        EngineSelectionError, match="requires non-empty reference_text"
++    ) as caught:
++        adapter.bind_reference_voice(
++            target=_model(voice_mode="reference", reference_enrollment=True),
++            language="en-US",
++            voice_source=_managed_source(),
++            transcript=None,
++            options={"voice_enrollment": {"engine": "auto"}},
++        )
++    assert caught.value.code == "pykokoro.reference_text_required"
++
++
++def test_kokoro_reference_binding_uses_transcript_and_preserves_advanced_options() -> (
++    None
++):
++    adapter = PyKokoroEngineAdapter()
++    akinvox_target = _model(voice_mode="reference", reference_enrollment=True)
++    bound = adapter.bind_reference_voice(
++        target=akinvox_target,
++        language="en-US",
++        voice_source=_managed_source(),
++        transcript="Catalog or fallback transcript.",
++        options={"voice_enrollment": {"engine": "auto"}, "speed": 1.0},
++    )
++    assert bound["voice_enrollment"] == {
++        "engine": "akinvox",
++        "reference_text": "Catalog or fallback transcript.",
++    }
++    assert bound["speed"] == 1.0
++
++    inno_target = _model(enrollers=({"id": "inno-v0.2", "transcript_required": False},))
++    inno_bound = adapter.bind_reference_voice(
++        target=inno_target,
++        language="en-US",
++        voice_source=_managed_source(),
++        transcript=None,
++        options={"voice_enrollment": {"engine": "inno", "fmax": 19000}},
++    )
++    assert inno_bound["voice_enrollment"] == {"engine": "inno", "fmax": 19000.0}
++
++
+ def test_akinvox_binding_rejects_conflicting_explicit_transcript() -> None:
+     model = _model(voice_mode="reference", reference_enrollment=True)
+     adapter = PyKokoroEngineAdapter()
+diff --git a/tests/test_managed_voices.py b/tests/test_managed_voices.py
+index e620a75..816e195 100644
+--- a/tests/test_managed_voices.py
++++ b/tests/test_managed_voices.py
+@@ -14,18 +14,18 @@ from voicerender.errors import (
+ )
+
+
+-def _entry() -> voicefolio.VoiceEntry:
++def _entry(*, source_format: str = "wav") -> voicefolio.VoiceEntry:
+     return voicefolio.VoiceEntry(
+         ref=voicefolio.VoiceRef("test-voices", "sample"),
+         dataset="test-dataset",
+         variant="original",
+-        format="wav",
+-        url="https://example.invalid/sample.wav",
++        format=source_format,
++        url=f"https://example.invalid/sample.{source_format}",
+         size=12,
+         sha256="a" * 64,
+         source_repository="https://example.invalid/repo",
+         source_revision="revision-1",
+-        source_path="voices/sample.wav",
++        source_path=f"voices/sample.{source_format}",
+         license="CC-BY-4.0",
+     )
+
+@@ -37,6 +37,7 @@ def _source(entry: voicefolio.VoiceEntry | None = None) -> dict[str, Any]:
+         "resolver": "voicefolio",
+         "value": str(entry.ref),
+         "sha256": entry.sha256,
++        "source_format": entry.format,
+         "source_revision": entry.source_revision,
+         "source_repository": entry.source_repository,
+         "source_path": entry.source_path,
+@@ -130,7 +131,9 @@ def test_resolve_managed_voice_returns_pinned_metadata_and_local_path(
+         resolver="voicefolio",
+         ref=str(entry.ref),
+         path=path,
+-        sha256=entry.sha256,
++        source_sha256=entry.sha256,
++        resolved_sha256=entry.sha256,
++        source_format=entry.format,
+         source_revision=entry.source_revision,
+         source_repository=entry.source_repository,
+         source_path=entry.source_path,
+@@ -172,5 +175,47 @@ def test_resolve_managed_voice_maps_unknown_reference_to_invalid_voice(
+
+     with pytest.raises(InvalidEngineVoiceError) as error:
+         managed_voices.resolve_managed_voice(_source(entry))
+-
+     assert error.value.code == "managed_voice.invalid_source"
++
++
++def test_materialized_flac_keeps_source_and_renderer_digests_distinct(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++) -> None:
++    entry = _entry(source_format="flac")
++    catalog = _install_catalog(monkeypatch, entry)
++    source_path = tmp_path / "source.flac"
++    renderer_path = tmp_path / "materialized.wav"
++    materialized = voicefolio.MaterializedVoice(
++        source=voicefolio.ResolvedVoice(entry=entry, path=source_path),
++        path=renderer_path,
++        sha256="b" * 64,
++        recipe="flac-to-wav-v1",
++        sample_rate=24000,
++        channels=1,
++        subtype="PCM_16",
++    )
++    calls: list[dict[str, Any]] = []
++
++    def resolve(source: Any, **kwargs: Any) -> voicefolio.MaterializedVoice:
++        calls.append({"source": source, **kwargs})
++        return materialized
++
++    monkeypatch.setattr(managed_voices.voicefolio, "resolve_voice_source", resolve)
++
++    resolved = managed_voices.resolve_managed_voice(_source(entry), offline=True)
++
++    assert resolved.path == renderer_path
++    assert resolved.source_sha256 == entry.sha256
++    assert resolved.resolved_sha256 == "b" * 64
++    assert resolved.sha256 == resolved.resolved_sha256
++    assert resolved.source_format == "flac"
++    assert resolved.source_sha256 != resolved.resolved_sha256
++    assert calls == [
++        {
++            "source": _source(entry),
++            "catalog": catalog,
++            "cache_dir": None,
++            "offline": True,
++        }
++    ]
+diff --git a/tests/test_pocketsynth_managed.py b/tests/test_pocketsynth_managed.py
+index 1c5fa56..7c54d80 100644
+--- a/tests/test_pocketsynth_managed.py
++++ b/tests/test_pocketsynth_managed.py
+@@ -267,7 +267,9 @@ def test_managed_execution_resolves_once_passes_path_and_reuses_prepared_voice(
+         resolver="voicefolio",
+         ref=source["value"],
+         path=voice_path,
+-        sha256=source["sha256"],
++        source_sha256=source["sha256"],
++        resolved_sha256=source["sha256"],
++        source_format="wav",
+         source_revision=source["source_revision"],
+         source_repository=source["source_repository"],
+         source_path=source["source_path"],
+@@ -335,7 +337,9 @@ def test_managed_execution_checks_resolver_provenance_before_prepare(
+         resolver="voicefolio",
+         ref=source["value"],
+         path=tmp_path / "verified.wav",
+-        sha256=source["sha256"],
++        source_sha256=source["sha256"],
++        resolved_sha256=source["sha256"],
++        source_format="wav",
+         source_revision=source["source_revision"],
+         source_repository=source["source_repository"],
+         source_path="different/path.wav",
+@@ -482,7 +486,9 @@ def test_offline_cached_voicefolio_asset_renders_with_managed_identity(
+         resolver="voicefolio",
+         ref=source["value"],
+         path=voice_path,
+-        sha256=source["sha256"],
++        source_sha256=source["sha256"],
++        resolved_sha256=source["sha256"],
++        source_format="wav",
+         source_revision=source["source_revision"],
+         source_repository=source["source_repository"],
+         source_path=source["source_path"],
+diff --git a/tests/test_profile_roles.py b/tests/test_profile_roles.py
+index f09ef0f..66f58cd 100644
+--- a/tests/test_profile_roles.py
++++ b/tests/test_profile_roles.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+
+ from contextlib import contextmanager
+ from dataclasses import replace
++from pathlib import Path
+ from types import SimpleNamespace
+ from typing import Any
+
+@@ -18,6 +19,7 @@ from voicerender.engines.base import (
+     EngineSelection,
+     RenderProfileFragment,
+ )
++from voicerender.engines.catalog import SynthesisTarget
+ from voicerender.engines.profiles import make_renderprofile_fragment
+ from voicerender.engines.registry import _ADAPTERS
+ from voicerender.engines.selection import EngineRequest
+@@ -28,7 +30,12 @@ from voicerender.profile_roles import (
+     set_default_profile_role,
+     set_profile_role,
+ )
+-from voicerender.renderprofile import create_render_profile
++from voicerender.renderprofile import create_render_profile, validate_render_profile
++from voicerender.voice_sources import (
++    local_reference_source,
++    managed_reference_context,
++    managed_reference_source,
++)
+
+
+ class _RoleAdapter:
+@@ -59,7 +66,8 @@ class _RoleAdapter:
+                 engine=self.id,
+                 target_id=request.target_id or "target-v1",
+                 language=request.language or "en-US",
+-                voice=request.voice or "voice-a",
++                voice=request.voice
++                or ("voice-a" if "voice_source" not in request.options else None),
+                 speaker=request.speaker,
+                 options=request.options,
+             ),
+@@ -248,3 +256,180 @@ def test_default_role_mutation_preserves_roles_and_refreshes_identity(
+     assert updated.planning == profile.planning
+     assert updated.pauses == profile.pauses
+     assert set_default_profile_role(updated, "guest") is updated
++
++
++class _ReferenceRoleAdapter(_RoleAdapter):
++    def capabilities(self) -> EngineCapabilities:
++        return EngineCapabilities(id=self.id, supports_reference_voice=True)
++
++
++def _reference_target() -> SynthesisTarget:
++    return SynthesisTarget(
++        engine="role-test",
++        id="target-v1",
++        display_name="Reference-capable test target",
++        languages=("en-US",),
++        capabilities=frozenset({"reference_voice"}),
++        metadata={},
++    )
++
++
++def test_profile_create_uses_voicefolio_catalog_transcript_without_fetch(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = _ReferenceRoleAdapter()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    target = _reference_target()
++    monkeypatch.setattr(
++        "voicerender.renderprofile.discover_targets", lambda *a, **k: (target,)
++    )
++    calls: list[dict[str, Any]] = []
++
++    def bind_reference_voice(**kwargs: Any) -> dict[str, Any]:
++        calls.append(kwargs)
++        return {**kwargs["options"], "transcript": kwargs["transcript"]}
++
++    monkeypatch.setattr(
++        adapter, "bind_reference_voice", bind_reference_voice, raising=False
++    )
++    monkeypatch.setattr(
++        "voicerender.voice_sources.resolve_managed_voice",
++        lambda *a, **k: (_ for _ in ()).throw(
++            AssertionError("profile create fetched audio")
++        ),
++    )
++    reference = managed_reference_source("fine-read-it-voices:S5339")
++    catalog = managed_reference_context("fine-read-it-voices:S5339")
++
++    profile = create_render_profile(
++        engine=adapter.id,
++        target_id=target.id,
++        language="en-US",
++        voice_source=reference,
++    )
++
++    role_options = profile.roles["narrator"].binding["options"]
++    assert catalog.transcript is not None
++    assert calls[0]["transcript"] == catalog.transcript
++    assert role_options["transcript"] == catalog.transcript
++    assert role_options["voice_source"]["source_format"] == "wav"
++
++
++def test_profile_role_bind_and_validation_keep_voicefolio_setup_metadata_only(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _ReferenceRoleAdapter()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    target = _reference_target()
++    monkeypatch.setattr(
++        "voicerender.renderprofile.discover_targets", lambda *args, **kwargs: (target,)
++    )
++    bind_calls: list[dict[str, Any]] = []
++
++    def bind_reference_voice(**kwargs: Any) -> dict[str, Any]:
++        bind_calls.append(kwargs)
++        return {
++            **kwargs["options"],
++            **(
++                {"transcript": kwargs["transcript"]}
++                if kwargs["transcript"] is not None
++                else {}
++            ),
++        }
++
++    monkeypatch.setattr(
++        adapter, "bind_reference_voice", bind_reference_voice, raising=False
++    )
++    monkeypatch.setattr(
++        "voicerender.voice_sources.resolve_managed_voice",
++        lambda *args, **kwargs: (_ for _ in ()).throw(
++            AssertionError("profile bind or validation fetched audio")
++        ),
++    )
++    seed_audio = tmp_path / "seed.wav"
++    seed_audio.write_bytes(b"seed")
++    profile = create_render_profile(
++        engine=adapter.id,
++        target_id=target.id,
++        language="en-US",
++        voice_source=local_reference_source(seed_audio),
++    )
++
++    updated = set_profile_role(
++        profile,
++        "guest",
++        engine=adapter.id,
++        target_id=target.id,
++        language="en-US",
++        voice_source=managed_reference_source("fine-read-it-voices:S5339"),
++    )
++    validate_render_profile(updated)
++
++    guest_options = updated.roles["guest"].binding["options"]
++    assert (
++        bind_calls[-1]["transcript"]
++        == managed_reference_context("fine-read-it-voices:S5339").transcript
++    )
++    assert guest_options["voice_source"]["value"] == "fine-read-it-voices:S5339"
++    assert guest_options["transcript"] == bind_calls[-1]["transcript"]
++    assert len(bind_calls) == 2
++
++
++def test_profile_create_transcript_fallback_and_catalog_conflict(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++) -> None:
++    adapter = _ReferenceRoleAdapter()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++    target = _reference_target()
++    monkeypatch.setattr(
++        "voicerender.renderprofile.discover_targets", lambda *a, **k: (target,)
++    )
++    calls: list[str | None] = []
++
++    def bind_reference_voice(**kwargs: Any) -> dict[str, Any]:
++        calls.append(kwargs["transcript"])
++        return {**kwargs["options"], "transcript": kwargs["transcript"]}
++
++    monkeypatch.setattr(
++        adapter, "bind_reference_voice", bind_reference_voice, raising=False
++    )
++    reference_path = tmp_path / "reference.wav"
++    reference_path.write_bytes(b"reference audio")
++    local_source = local_reference_source(reference_path)
++
++    profile = create_render_profile(
++        engine=adapter.id,
++        target_id=target.id,
++        language="en-US",
++        voice_source=local_source,
++        transcript="Explicit fallback words.",
++    )
++    assert profile.roles["narrator"].binding["options"]["transcript"] == (
++        "Explicit fallback words."
++    )
++    assert calls == ["Explicit fallback words."]
++
++    with pytest.raises(ProfileError, match="explicit transcript differs"):
++        create_render_profile(
++            engine=adapter.id,
++            target_id=target.id,
++            language="en-US",
++            voice_source=managed_reference_source("fine-read-it-voices:S5339"),
++            transcript="A different transcript.",
++        )
++
++
++def test_profile_transcript_requires_reference_source(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    _install(monkeypatch)
++
++    with pytest.raises(ProfileError, match="--transcript requires"):
++        create_render_profile(
++            engine="role-test",
++            target_id="target-v1",
++            language="en-US",
++            voice="voice-a",
++            transcript="Not a reference transcript.",
++        )
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 3e01999..93be89e 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+
++import hashlib
+ import json
+ from dataclasses import replace
+ from pathlib import Path
+@@ -89,6 +90,8 @@ def test_profile_bind_delegates_to_role_set_and_requires_destination(
+ ) -> None:
+     source = tmp_path / "source.renderprofile.toml"
+     original = _write_profile(source)
++    reference = tmp_path / "reference.wav"
++    reference.write_bytes(b"reference audio")
+     calls: dict[str, object] = {}
+
+     def fake_set_profile_role(profile, role, **kwargs):
+@@ -117,8 +120,10 @@ def test_profile_bind_delegates_to_role_set_and_requires_destination(
+             "mini-0.8",
+             "--language",
+             "en-US",
+-            "--voice",
+-            "Jasper",
++            "--reference-wav",
++            str(reference),
++            "--transcript",
++            "Exact reference words.",
+             "--offline",
+             "--make-default",
+             "--in-place",
+@@ -128,8 +133,8 @@ def test_profile_bind_delegates_to_role_set_and_requires_destination(
+     payload = json.loads(capsys.readouterr().out)
+
+     assert exit_code == 0
+-    assert calls["voice"] == "Jasper"
+-    assert calls["offline"] is True
++    assert calls["voice_source"]["kind"] == "reference"
++    assert calls["transcript"] == "Exact reference words."
+     assert calls["make_default"] is True
+     assert load_render_profile(source).default_role == "host"
+     assert payload["path"] == str(source)
+@@ -231,8 +236,15 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+             "options": {
+                 "voice_source": {
+                     "kind": "managed_reference",
+-                    "reference": "large-reference-mapping-is-not-displayed",
+-                }
++                    "resolver": "voicefolio",
++                    "value": "fine-read-it-voices:S5339",
++                    "sha256": "a" * 64,
++                    "source_format": "wav",
++                },
++                "voice_enrollment": {
++                    "engine": "akinvox",
++                    "reference_text": "Exact transcript must not be printed.",
++                },
+             },
+         },
+     )
+@@ -248,7 +260,9 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+     assert "speaker:Jasper" in role_output
+     assert "source:managed_reference" in role_output
+     assert "private_detail" not in role_output
+-    assert "large-reference-mapping-is-not-displayed" not in role_output
++    assert "fine-read-it-voices:S5339" in role_output
++    assert "enrollment:akinvox" in role_output
++    assert "Exact transcript must not be printed." not in role_output
+     assert "RoleProfile(" not in role_output
+
+     exit_code = cli.main(["profile", "show", str(source)])
+@@ -267,9 +281,22 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+     source_role = next(
+         item for item in show_payload["roles"] if item["role"] == "source"
+     )
+-    assert source_role["binding"]["options"]["voice_source"]["reference"] == (
+-        "large-reference-mapping-is-not-displayed"
+-    )
++    source_binding = source_role["binding"]["options"]
++    assert source_binding["voice_source"] == {
++        "kind": "managed_reference",
++        "ref": "fine-read-it-voices:S5339",
++        "resolver": "voicefolio",
++        "sha256": "a" * 64,
++        "source_format": "wav",
++    }
++    enrollment = source_binding["voice_enrollment"]
++    assert enrollment == {
++        "engine": "akinvox",
++        "reference_text_sha256": hashlib.sha256(
++            b"Exact transcript must not be printed."
++        ).hexdigest(),
++    }
++    assert "Exact transcript must not be printed." not in json.dumps(show_payload)
+     narrator_role = next(
+         item for item in show_payload["roles"] if item["role"] == "narrator"
+     )
+diff --git a/tests/test_renderprofile.py b/tests/test_renderprofile.py
+index b210b6c..3fcf933 100644
+--- a/tests/test_renderprofile.py
++++ b/tests/test_renderprofile.py
+@@ -61,7 +61,7 @@ class _ProfileAdapter:
+         )
+
+     def capabilities(self) -> EngineCapabilities:
+-        return EngineCapabilities(id=self.id)
++        return EngineCapabilities(id=self.id, supports_reference_voice=True)
+
+     def version(self) -> str:
+         return "1.0"
+diff --git a/tests/test_voice_clone.py b/tests/test_voice_clone.py
+index fdc3a32..34ed22f 100644
+--- a/tests/test_voice_clone.py
++++ b/tests/test_voice_clone.py
+@@ -33,9 +33,11 @@ def test_clone_rejects_target_without_reference_voice_support(
+
+     reference = tmp_path / "speaker.wav"
+     reference.write_bytes(b"wav reference")
+-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
+     monkeypatch.setattr(
+-        "voicerender.voice_clone.discover_targets",
++        "voicerender.renderprofile.get_adapter", lambda engine: Adapter()
++    )
++    monkeypatch.setattr(
++        "voicerender.renderprofile.discover_targets",
+         lambda *a, **k: (_target(reference=False),),
+     )
+
+@@ -47,51 +49,18 @@ def test_clone_rejects_target_without_reference_voice_support(
+     assert error.value.code == "voice_clone.reference_unsupported"
+
+
+-def test_clone_delegates_transcript_validation_and_never_synthesizes(
++def test_clone_delegates_binding_to_shared_profile_flow(
+     monkeypatch, tmp_path: Path
+ ) -> None:
+-    class Adapter:
+-        id = "fake"
+-
+-        def capabilities(self):
+-            return EngineCapabilities(
+-                id="fake",
+-                supports_reference_voice=True,
+-                option_names=frozenset({"reference_text", "temperature"}),
+-            )
+-
+     reference = tmp_path / "speaker.wav"
+     reference.write_bytes(b"wav reference")
+-    calls: list[dict[str, object]] = []
+-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
+-    monkeypatch.setattr(
+-        "voicerender.voice_clone.discover_targets", lambda *a, **k: (_target(),)
+-    )
++    calls: list[dict[str, Any]] = []
+
+     def create_profile(**kwargs):
+         calls.append(kwargs)
+-        if "reference_text" not in kwargs["options"]:
+-            raise EngineSelectionError(
+-                "Exact reference transcript required",
+-                engine="fake",
+-                code="fake.reference_text_required",
+-            )
+         return kwargs
+
+     monkeypatch.setattr("voicerender.voice_clone.create_render_profile", create_profile)
+-    monkeypatch.setattr(
+-        "voicerender.engines.registry.open_session",
+-        lambda *a, **k: (_ for _ in ()).throw(
+-            AssertionError("clone must not synthesize")
+-        ),
+-    )
+-
+-    with pytest.raises(EngineSelectionError) as error:
+-        clone_voice_profile(
+-            VoiceCloneRequest("fake", "clone-model", "en-US", reference_wav=reference)
+-        )
+-    assert error.value.code == "fake.reference_text_required"
+-
+     result = clone_voice_profile(
+         VoiceCloneRequest(
+             "fake",
+@@ -104,39 +73,25 @@ def test_clone_delegates_transcript_validation_and_never_synthesizes(
+         role="narrator",
+     )
+
+-    assert result["options"]["reference_text"] == "Exact transcript."
+-    assert result["options"]["temperature"] == 0.7
++    assert result["transcript"] == "Exact transcript."
++    assert result["options"] == {"temperature": 0.7}
+     assert result["role"] == "narrator"
+     assert result["voice_source"]["kind"] == "reference"
+-    assert len(calls) == 2
++    assert len(calls) == 1
+
+
+-def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
++def test_clone_preserves_sidecar_metadata_for_shared_binding(
+     monkeypatch, tmp_path: Path
+ ) -> None:
+     from voicerender.voice_source_codec import save_voice_source
+     from voicerender.voice_sources import local_reference_source
+
+-    class Adapter:
+-        id = "fake"
+-
+-        def capabilities(self):
+-            return EngineCapabilities(
+-                id="fake",
+-                supports_reference_voice=True,
+-                option_names=frozenset({"transcript"}),
+-            )
+-
+     reference = tmp_path / "speaker.wav"
+     reference.write_bytes(b"pinned")
+     source: dict[str, Any] = dict(local_reference_source(reference))
+     source["metadata"] = {"transcript": "From the source."}
+     sidecar = tmp_path / "speaker.toml"
+     save_voice_source(source, sidecar)
+-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: Adapter())
+-    monkeypatch.setattr(
+-        "voicerender.voice_clone.discover_targets", lambda *a, **k: (_target(),)
+-    )
+     monkeypatch.setattr(
+         "voicerender.voice_clone.create_render_profile", lambda **kwargs: kwargs
+     )
+@@ -145,13 +100,12 @@ def test_clone_loads_pinned_source_sidecar_and_uses_metadata_transcript(
+         VoiceCloneRequest("fake", "clone-model", "en-US", voice_source=sidecar)
+     )
+
+-    assert result["options"]["transcript"] == "From the source."
++    assert result["transcript"] is None
++    assert result["voice_source"]["metadata"]["transcript"] == "From the source."
+     assert result["voice_source"]["sha256"] == source["sha256"]
+
+
+-def test_clone_uses_kokoro_adapter_to_bind_akinvox_transcript(
+-    monkeypatch, tmp_path: Path
+-) -> None:
++def test_kokoro_adapter_binds_generic_transcript_to_akinvox() -> None:
+     from voicerender.engines.kokoro import PyKokoroEngineAdapter
+
+     target = SynthesisTarget(
+@@ -166,32 +120,15 @@ def test_clone_uses_kokoro_adapter_to_bind_akinvox_transcript(
+             "supports_voice_enrollment": True,
+         },
+     )
+-    adapter = PyKokoroEngineAdapter()
+-    monkeypatch.setattr("voicerender.voice_clone.get_adapter", lambda engine: adapter)
+-    monkeypatch.setattr(
+-        "voicerender.voice_clone.discover_targets", lambda *args, **kwargs: (target,)
+-    )
+-    monkeypatch.setattr(
+-        "voicerender.voice_clone.validate_voice_source", lambda *a, **k: ()
+-    )
+-    monkeypatch.setattr(
+-        "voicerender.voice_clone.create_render_profile", lambda **kwargs: kwargs
+-    )
+-    reference = tmp_path / "speaker.wav"
+-    reference.write_bytes(b"reference audio")
+-
+-    profile = clone_voice_profile(
+-        VoiceCloneRequest(
+-            "kokoro",
+-            "clone-model",
+-            "en-US",
+-            reference_wav=reference,
+-            transcript="Exact AkinVox transcript.",
+-            options={"voice_enrollment": {"engine": "akinvox"}},
+-        )
++    options = PyKokoroEngineAdapter().bind_reference_voice(
++        target=target,
++        language="en-US",
++        voice_source={"kind": "reference"},
++        transcript="Exact AkinVox transcript.",
++        options={"voice_enrollment": {"engine": "akinvox"}},
+     )
+
+-    assert profile["options"]["voice_enrollment"] == {
++    assert options["voice_enrollment"] == {
+         "engine": "akinvox",
+         "reference_text": "Exact AkinVox transcript.",
+     }
+diff --git a/tests/test_voice_source_codec.py b/tests/test_voice_source_codec.py
+index f1e65bd..3b29b7a 100644
+--- a/tests/test_voice_source_codec.py
++++ b/tests/test_voice_source_codec.py
+@@ -180,3 +180,38 @@ def test_profile_voice_source_binding_accepts_verified_prepared_source(
+     source = local_prepared_voice_source(artifact, format="qwen3.qvoice.v2")
+
+     validate_voice_source_binding({"options": {"voice_source": source}})
++
++
++@pytest.mark.parametrize("source_format", ["wav", "flac", None])
++def test_managed_source_format_sidecar_roundtrip(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    source_format: str | None,
++) -> None:
++    from voicerender import voice_source_codec
++
++    source: dict[str, object] = {
++        "kind": "managed_reference",
++        "resolver": "voicefolio",
++        "value": "catalog:voice-id",
++        "sha256": "a" * 64,
++        "source_revision": "revision-1",
++        "source_repository": "voice-repo",
++        "source_path": "voices/reference.wav",
++    }
++    if source_format is not None:
++        source["source_format"] = source_format
++    monkeypatch.setattr(voice_source_codec, "validate_voice_source", lambda _source: ())
++    sidecar = tmp_path / "managed-voice-source.toml"
++
++    save_voice_source(source, sidecar)
++    loaded = load_voice_source(sidecar)
++
++    if source_format is None:
++        assert "source_format" not in loaded
++    else:
++        assert loaded["source_format"] == source_format
++        assert f'source_format = "{source_format}"' in sidecar.read_text(
++            encoding="utf-8"
++        )
++    assert loaded["kind"] == "managed_reference"
+diff --git a/tests/test_voice_sources.py b/tests/test_voice_sources.py
+index f876f02..7d98ed1 100644
+--- a/tests/test_voice_sources.py
++++ b/tests/test_voice_sources.py
+@@ -6,6 +6,7 @@ from pathlib import Path
+ from typing import Any
+
+ import pytest
++import voicefolio
+
+ from voicerender import voice_sources
+ from voicerender.errors import InvalidEngineOptionError, InvalidEngineVoiceError
+@@ -147,6 +148,9 @@ def test_managed_resolution_preserves_pins_and_identity_omits_cache_paths(
+         ref = source["value"]
+         path = resolved_path
+         sha256 = source["sha256"]
++        source_sha256 = source["sha256"]
++        resolved_sha256 = source["sha256"]
++        source_format = "wav"
+         source_revision = source["source_revision"]
+         source_repository = source["source_repository"]
+         source_path = source["source_path"]
+@@ -163,6 +167,8 @@ def test_managed_resolution_preserves_pins_and_identity_omits_cache_paths(
+     assert resolved.kind == "managed_reference"
+     assert resolved.path == resolved_path
+     assert resolved.sha256 == source["sha256"]
++    assert resolved.source_sha256 == source["sha256"]
++    assert resolved.source_format == "wav"
+     assert resolved.ref == source["value"]
+     assert resolved.source_revision == source["source_revision"]
+     assert calls[0]["cache_dir"] == tmp_path / "cache"
+@@ -198,3 +204,56 @@ def test_unsupported_resolver_is_rejected_and_legacy_shim_is_limited() -> None:
+     with pytest.raises(InvalidEngineVoiceError) as error:
+         voice_sources.normalize_voice_source(historical)
+     assert error.value.code == "managed_voice.resolver_missing"
++
++
++@pytest.mark.parametrize("source_format", ["wav", "flac"])
++def test_managed_reference_source_format_is_preserved(source_format: str) -> None:
++    source = _managed_source()
++    source["source_format"] = source_format
++
++    normalized = voice_sources.normalize_voice_source(source)
++
++    assert normalized.source_format == source_format
++    assert normalized.as_mapping()["source_format"] == source_format
++
++
++def test_managed_reference_source_format_is_optional_but_non_empty() -> None:
++    source = _managed_source()
++    assert voice_sources.normalize_voice_source(source).source_format is None
++
++    source["source_format"] = "  "
++    with pytest.raises(InvalidEngineVoiceError) as error:
++        voice_sources.normalize_voice_source(source)
++    assert error.value.code == "managed_voice.invalid_source"
++    assert error.value.details["field"] == "source_format"
++
++
++def test_local_reference_rejects_managed_source_format(tmp_path: Path) -> None:
++    source_path = tmp_path / "speaker.wav"
++    source_path.write_bytes(b"reference")
++    source = voice_sources.local_reference_source(source_path)
++    source["source_format"] = "wav"
++
++    with pytest.raises(InvalidEngineVoiceError) as error:
++        voice_sources.normalize_voice_source(source)
++    assert error.value.code == "voice_source.invalid"
++    assert "source_format" in error.value.details["fields"]
++
++
++def test_unknown_managed_reference_field_is_rejected() -> None:
++    source = _managed_source()
++    source["unexpected"] = "value"
++
++    with pytest.raises(InvalidEngineVoiceError) as error:
++        voice_sources.normalize_voice_source(source)
++    assert error.value.code == "managed_voice.invalid_source"
++    assert error.value.details["fields"] == ["unexpected"]
++
++
++def test_current_voicefolio_managed_reference_contract_includes_source_format() -> None:
++    source = voicefolio.managed_reference("fine-read-it-voices:S5339")
++
++    normalized = voice_sources.normalize_voice_source(source)
++
++    assert normalized.source_format == "wav"
++    assert normalized.as_mapping()["source_format"] == "wav"
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 7d6eaea..c9b11cc 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -10,7 +10,7 @@ import os
+ import sys
+ import tempfile
+ import time
+-from collections.abc import Callable
++from collections.abc import Callable, Mapping
+ from pathlib import Path
+ from typing import Any, TextIO, cast
+
+@@ -122,10 +122,17 @@ def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None
+     parser.add_argument("--language", required=True)
+     source = parser.add_mutually_exclusive_group()
+     source.add_argument("--voice")
+-    source.add_argument("--voicefolio-ref")
++    source.add_argument(
++        "--voicefolio-ref",
++        help="Pinned VoiceFolio reference; catalog transcript metadata is used when available",
++    )
+     source.add_argument("--reference-wav", type=Path)
+     source.add_argument("--prepared-voice", type=Path)
+     source.add_argument("--voice-source", type=Path)
++    parser.add_argument(
++        "--transcript",
++        help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
++    )
+     parser.add_argument("--speaker")
+     parser.add_argument(
+         "--option",
+@@ -256,7 +263,8 @@ def build_parser() -> argparse.ArgumentParser:
+         help="Create a RenderProfile with its first role binding",
+         description=(
+             "Create the first/default role binding of a complete RenderProfile cast; "
+-            "use `profile bind` to add more roles."
++            "use `profile bind` to add more roles. VoiceFolio catalog transcripts "
++            "are used automatically; pass --transcript when metadata is absent."
+         ),
+     )
+     profile_create.add_argument("--engine", required=True)
+@@ -265,10 +273,17 @@ def build_parser() -> argparse.ArgumentParser:
+     profile_create.add_argument("--role", default="narrator")
+     voice_source_group = profile_create.add_mutually_exclusive_group()
+     voice_source_group.add_argument("--voice")
+-    voice_source_group.add_argument("--voicefolio-ref")
++    voice_source_group.add_argument(
++        "--voicefolio-ref",
++        help="Pinned VoiceFolio reference; catalog transcript metadata is used when available",
++    )
+     voice_source_group.add_argument("--reference-wav", type=Path)
+     voice_source_group.add_argument("--prepared-voice", type=Path)
+     voice_source_group.add_argument("--voice-source", type=Path)
++    profile_create.add_argument(
++        "--transcript",
++        help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
++    )
+     profile_create.add_argument("--speaker")
+     profile_create.add_argument(
+         "--option",
+@@ -432,8 +447,14 @@ def build_parser() -> argparse.ArgumentParser:
+     clone_source = voice_clone.add_mutually_exclusive_group(required=True)
+     clone_source.add_argument("--reference-wav", type=Path)
+     clone_source.add_argument("--voice-source", type=Path)
+-    clone_source.add_argument("--voicefolio-ref")
+-    voice_clone.add_argument("--transcript")
++    clone_source.add_argument(
++        "--voicefolio-ref",
++        help="Pinned VoiceFolio reference; catalog transcript metadata is used when available",
++    )
++    voice_clone.add_argument(
++        "--transcript",
++        help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
++    )
+     voice_clone.add_argument("--speaker")
+     voice_clone.add_argument(
+         "--option", action="append", default=[], metavar="KEY=VALUE"
+@@ -855,14 +876,83 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
+             "role": role_name,
+             "default": role_name == profile.default_role,
+             "language": role.language,
+-            "binding": dict(role.binding),
++            "binding": _inspection_binding(role.binding),
+         }
+         for role_name, role in sorted(list_profile_roles(profile).items())
+     ]
+
+
++def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
++    safe = dict(binding)
++    options = binding.get("options")
++    if isinstance(options, Mapping):
++        safe_options: dict[str, Any] = {}
++        for name, value in options.items():
++            safe_options[name] = (
++                _inspection_voice_source(value)
++                if name == "voice_source"
++                else _redact_transcript_fields(value)
++            )
++        safe["options"] = safe_options
++    if isinstance(binding.get("voice_source"), Mapping):
++        safe["voice_source"] = _inspection_voice_source(binding["voice_source"])
++    return safe
++
++
++def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
++    kind = source.get("kind") or source.get("type")
++    safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
++    if kind == "managed_reference":
++        ref = source.get("value", source.get("ref", source.get("reference")))
++        if isinstance(ref, str):
++            safe["ref"] = ref
++        fields: tuple[str, ...] = (
++            "resolver",
++            "sha256",
++            "source_format",
++            "source_revision",
++            "source_repository",
++            "source_path",
++            "license",
++            "dataset",
++            "variant",
++        )
++    elif kind == "prepared":
++        fields = ("sha256", "format", "model_id", "model_revision", "layout")
++    elif kind == "reference":
++        fields = ("sha256",)
++    else:
++        fields = ()
++    for name in fields:
++        value = source.get(name)
++        if value is not None:
++            safe[name] = value
++    return safe
++
++
++def _redact_transcript_fields(value: Any) -> Any:
++    if isinstance(value, Mapping):
++        safe: dict[str, Any] = {}
++        for name, item in value.items():
++            if name in {"reference_text", "transcript"} and isinstance(item, str):
++                digest_name = (
++                    "reference_text_sha256"
++                    if name == "reference_text"
++                    else "transcript_sha256"
++                )
++                safe[digest_name] = hashlib.sha256(item.encode("utf-8")).hexdigest()
++            else:
++                safe[name] = _redact_transcript_fields(item)
++        return safe
++    if isinstance(value, (list, tuple)):
++        return [_redact_transcript_fields(item) for item in value]
++    return value
++
++
+ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+-    print("  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE")
++    print(
++        "  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE / ENROLLMENT"
++    )
+     for item in roles:
+         marker = "*" if item["default"] else " "
+         binding = item["binding"]
+@@ -872,6 +962,19 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+         selector = role_voice_selector(
+             RoleProfile(language=item["language"], binding=binding)
+         )
++        options = binding.get("options", {})
++        if isinstance(options, Mapping):
++            source = options.get("voice_source")
++            if (
++                isinstance(source, Mapping)
++                and source.get("kind") == "managed_reference"
++            ):
++                ref = source.get("ref")
++                if isinstance(ref, str) and ref:
++                    selector += f":{ref}"
++            enrollment = options.get("voice_enrollment")
++            if isinstance(enrollment, Mapping) and enrollment.get("engine"):
++                selector += f" enrollment:{enrollment['engine']}"
+         print(
+             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
+             f"{target:<18} {selector}"
+@@ -2177,6 +2280,7 @@ def main(argv: list[str] | None = None) -> int:
+                     voice_source=voice_source,
+                     speaker=args.speaker,
+                     options=profile_options,
++                    transcript=args.transcript,
+                     offline=args.offline,
+                     refresh=args.refresh,
+                 )
+@@ -2247,6 +2351,7 @@ def main(argv: list[str] | None = None) -> int:
+                             speaker=args.speaker,
+                             voice_source=voice_source,
+                             options=_json_options(args.option),
++                            transcript=args.transcript,
+                             offline=args.offline,
+                             refresh=args.refresh,
+                             make_default=args.make_default,
+diff --git a/voicerender/engines/pocketsynth.py b/voicerender/engines/pocketsynth.py
+index 07455c0..7eb4072 100644
+--- a/voicerender/engines/pocketsynth.py
++++ b/voicerender/engines/pocketsynth.py
+@@ -666,7 +666,7 @@ def _verify_resolved_managed_voice(
+     actual = {
+         "resolver": resolved.resolver,
+         "ref": resolved.ref,
+-        "sha256": resolved.sha256,
++        "sha256": resolved.source_sha256,
+         "source_revision": resolved.source_revision,
+         "source_repository": resolved.source_repository,
+         "source_path": resolved.source_path,
+diff --git a/voicerender/managed_voices.py b/voicerender/managed_voices.py
+index bba72ad..b0b8c19 100644
+--- a/voicerender/managed_voices.py
++++ b/voicerender/managed_voices.py
+@@ -11,6 +11,7 @@ import voicefolio
+ from voicefolio import (
+     Catalog,
+     IntegrityError,
++    MaterializedVoice,
+     OfflineError,
+     ResolvedVoice,
+     VoiceEntry,
+@@ -35,12 +36,14 @@ _MANAGED_PIN_FIELDS = (
+
+ @dataclass(frozen=True, slots=True)
+ class ResolvedManagedVoice:
+-    """A pinned managed voice resolved to a Voicefolio-verified local WAV."""
++    """A verified renderer-ready asset and its independent portable source pin."""
+
+     resolver: str
+     ref: str
+     path: Path
+-    sha256: str
++    source_sha256: str
++    resolved_sha256: str
++    source_format: str
+     source_revision: str
+     source_repository: str
+     source_path: str
+@@ -48,6 +51,11 @@ class ResolvedManagedVoice:
+     dataset: str | None = None
+     variant: str | None = None
+
++    @property
++    def sha256(self) -> str:
++        """Compatibility alias for the renderer-ready asset digest."""
++        return self.resolved_sha256
++
+
+ def validate_managed_voice(
+     source: Mapping[str, Any],
+@@ -84,7 +92,7 @@ def resolve_managed_voice(
+     resolver, ref = _source_identity(source)
+     catalog = _load_catalog(catalog_paths, resolver=resolver, ref=ref)
+     try:
+-        resolved: ResolvedVoice = voicefolio.resolve_voice_source(
++        resolved: ResolvedVoice | MaterializedVoice = voicefolio.resolve_voice_source(
+             source,
+             catalog=catalog,
+             cache_dir=cache_dir,
+@@ -124,12 +132,24 @@ def resolve_managed_voice(
+             details={"resolver": resolver, "ref": ref},
+         ) from exc
+
+-    entry = resolved.entry
++    if isinstance(resolved, MaterializedVoice):
++        source_voice = resolved.source
++        entry = source_voice.entry
++        source_sha256 = source_voice.sha256
++        resolved_sha256 = resolved.sha256
++        renderer_path = Path(resolved.path)
++    else:
++        entry = resolved.entry
++        source_sha256 = resolved.sha256
++        resolved_sha256 = resolved.sha256
++        renderer_path = Path(resolved.path)
+     return ResolvedManagedVoice(
+         resolver=resolver,
+         ref=str(entry.ref),
+-        path=Path(resolved.path),
+-        sha256=entry.sha256,
++        path=renderer_path,
++        source_sha256=source_sha256,
++        resolved_sha256=resolved_sha256,
++        source_format=entry.format,
+         source_revision=entry.source_revision,
+         source_repository=entry.source_repository,
+         source_path=entry.source_path,
+diff --git a/voicerender/profile_roles.py b/voicerender/profile_roles.py
+index 62c1161..978e633 100644
+--- a/voicerender/profile_roles.py
++++ b/voicerender/profile_roles.py
+@@ -31,6 +31,7 @@ def set_profile_role(
+     voice: str | None = None,
+     speaker: str | int | None = None,
+     voice_source: Mapping[str, Any] | None = None,
++    transcript: str | None = None,
+     options: Mapping[str, Any] | None = None,
+     offline: bool = False,
+     refresh: bool = False,
+@@ -47,6 +48,7 @@ def set_profile_role(
+         voice=voice,
+         speaker=speaker,
+         voice_source=voice_source,
++        transcript=transcript,
+         options=options,
+         offline=offline,
+         refresh=refresh,
+diff --git a/voicerender/renderprofile.py b/voicerender/renderprofile.py
+index 0799568..d6b7ce7 100644
+--- a/voicerender/renderprofile.py
++++ b/voicerender/renderprofile.py
+@@ -18,11 +18,22 @@ from renderplan import (
+ )
+
+ from .engines.base import EngineSelection, RenderProfileFragment
++from .engines.metadata import language_base
+ from .engines.profiles import validate_voice_source_binding
+-from .engines.registry import get_adapter, normalize_engine_id, resolve_voice
++from .engines.registry import (
++    discover_targets,
++    get_adapter,
++    normalize_engine_id,
++    resolve_voice,
++)
+ from .engines.selection import EngineRequest
+-from .errors import EngineError, ProfileError
+-from .voice_sources import normalize_voice_source
++from .errors import EngineError, EngineSelectionError, ProfileError
++from .voice_sources import (
++    VoiceSource,
++    managed_reference_context,
++    normalize_voice_source,
++    validate_voice_source,
++)
+
+ _DEFAULT_PAUSES = PausePolicy(
+     mode="manual",
+@@ -39,6 +50,7 @@ def create_render_profile(
+     voice: str | None = None,
+     speaker: str | int | None = None,
+     voice_source: Mapping[str, Any] | None = None,
++    transcript: str | None = None,
+     options: Mapping[str, Any] | None = None,
+     offline: bool = False,
+     refresh: bool = False,
+@@ -49,21 +61,198 @@ def create_render_profile(
+     if not language.strip():
+         raise ProfileError("Profile language must not be empty")
+     profile_options = dict(options or {})
+-    if voice_source is not None:
++    selected_voice_source = voice_source
++    if selected_voice_source is None:
++        selected_voice_source = profile_options.pop("voice_source", None)
++    elif "voice_source" in profile_options:
++        raise ProfileError("voice_source was provided both directly and in options")
++
++    normalized_source: VoiceSource | None = None
++    if selected_voice_source is not None:
+         if voice is not None or speaker is not None:
+             raise ProfileError("voice/speaker and voice_source cannot both be set")
+-        if "voice_source" in profile_options:
+-            raise ProfileError("voice_source was provided both directly and in options")
+         try:
+-            profile_options["voice_source"] = normalize_voice_source(
+-                voice_source
+-            ).as_mapping()
++            normalized_source = normalize_voice_source(selected_voice_source)
+         except (EngineError, ValueError) as exc:
+             raise ProfileError(str(exc)) from exc
+-    elif "voice_source" in profile_options and (
+-        voice is not None or speaker is not None
+-    ):
+-        raise ProfileError("voice/speaker and voice_source cannot both be set")
++
++    if transcript is not None:
++        if not isinstance(transcript, str) or not transcript.strip():
++            raise ProfileError("Transcript must be a non-empty string")
++        if normalized_source is None or normalized_source.kind not in {
++            "reference",
++            "managed_reference",
++        }:
++            raise ProfileError(
++                "--transcript requires --reference-wav, --voicefolio-ref, or --voice-source"
++            )
++
++    if normalized_source is not None and normalized_source.kind in {
++        "reference",
++        "managed_reference",
++    }:
++        diagnostics = validate_voice_source(normalized_source, offline=offline)
++        errors = [item for item in diagnostics if item.severity == "error"]
++        if errors:
++            raise ProfileError(errors[0].message)
++
++        source_metadata = normalized_source.metadata
++        raw_source_transcript = source_metadata.get("transcript")
++        if (
++            not isinstance(raw_source_transcript, str)
++            or not raw_source_transcript.strip()
++        ):
++            raw_source_transcript = (
++                normalized_source.origin.get("reference_text")
++                if normalized_source.origin is not None
++                else None
++            )
++        source_transcript = (
++            raw_source_transcript.strip()
++            if isinstance(raw_source_transcript, str) and raw_source_transcript.strip()
++            else None
++        )
++        catalog_transcript: str | None = None
++        catalog_language: str | None = None
++        if normalized_source.kind == "managed_reference":
++            context = managed_reference_context(normalized_source.value)
++            catalog_transcript = context.transcript
++            catalog_language = context.language
++            if (
++                catalog_language
++                and language_base(catalog_language) not in {"", "und"}
++                and language_base(catalog_language) != language_base(language)
++            ):
++                raise ProfileError(
++                    f"VoiceFolio reference {normalized_source.value!r} language "
++                    f"{catalog_language!r} is incompatible with profile language {language!r}"
++                )
++            if (
++                catalog_transcript is not None
++                and transcript is not None
++                and catalog_transcript != transcript
++            ):
++                raise ProfileError(
++                    f"Reference transcript conflict for {normalized_source.value!r}: "
++                    "the explicit transcript differs from the transcript pinned in "
++                    "the VoiceFolio catalog."
++                )
++            if (
++                catalog_transcript is not None
++                and source_transcript is not None
++                and catalog_transcript != source_transcript
++            ):
++                raise ProfileError(
++                    f"Reference transcript conflict for {normalized_source.value!r}: "
++                    "stored source text differs from the transcript pinned in the "
++                    "VoiceFolio catalog."
++                )
++        if (
++            transcript is not None
++            and source_transcript is not None
++            and transcript != source_transcript
++        ):
++            ref = normalized_source.value
++            raise ProfileError(
++                f"Reference transcript conflict for {ref!r}: the explicit transcript "
++                "differs from the transcript attached to the voice source."
++            )
++        effective_transcript = transcript or catalog_transcript or source_transcript
++
++        adapter = get_adapter(engine)
++        capabilities = adapter.capabilities()
++        bind_reference_voice = getattr(adapter, "bind_reference_voice", None)
++        if callable(bind_reference_voice):
++            targets = discover_targets(
++                engine, language=language, offline=offline, refresh=refresh
++            )
++            target = next((item for item in targets if item.id == target_id), None)
++            if target is None:
++                raise ProfileError(
++                    f"Engine {engine!r} does not expose target {target_id!r}"
++                )
++            if (
++                not capabilities.supports_reference_voice
++                and "reference_voice" not in target.capabilities
++            ):
++                raise EngineSelectionError(
++                    f"Engine {adapter.id!r} target {target_id!r} does not support reference voices",
++                    engine=adapter.id,
++                    target_id=target_id,
++                    code="voice_clone.reference_unsupported",
++                )
++            try:
++                bound_options = bind_reference_voice(
++                    target=target,
++                    language=language,
++                    voice_source=normalized_source.as_mapping(),
++                    transcript=effective_transcript,
++                    options=profile_options,
++                )
++            except EngineError as exc:
++                if (
++                    getattr(exc, "code", None) == "pykokoro.reference_text_required"
++                    and normalized_source.kind == "managed_reference"
++                    and catalog_transcript is None
++                    and effective_transcript is None
++                ):
++                    raise EngineSelectionError(
++                        "AkinVox reference cloning requires the exact reference transcript.\n"
++                        f"VoiceFolio ref {normalized_source.value!r} has no transcript metadata.\n"
++                        "Pass --transcript TEXT.",
++                        engine=adapter.id,
++                        target_id=target_id,
++                        code="pykokoro.reference_text_required",
++                    ) from exc
++                raise
++            if not isinstance(bound_options, Mapping):
++                raise EngineSelectionError(
++                    f"Engine {adapter.id!r} returned invalid reference voice options",
++                    engine=adapter.id,
++                    target_id=target_id,
++                    code="voice_clone.invalid_binding",
++                )
++            profile_options = dict(bound_options)
++        elif not capabilities.supports_reference_voice:
++            targets = discover_targets(
++                engine, language=language, offline=offline, refresh=refresh
++            )
++            target = next((item for item in targets if item.id == target_id), None)
++            if target is None:
++                raise ProfileError(
++                    f"Engine {engine!r} does not expose target {target_id!r}"
++                )
++            if "reference_voice" not in target.capabilities:
++                raise EngineSelectionError(
++                    f"Engine {adapter.id!r} target {target_id!r} does not support reference voices",
++                    engine=adapter.id,
++                    target_id=target_id,
++                    code="voice_clone.reference_unsupported",
++                )
++        else:
++            accepted_options = set(capabilities.option_names) | set(
++                capabilities.options
++            )
++            transcript_option = next(
++                (
++                    name
++                    for name in ("reference_text", "transcript")
++                    if name in accepted_options
++                ),
++                None,
++            )
++            if effective_transcript is not None and transcript_option is not None:
++                existing = profile_options.get(transcript_option)
++                if existing is not None and existing != effective_transcript:
++                    raise ProfileError(
++                        f"Conflicting transcript supplied in options.{transcript_option} "
++                        "and reference binding"
++                    )
++                profile_options[transcript_option] = effective_transcript
++        profile_options["voice_source"] = normalized_source.as_mapping()
++    elif normalized_source is not None:
++        profile_options["voice_source"] = normalized_source.as_mapping()
++
+     request = EngineRequest(
+         engine=engine,
+         target_id=target_id,
+diff --git a/voicerender/voice_clone.py b/voicerender/voice_clone.py
+index e89b54d..0bc6b23 100644
+--- a/voicerender/voice_clone.py
++++ b/voicerender/voice_clone.py
+@@ -9,15 +9,13 @@ from typing import Any
+
+ from renderplan import RenderProfile
+
+-from .engines.registry import discover_targets, get_adapter
+-from .errors import EngineSelectionError, ProfileError
++from .errors import ProfileError
+ from .renderprofile import create_render_profile
+ from .voice_source_codec import load_voice_source
+ from .voice_sources import (
+     VoiceSource,
+     create_voice_source,
+     normalize_voice_source,
+-    validate_voice_source,
+ )
+
+
+@@ -109,78 +107,6 @@ def clone_voice_profile(
+         raise ProfileError(
+             "Generic voice clone requires a reference or managed-reference source"
+         )
+-    diagnostics = validate_voice_source(source, offline=request.offline)
+-    errors = [item for item in diagnostics if item.severity == "error"]
+-    if errors:
+-        raise ProfileError(errors[0].message)
+-
+-    targets = discover_targets(
+-        request.engine,
+-        language=request.language,
+-        offline=request.offline,
+-        refresh=request.refresh,
+-    )
+-    target = next((item for item in targets if item.id == request.target_id), None)
+-    if target is None:
+-        raise ProfileError(
+-            f"Engine {request.engine!r} does not expose target {request.target_id!r}"
+-        )
+-    adapter = get_adapter(request.engine)
+-    engine_supports_reference = adapter.capabilities().supports_reference_voice
+-    target_supports_reference = "reference_voice" in target.capabilities
+-    if not engine_supports_reference and not target_supports_reference:
+-        raise EngineSelectionError(
+-            f"Engine {adapter.id!r} target {request.target_id!r} does not support reference voices",
+-            engine=adapter.id,
+-            target_id=request.target_id,
+-            code="voice_clone.reference_unsupported",
+-        )
+-
+-    options = dict(request.options)
+-    if "voice_source" in options:
+-        raise ProfileError(
+-            "voice_source is selected by the clone request and cannot be overridden"
+-        )
+-    source_transcript = _source_transcript(source)
+-    transcript = (
+-        request.transcript if request.transcript is not None else source_transcript
+-    )
+-    capabilities = adapter.capabilities()
+-    bind_reference_voice = getattr(adapter, "bind_reference_voice", None)
+-    if callable(bind_reference_voice):
+-        bound_options = bind_reference_voice(
+-            target=target,
+-            language=request.language,
+-            voice_source=source.as_mapping(),
+-            transcript=transcript,
+-            options=options,
+-        )
+-        if not isinstance(bound_options, Mapping):
+-            raise EngineSelectionError(
+-                f"Engine {adapter.id!r} returned invalid reference voice options",
+-                engine=adapter.id,
+-                target_id=request.target_id,
+-                code="voice_clone.invalid_binding",
+-            )
+-        options = dict(bound_options)
+-    else:
+-        accepted_options = set(capabilities.option_names) | set(capabilities.options)
+-        transcript_option = next(
+-            (
+-                name
+-                for name in ("reference_text", "transcript")
+-                if name in accepted_options
+-            ),
+-            None,
+-        )
+-        if transcript is not None and transcript_option is not None:
+-            existing = options.get(transcript_option)
+-            if existing is not None and existing != transcript:
+-                raise ProfileError(
+-                    f"Conflicting transcript supplied in options.{transcript_option} and clone request"
+-                )
+-            options[transcript_option] = transcript
+-
+     return create_render_profile(
+         engine=request.engine,
+         target_id=request.target_id,
+@@ -188,7 +114,8 @@ def clone_voice_profile(
+         role=role,
+         speaker=request.speaker,
+         voice_source=source.as_mapping(),
+-        options=options,
++        transcript=request.transcript,
++        options=request.options,
+         offline=request.offline,
+         refresh=request.refresh,
+     )
+diff --git a/voicerender/voice_source_codec.py b/voicerender/voice_source_codec.py
+index 22209eb..05ba10f 100644
+--- a/voicerender/voice_source_codec.py
++++ b/voicerender/voice_source_codec.py
+@@ -30,6 +30,7 @@ _SOURCE_FIELD_ORDER = (
+     "model_revision",
+     "layout",
+     "resolver",
++    "source_format",
+     "source_revision",
+     "source_repository",
+     "source_path",
+diff --git a/voicerender/voice_sources.py b/voicerender/voice_sources.py
+index 10c4298..eec825a 100644
+--- a/voicerender/voice_sources.py
++++ b/voicerender/voice_sources.py
+@@ -27,6 +27,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ _QWEN_ORIGIN_SCHEMA = "voicerender.voice-origin.qwen3-design.v1"
+ _MANAGED_FIELDS = (
+     "resolver",
++    "source_format",
+     "source_revision",
+     "source_repository",
+     "source_path",
+@@ -64,6 +65,7 @@ class VoiceSource:
+     value: str
+     sha256: str | None = None
+     resolver: str | None = None
++    source_format: str | None = None
+     source_revision: str | None = None
+     source_repository: str | None = None
+     source_path: str | None = None
+@@ -82,6 +84,7 @@ class VoiceSource:
+         for name in (
+             "sha256",
+             "resolver",
++            "source_format",
+             "source_revision",
+             "source_repository",
+             "source_path",
+@@ -103,6 +106,15 @@ class VoiceSource:
+         return result
+
+
++@dataclass(frozen=True, slots=True)
++class ManagedReferenceContext:
++    """Portable source identity and the small catalog facts needed for binding."""
++
++    source: VoiceSource
++    language: str | None = None
++    transcript: str | None = None
++
++
+ @dataclass(frozen=True, slots=True)
+ class ResolvedReferenceAudio:
+     """A verified local reference WAV and its stable source provenance."""
+@@ -115,6 +127,8 @@ class ResolvedReferenceAudio:
+     source_revision: str | None = None
+     source_repository: str | None = None
+     source_path: str | None = None
++    source_sha256: str | None = None
++    source_format: str | None = None
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -531,7 +545,7 @@ def normalize_voice_source(
+                 details={"field": name, "ref": value},
+             )
+         fields[name] = item
+-    for name in ("license", "dataset", "variant"):
++    for name in ("source_format", "license", "dataset", "variant"):
+         item = source.get(name)
+         if item is not None and (not isinstance(item, str) or not item.strip()):
+             raise _voice_error(
+@@ -545,6 +559,7 @@ def normalize_voice_source(
+         value=value,
+         sha256=sha256,
+         resolver=resolver,
++        source_format=fields["source_format"],
+         source_revision=fields["source_revision"],
+         source_repository=fields["source_repository"],
+         source_path=fields["source_path"],
+@@ -659,6 +674,55 @@ def managed_reference_source(
+         ) from exc
+
+
++def managed_reference_context(
++    ref: str,
++    *,
++    catalog_paths: Iterable[str | Path] | str | Path | None = None,
++) -> ManagedReferenceContext:
++    """Load a managed source plus public catalog language/transcript metadata."""
++    if not isinstance(ref, str) or not ref.strip():
++        raise _voice_error(
++            "managed_voice.invalid_source",
++            "Voicefolio reference must be a non-empty string",
++            details={"resolver": "voicefolio"},
++        )
++    try:
++        catalog = voicefolio.load_catalog(
++            extra_paths=_catalog_path_tuple(catalog_paths)
++        )
++        entry = catalog.get(ref)
++        raw_source = voicefolio.managed_reference(ref, catalog=catalog)
++        if not isinstance(raw_source, Mapping):
++            raise _voice_error(
++                "managed_voice.invalid_source",
++                "Voicefolio returned a managed voice source that is not a table",
++                details={"resolver": "voicefolio", "ref": ref},
++            )
++    except (voicefolio.VoicefolioError, ValueError) as exc:
++        raise _voice_error(
++            "managed_voice.invalid_source",
++            f"Cannot inspect Voicefolio managed reference {ref!r}: {exc}",
++            details={"resolver": "voicefolio", "ref": ref},
++        ) from exc
++    source = normalize_voice_source(raw_source)
++    raw_language = getattr(entry, "language", None)
++    language = raw_language.strip() if isinstance(raw_language, str) else None
++    if not language:
++        language = None
++    raw_metadata = getattr(entry, "metadata", None)
++    raw_transcript = (
++        raw_metadata.get("transcript") if isinstance(raw_metadata, Mapping) else None
++    )
++    transcript = (
++        raw_transcript.strip()
++        if isinstance(raw_transcript, str) and raw_transcript.strip()
++        else None
++    )
++    return ManagedReferenceContext(
++        source=source, language=language, transcript=transcript
++    )
++
++
+ def create_voice_source(
+     *,
+     reference_wav: str | Path | None = None,
+@@ -789,7 +853,12 @@ def resolve_reference_audio(
+     )
+     if normalized.kind == "reference":
+         path, digest = _validate_local_reference(normalized)
+-        return ResolvedReferenceAudio(kind="reference", path=path, sha256=digest)
++        return ResolvedReferenceAudio(
++            kind="reference",
++            path=path,
++            sha256=digest,
++            source_sha256=digest,
++        )
+     if normalized.kind == "prepared":
+         raise _voice_error(
+             "voice_source.prepared_invalid",
+@@ -809,12 +878,14 @@ def resolve_reference_audio(
+     return ResolvedReferenceAudio(
+         kind="managed_reference",
+         path=resolved.path,
+-        sha256=resolved.sha256,
++        sha256=resolved.resolved_sha256,
+         resolver=resolved.resolver,
+         ref=resolved.ref,
+         source_revision=resolved.source_revision,
+         source_repository=resolved.source_repository,
+         source_path=resolved.source_path,
++        source_sha256=resolved.source_sha256,
++        source_format=resolved.source_format,
+     )
+
+
+@@ -957,6 +1028,7 @@ def _option_error(
+
+
+ __all__ = [
++    "ManagedReferenceContext",
+     "ResolvedPreparedVoice",
+     "ResolvedReferenceAudio",
+     "VoiceSource",
+@@ -964,6 +1036,7 @@ __all__ = [
+     "create_voice_source",
+     "local_prepared_voice_source",
+     "local_reference_source",
++    "managed_reference_context",
+     "managed_reference_source",
+     "normalize_voice_source",
+     "resolve_prepared_voice",

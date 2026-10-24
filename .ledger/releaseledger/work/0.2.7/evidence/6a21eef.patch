@@ -1,0 +1,20 @@
+ tests/test_kokoro_reference.py | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 4df3279..bdd0d41 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -9,7 +9,11 @@ from typing import Any
+
+ import numpy as np
+ import pytest
+-import tomllib
++
++try:
++    import tomllib
++except ModuleNotFoundError:  # Python 3.10
++    import tomli as tomllib  # type: ignore[no-redef]
+
+ from voicerender.engines.base import (
+     PCM_RANGE_POLICY,

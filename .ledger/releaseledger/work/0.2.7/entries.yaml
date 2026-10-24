@@ -1,0 +1,162 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.2.7
+git_base_ref: cd446d8b38ecc58204c56b096e031db26f0c6a9d
+git_base_sha: cd446d8b38ecc58204c56b096e031db26f0c6a9d
+git_head_ref: 1132f5f0a56d293cf82f874f08b88b9c45601298
+git_head_sha: 1132f5f0a56d293cf82f874f08b88b9c45601298
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added read-only bundle role discovery and cast-readiness checks for explicit and default speech roles
+    status: accepted
+    source_refs:
+      - git:c384d1e4ba30d746ed523f5f3f420d0cfaa75cdc
+    paths:
+      - README.md
+      - docs/changelog.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_inspect.py
+      - tests/test_bundle_roles.py
+      - voicerender/bundle_inspect.py
+      - voicerender/bundle_roles.py
+      - voicerender/cli.py
+      - voicerender/role_bindings.py
+      - voicerender/variants.py
+    sources:
+      - git:c384d1e4ba30d746ed523f5f3f420d0cfaa75cdc
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added portable VoiceFolio-managed reference bindings with transcript-aware Kokoro and AkinVox profile workflows
+    status: accepted
+    source_refs:
+      - git:7f6f0534d492e47abc35133f01170d372a3f4d4b
+      - git:d124fffbc18a26977415052c4a50f7454cdda539
+      - git:636402c0fcc54584da7fff01c1e43f80569b4c5d
+      - git:e5e6839beb3bef98f796ff663fea8b1f891c2530
+      - git:1ba5920454bc47fb39a8103b399256a3caf31db4
+    paths:
+      - README.md
+      - docs/renderprofile.md
+      - examples/README.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_engine_options.py
+      - tests/test_kokoro_reference.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_profile_roles.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_renderprofile.py
+      - tests/test_voice_clone.py
+      - tests/test_voice_source_codec.py
+      - tests/test_voice_sources.py
+      - voicerender/cli.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/managed_voices.py
+      - voicerender/profile_roles.py
+      - voicerender/renderprofile.py
+      - voicerender/voice_clone.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    sources:
+      - git:7f6f0534d492e47abc35133f01170d372a3f4d4b
+      - git:d124fffbc18a26977415052c4a50f7454cdda539
+      - git:636402c0fcc54584da7fff01c1e43f80569b4c5d
+      - git:e5e6839beb3bef98f796ff663fea8b1f891c2530
+      - git:1ba5920454bc47fb39a8103b399256a3caf31db4
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added bounded structured diagnostics for render-time failures across direct, document, book, and bundle results
+    status: accepted
+    source_refs:
+      - git:9fa235e094ecf7f9fff064a7ef87d6e9ca40d092
+      - git:4b52e7148b630c2ca31efcae25776f408319ba49
+    paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_error_diagnostics.py
+      - tests/test_kokoro_reference.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/test_variants.py
+      - voicerender/book.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/engines/kokoro.py
+      - voicerender/error_diagnostics.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/renderplan_render.py
+      - voicerender/variants.py
+    sources:
+      - git:9fa235e094ecf7f9fff064a7ef87d6e9ca40d092
+      - git:4b52e7148b630c2ca31efcae25776f408319ba49
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added bounded engine-session residency and crash-safe cross-platform render-lock recovery with resumable partial outputs
+    status: accepted
+    source_refs:
+      - git:a8df40403864a1f5b42f14dc850e8a6f5cca2e9c
+      - git:8f7b701fffe3d5faf6c45911f7e87e566c6cd479
+      - git:009bc2f036b00d64b1720b5d58ebfe2ea35397dc
+      - git:ed53140775d00d439a5f2a303ddf20a6aaa8d7cc
+      - git:b089c79c13aebf0f508c7aa7dc75a720c5085f54
+      - git:f74ce0082a24f0ebb8d6b45ec6ecb18c6efc4725
+      - git:88a2bdebbd0d119f4679a21465b7e6ac7e39e205
+      - git:1132f5f0a56d293cf82f874f08b88b9c45601298
+    paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - tests/test_render_lock.py
+      - tests/test_renderplan_render.py
+      - tests/test_session_pool.py
+      - voicerender/book.py
+      - voicerender/bundle.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/preflight.py
+      - voicerender/render.py
+      - voicerender/render_lock.py
+      - voicerender/renderplan_render.py
+      - voicerender/session_pool.py
+      - voicerender/storage.py
+    sources:
+      - git:a8df40403864a1f5b42f14dc850e8a6f5cca2e9c
+      - git:8f7b701fffe3d5faf6c45911f7e87e566c6cd479
+      - git:009bc2f036b00d64b1720b5d58ebfe2ea35397dc
+      - git:ed53140775d00d439a5f2a303ddf20a6aaa8d7cc
+      - git:b089c79c13aebf0f508c7aa7dc75a720c5085f54
+      - git:f74ce0082a24f0ebb8d6b45ec6ecb18c6efc4725
+      - git:88a2bdebbd0d119f4679a21465b7e6ac7e39e205
+      - git:1132f5f0a56d293cf82f874f08b88b9c45601298
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

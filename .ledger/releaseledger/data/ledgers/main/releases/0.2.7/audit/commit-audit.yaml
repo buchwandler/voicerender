@@ -1,0 +1,579 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: 0.2.7
+git_base_ref: v0.2.6
+git_base_sha: cd446d8b38ecc58204c56b096e031db26f0c6a9d
+git_head_ref: HEAD
+git_head_sha: 1132f5f0a56d293cf82f874f08b88b9c45601298
+git_range: cd446d8b38ecc58204c56b096e031db26f0c6a9d..1132f5f0a56d293cf82f874f08b88b9c45601298
+commit_count: 18
+rows:
+  - sha: c384d1e4ba30d746ed523f5f3f420d0cfaa75cdc
+    source_ref: git:c384d1e4ba30d746ed523f5f3f420d0cfaa75cdc
+    short_sha: c384d1e
+    changed_paths:
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0009.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_inspect.py
+      - tests/test_bundle_roles.py
+      - voicerender/__init__.py
+      - voicerender/bundle_inspect.py
+      - voicerender/bundle_roles.py
+      - voicerender/cli.py
+      - voicerender/role_bindings.py
+      - voicerender/variants.py
+    stats:
+      files_changed: 15
+      insertions: 2677
+      deletions: 35
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/changelog.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_inspect.py
+      - tests/test_bundle_roles.py
+      - voicerender/__init__.py
+      - voicerender/bundle_inspect.py
+      - voicerender/bundle_roles.py
+      - voicerender/cli.py
+      - voicerender/role_bindings.py
+      - voicerender/variants.py
+    observed_behavior:
+      Added read-only bundle role inventory inspection, cast coverage,
+      voice distinctness checks, and bundle inspect composition
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: role inspection and readiness check"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: d124fffbc18a26977415052c4a50f7454cdda539
+    source_ref: git:d124fffbc18a26977415052c4a50f7454cdda539
+    short_sha: d124fff
+    changed_paths:
+      - voicerender/role_bindings.py
+      - voicerender/voice_sources.py
+    stats:
+      files_changed: 2
+      insertions: 22
+      deletions: 7
+    inspected: true
+    inspected_paths:
+      - voicerender/role_bindings.py
+      - voicerender/voice_sources.py
+    observed_behavior:
+      Hardened managed voice source normalization and canonical role
+      identity handling for portable profile bindings
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 636402c0fcc54584da7fff01c1e43f80569b4c5d
+    source_ref: git:636402c0fcc54584da7fff01c1e43f80569b4c5d
+    short_sha: 636402c
+    changed_paths:
+      - voicerender/voice_sources.py
+    stats:
+      files_changed: 1
+      insertions: 5
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - voicerender/voice_sources.py
+    observed_behavior:
+      Corrected managed voice source validation for the VoiceFolio-backed
+      profile workflow
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 7f6f0534d492e47abc35133f01170d372a3f4d4b
+    source_ref: git:7f6f0534d492e47abc35133f01170d372a3f4d4b
+    short_sha: 7f6f053
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - examples/README.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_profile_roles.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_renderprofile.py
+      - tests/test_voice_clone.py
+      - tests/test_voice_source_codec.py
+      - tests/test_voice_sources.py
+      - voicerender/cli.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/managed_voices.py
+      - voicerender/profile_roles.py
+      - voicerender/renderprofile.py
+      - voicerender/voice_clone.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    stats:
+      files_changed: 22
+      insertions: 954
+      deletions: 239
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/renderprofile.md
+      - examples/README.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_managed_voices.py
+      - tests/test_pocketsynth_managed.py
+      - tests/test_profile_roles.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_renderprofile.py
+      - tests/test_voice_clone.py
+      - tests/test_voice_source_codec.py
+      - tests/test_voice_sources.py
+      - voicerender/cli.py
+      - voicerender/engines/pocketsynth.py
+      - voicerender/managed_voices.py
+      - voicerender/profile_roles.py
+      - voicerender/renderprofile.py
+      - voicerender/voice_clone.py
+      - voicerender/voice_source_codec.py
+      - voicerender/voice_sources.py
+    observed_behavior:
+      Added portable VoiceFolio-managed reference sources, multi-role
+      profile binding, transcript-aware Kokoro/AkinVox setup, and source pin validation
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: voicefolio support"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 9fa235e094ecf7f9fff064a7ef87d6e9ca40d092
+    source_ref: git:9fa235e094ecf7f9fff064a7ef87d6e9ca40d092
+    short_sha: 9fa235e
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_error_diagnostics.py
+      - tests/test_kokoro_reference.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/test_variants.py
+      - voicerender/book.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/engines/kokoro.py
+      - voicerender/error_diagnostics.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/renderplan_render.py
+      - voicerender/variants.py
+    stats:
+      files_changed: 20
+      insertions: 1227
+      deletions: 22
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_error_diagnostics.py
+      - tests/test_kokoro_reference.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - tests/test_variants.py
+      - voicerender/book.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/engines/kokoro.py
+      - voicerender/error_diagnostics.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/renderplan_render.py
+      - voicerender/variants.py
+    observed_behavior:
+      Added bounded structured render-time error diagnostics and propagated
+      compact failure summaries through document, book, bundle, API, and CLI results
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: better diagnostics"
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: e5e6839beb3bef98f796ff663fea8b1f891c2530
+    source_ref: git:e5e6839beb3bef98f796ff663fea8b1f891c2530
+    short_sha: e5e6839
+    changed_paths:
+      - pyproject.toml
+      - tests/test_engine_options.py
+      - tests/test_kokoro_reference.py
+      - voicerender/engines/kokoro.py
+    stats:
+      files_changed: 4
+      insertions: 181
+      deletions: 9
+    inspected: true
+    inspected_paths:
+      - pyproject.toml
+      - tests/test_engine_options.py
+      - tests/test_kokoro_reference.py
+      - voicerender/engines/kokoro.py
+    observed_behavior:
+      Updated Kokoro compatibility requirements and exposed deterministic
+      seed and backend context for reference-voice diagnostics
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: voice cloning with kokoro"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: a8df40403864a1f5b42f14dc850e8a6f5cca2e9c
+    source_ref: git:a8df40403864a1f5b42f14dc850e8a6f5cca2e9c
+    short_sha: a8df404
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - tests/test_render_lock.py
+      - tests/test_renderplan_render.py
+      - tests/test_session_pool.py
+      - voicerender/book.py
+      - voicerender/bundle.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/preflight.py
+      - voicerender/render.py
+      - voicerender/render_lock.py
+      - voicerender/renderplan_render.py
+      - voicerender/session_pool.py
+    stats:
+      files_changed: 22
+      insertions: 1515
+      deletions: 139
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - tests/test_bundle_batch_render.py
+      - tests/test_bundle_render.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_render_book.py
+      - tests/test_render_lock.py
+      - tests/test_renderplan_render.py
+      - tests/test_session_pool.py
+      - voicerender/book.py
+      - voicerender/bundle.py
+      - voicerender/bundle_batch.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/errors.py
+      - voicerender/events.py
+      - voicerender/preflight.py
+      - voicerender/render.py
+      - voicerender/render_lock.py
+      - voicerender/renderplan_render.py
+      - voicerender/session_pool.py
+    observed_behavior:
+      Added bounded engine-session residency controls and safe recovery
+      of dead render locks while preserving verified partial artifacts for resumption
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: bounded session and crash recovery"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 1ba5920454bc47fb39a8103b399256a3caf31db4
+    source_ref: git:1ba5920454bc47fb39a8103b399256a3caf31db4
+    short_sha: 1ba5920
+    changed_paths:
+      - .github/workflows/tests.yml
+      - pyproject.toml
+      - voicerender/book.py
+      - voicerender/bundle_batch.py
+      - voicerender/document.py
+      - voicerender/managed_voices.py
+      - voicerender/render_lock.py
+      - voicerender/session_pool.py
+      - voicerender/voice_sources.py
+    stats:
+      files_changed: 9
+      insertions: 61
+      deletions: 26
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - pyproject.toml
+      - voicerender/book.py
+      - voicerender/bundle_batch.py
+      - voicerender/document.py
+      - voicerender/managed_voices.py
+      - voicerender/render_lock.py
+      - voicerender/session_pool.py
+      - voicerender/voice_sources.py
+    observed_behavior:
+      Kept managed voice resolution and render result handling compatible
+      with the pinned dependency interfaces while preserving bounded-session and lock
+      behavior
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "chore: pytest"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 6a21eef92cd892c4605d462126fa9e5552256b68
+    source_ref: git:6a21eef92cd892c4605d462126fa9e5552256b68
+    short_sha: 6a21eef
+    changed_paths:
+      - tests/test_kokoro_reference.py
+    stats:
+      files_changed: 1
+      insertions: 5
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - tests/test_kokoro_reference.py
+    observed_behavior: Adjusted CI test coverage without changing shipped runtime behavior
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: ci"
+    notes: test-only change
+  - sha: 8f7b701fffe3d5faf6c45911f7e87e566c6cd479
+    source_ref: git:8f7b701fffe3d5faf6c45911f7e87e566c6cd479
+    short_sha: 8f7b701
+    changed_paths:
+      - tests/test_render_lock.py
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 2
+      insertions: 33
+      deletions: 5
+    inspected: true
+    inspected_paths:
+      - tests/test_render_lock.py
+      - voicerender/render_lock.py
+    observed_behavior:
+      Made atomic lock installation portable when the platform lacks
+      the POSIX renameat2 symbol
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 4b52e7148b630c2ca31efcae25776f408319ba49
+    source_ref: git:4b52e7148b630c2ca31efcae25776f408319ba49
+    short_sha: 4b52e71
+    changed_paths:
+      - voicerender/bundle_batch.py
+      - voicerender/document.py
+      - voicerender/error_diagnostics.py
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 4
+      insertions: 50
+      deletions: 13
+    inspected: true
+    inspected_paths:
+      - voicerender/bundle_batch.py
+      - voicerender/document.py
+      - voicerender/error_diagnostics.py
+      - voicerender/render_lock.py
+    observed_behavior:
+      Corrected portable diagnostic paths, Windows coordination, and
+      failure-report serialization
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0003
+    notes: ""
+  - sha: 009bc2f036b00d64b1720b5d58ebfe2ea35397dc
+    source_ref: git:009bc2f036b00d64b1720b5d58ebfe2ea35397dc
+    short_sha: 009bc2f
+    changed_paths:
+      - tests/test_render_lock.py
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 2
+      insertions: 19
+      deletions: 13
+    inspected: true
+    inspected_paths:
+      - tests/test_render_lock.py
+      - voicerender/render_lock.py
+    observed_behavior:
+      Added Windows-safe replacement handling for existing render-lock
+      destinations
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: ed53140775d00d439a5f2a303ddf20a6aaa8d7cc
+    source_ref: git:ed53140775d00d439a5f2a303ddf20a6aaa8d7cc
+    short_sha: ed53140
+    changed_paths:
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 1
+      insertions: 22
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - voicerender/renderplan_render.py
+    observed_behavior:
+      Made verified cache artifact replacement tolerate short-lived
+      Windows sharing violations
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: b089c79c13aebf0f508c7aa7dc75a720c5085f54
+    source_ref: git:b089c79c13aebf0f508c7aa7dc75a720c5085f54
+    short_sha: b089c79
+    changed_paths:
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+    stats:
+      files_changed: 2
+      insertions: 33
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+    observed_behavior:
+      Added retry-safe Windows persistence for manifests, JSON artifacts,
+      and WAV outputs
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: windows path"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 01ebf189691ce91ee9a5f9807dd3fa2b8feb15db
+    source_ref: git:01ebf189691ce91ee9a5f9807dd3fa2b8feb15db
+    short_sha: 01ebf18
+    changed_paths:
+      - tests/test_render_lock.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 4
+      insertions: 13
+      deletions: 4
+    inspected: true
+    inspected_paths:
+      - tests/test_render_lock.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/render_lock.py
+    observed_behavior:
+      Applied formatting and presentation-only cleanup around the cross-platform
+      rendering changes
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: pre-commit"
+    notes: formatting-only change
+  - sha: f74ce0082a24f0ebb8d6b45ec6ecb18c6efc4725
+    source_ref: git:f74ce0082a24f0ebb8d6b45ec6ecb18c6efc4725
+    short_sha: f74ce00
+    changed_paths:
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 1
+      insertions: 25
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - voicerender/render_lock.py
+    observed_behavior:
+      Made temporary render-lock cleanup tolerate Windows sharing violations
+      after successful acquisition
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: lock"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 88a2bdebbd0d119f4679a21465b7e6ac7e39e205
+    source_ref: git:88a2bdebbd0d119f4679a21465b7e6ac7e39e205
+    short_sha: 88a2bde
+    changed_paths:
+      - .github/workflows/tests.yml
+      - tests/test_render_lock.py
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 3
+      insertions: 496
+      deletions: 29
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - tests/test_render_lock.py
+      - voicerender/render_lock.py
+    observed_behavior:
+      Added Windows process liveness and identity probing so stale-lock
+      recovery remains fail-closed for unknown owners
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: fix windows lock"
+    target_entry_id: entry-0004
+    notes: ""
+  - sha: 1132f5f0a56d293cf82f874f08b88b9c45601298
+    source_ref: git:1132f5f0a56d293cf82f874f08b88b9c45601298
+    short_sha: 1132f5f
+    changed_paths:
+      - voicerender/render_lock.py
+    stats:
+      files_changed: 1
+      insertions: 5
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - voicerender/render_lock.py
+    observed_behavior: Made lock permission setup portable on platforms without os.fchmod
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: os"
+    target_entry_id: entry-0004
+    notes: ""

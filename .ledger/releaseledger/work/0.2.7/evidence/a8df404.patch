@@ -1,0 +1,2456 @@
+ README.md                         |  16 ++
+ docs/index.md                     |   6 +
+ tests/test_bundle_batch_render.py |   5 +
+ tests/test_bundle_render.py       |   3 +
+ tests/test_cli.py                 |  60 ++++++-
+ tests/test_document_contract.py   |  95 +++++++++-
+ tests/test_render_book.py         |  54 +++++-
+ tests/test_render_lock.py         | 184 +++++++++++++++++++
+ tests/test_renderplan_render.py   | 189 ++++++++++++++++++-
+ tests/test_session_pool.py        | 112 ++++++++++++
+ voicerender/book.py               |  43 ++++-
+ voicerender/bundle.py             |   5 +
+ voicerender/bundle_batch.py       |   4 +
+ voicerender/cli.py                |  17 ++
+ voicerender/document.py           |  38 +++-
+ voicerender/errors.py             |  12 ++
+ voicerender/events.py             |   2 +
+ voicerender/preflight.py          |  43 ++---
+ voicerender/render.py             |  21 +--
+ voicerender/render_lock.py        | 369 ++++++++++++++++++++++++++++++++++++++
+ voicerender/renderplan_render.py  | 154 ++++++++--------
+ voicerender/session_pool.py       | 222 +++++++++++++++++++++++
+ 22 files changed, 1515 insertions(+), 139 deletions(-)
+
+diff --git a/README.md b/README.md
+index c6c35aa..400cee0 100644
+--- a/README.md
++++ b/README.md
+@@ -398,6 +398,22 @@ voicerender bundle render story.ssmd-bundle \
+
+ For either kind, VoiceRender stores output below `<bundle>/voicerender/<variant>/`. The existing internal book and document layouts remain kind-specific, including their reports and manifest locations. Generic `voicerender preflight` and `voicerender render` remain available for individual RenderPlans.
+
++### Bounded sessions and crash recovery
++
++Rendering and preflight keep engine-session residency bounded. The default `max_open_sessions=1` closes an evicted session before opening another, reducing peak memory even when a plan uses many voices. Because VoiceRender preserves RenderPlan request order, returning to an evicted voice may reopen its session and add startup time. A larger limit can reduce reopen overhead for repeated bindings at the cost of keeping more engine/model memory resident.
++
++Use the positive `--max-open-sessions N` option with direct or bundle rendering; it defaults to `1` and a batch uses the same limit for each selected variant. The Python `render_renderplan()`, `preflight_render_plan()`, and high-level render APIs accept the corresponding `max_open_sessions=N` keyword.
++
++```bash
++voicerender render chapter.renderplan.toml --preflight chapter.preflight.toml \
++  --out-dir renders/narration --max-open-sessions 2
++voicerender bundle render story.ssmd-bundle --max-open-sessions 2
++```
++
++If a renderer dies abruptly, its process lock is recovered automatically only when VoiceRender can prove that the same-host owner is dead (including supported legacy PID-only locks). Live, foreign-host, unknown, or malformed locks fail closed. After safe recovery, verified partial-manifest WAVs and reusable cache entries are retained so rendering continues with missing work; `--force` and output-directory deletion are not required.
++
++`--reset-stale` is independent: it resets VoiceRender output belonging to a different RenderPlan identity. It is not a process-lock recovery option and never authorizes stealing a live lock.
++
+ ## Python API
+
+ ```python
+diff --git a/docs/index.md b/docs/index.md
+index 891d183..5d93707 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -55,6 +55,12 @@ An `ok` preflight approves the exact plan under capability observed at preflight
+
+ The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
+
++## Bounded sessions and crash recovery
++
++Render and preflight APIs default to `max_open_sessions=1`, closing an evicted engine session before opening another to bound memory. A larger positive limit may reduce session-reopen overhead for repeated voice bindings, but keeps more model memory resident. RenderPlan request order is unchanged. The direct `render` and `bundle render` commands accept `--max-open-sessions N` (default `1`); batch rendering applies one limit to each selected variant. Python rendering and preflight APIs accept `max_open_sessions=N`.
++
++An interrupted renderer's lock is reclaimed automatically only when the same-host owner is proven dead; live, foreign-host, unknown, and malformed locks remain fail-closed. Recovery verifies and reuses committed partial-manifest WAVs and cache entries, then continues missing work. `--reset-stale` is separate: it resets output for a different RenderPlan identity and does not break or override process locks.
++
+ ## Engine integration
+
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+diff --git a/tests/test_bundle_batch_render.py b/tests/test_bundle_batch_render.py
+index b9a1118..da5cd37 100644
+--- a/tests/test_bundle_batch_render.py
++++ b/tests/test_bundle_batch_render.py
+@@ -219,6 +219,7 @@ def test_force_schedules_complete_valid_variants_and_forwards_all_options(
+         "emphasis_policy": "defer-to-compose",
+         "fail_fast": True,
+         "on_progress": progress,
++        "max_open_sessions": 4,
+     }
+
+     def fake_render(bundle: Path, *, variant: str, **kwargs: Any) -> BundleRenderResult:
+@@ -244,6 +245,7 @@ def test_force_schedules_complete_valid_variants_and_forwards_all_options(
+             "emphasis_policy": "defer-to-compose",
+             "fail_fast": True,
+             "on_progress": progress,
++            "max_open_sessions": 4,
+         },
+     )
+     assert discovery_calls == [
+@@ -518,6 +520,8 @@ def test_cli_batch_json_routing_and_option_forwarding(
+             "output",
+             "--cache-dir",
+             "cache",
++            "--max-open-sessions",
++            "4",
+             "--force",
+             "--reset-stale",
+             "--emphasis-policy",
+@@ -545,6 +549,7 @@ def test_cli_batch_json_routing_and_option_forwarding(
+             "emphasis_policy": "defer-to-compose",
+             "fail_fast": True,
+             "on_progress": None,
++            "max_open_sessions": 4,
+         },
+     }
+
+diff --git a/tests/test_bundle_render.py b/tests/test_bundle_render.py
+index be1a2a8..b098859 100644
+--- a/tests/test_bundle_render.py
++++ b/tests/test_bundle_render.py
+@@ -60,6 +60,7 @@ def test_render_bundle_dispatches_book_options_and_wraps_result(
+         emphasis_policy="defer-to-compose",
+         fail_fast=True,
+         on_progress=progress,
++        max_open_sessions=3,
+     )
+
+     assert result.kind == "book"
+@@ -85,6 +86,7 @@ def test_render_bundle_dispatches_book_options_and_wraps_result(
+             "fail_fast": True,
+             "emphasis_policy": bundle_module.EmphasisPolicy.DEFER_TO_COMPOSE,
+             "on_event": progress,
++            "max_open_sessions": 3,
+         },
+     }
+
+@@ -133,6 +135,7 @@ def test_render_bundle_dispatches_document_and_ignores_fail_fast(
+             "reset_stale_output": True,
+             "emphasis_policy": bundle_module.EmphasisPolicy.REJECT,
+             "on_event": progress,
++            "max_open_sessions": 1,
+         },
+     }
+
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 1c764f2..291e87a 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -47,11 +47,15 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
+     assert "--preflight" in render_help
+     assert "--out-dir" in render_help
+     assert "--voice" not in render_help
++    assert "--max-open-sessions" in render_help
++    assert "default: 1" in render_help
+     assert "--take" not in render_help
+     assert "--profile" not in render_help
+     assert "--variant" in bundle_help
+     assert "--chapters" in bundle_help
+     assert "--speech" in bundle_help
++    assert "--max-open-sessions" in bundle_help
++    assert "default: 1" in bundle_help
+     assert "utterplan" not in bundle_help
+
+     assert "--renderplan-root" in variants_help
+@@ -788,6 +792,50 @@ def test_cli_progress_auto_force_disable_and_json_modes() -> None:
+     )
+
+
++def test_max_open_sessions_cli_defaults_and_overrides() -> None:
++    from voicerender.cli import build_parser
++
++    parser = build_parser()
++    direct = parser.parse_args(
++        [
++            "render",
++            "plan.toml",
++            "--preflight",
++            "preflight.toml",
++            "--out-dir",
++            "rendered",
++        ]
++    )
++    bundle = parser.parse_args(["bundle", "render", "story.ssmd-bundle"])
++    configured = parser.parse_args(
++        ["bundle", "render", "story.ssmd-bundle", "--max-open-sessions", "4"]
++    )
++
++    assert direct.max_open_sessions == bundle.max_open_sessions == 1
++    assert configured.max_open_sessions == 4
++
++
++@pytest.mark.parametrize(
++    "args",
++    (
++        ["render", "plan.toml", "--preflight", "preflight.toml", "--out-dir", "out"],
++        ["bundle", "render", "story.ssmd-bundle", "--variant", "narration"],
++    ),
++)
++def test_nonpositive_session_limit_is_json_error(
++    args: list[str], capsys: pytest.CaptureFixture[str]
++) -> None:
++    import json
++
++    from voicerender.cli import main
++
++    assert main([*args, "--max-open-sessions", "0", "--json"]) in {1, 2}
++    captured = capsys.readouterr()
++    payload = json.loads(captured.out)
++    assert "max_open_sessions" in payload.get("error", "")
++    assert captured.err == ""
++
++
+ def test_preflight_cli_forced_progress_stays_on_stderr_with_json(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+ ) -> None:
+@@ -939,6 +987,7 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+
+     stderr = NonTtyStream()
+     monkeypatch.setattr(cli.sys, "stderr", stderr)
++    captured_kwargs: dict[str, object] = {}
+
+     def event_callback(on_event, scope: RenderScope) -> None:
+         assert on_event is not None
+@@ -958,7 +1007,8 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+
+     if command == "render":
+
+-        def fake_render(*_args, on_event, **_kwargs):
++        def fake_render(*_args, on_event, **kwargs):
++            captured_kwargs.update(kwargs)
+             event_callback(on_event, "render")
+             return SimpleNamespace(
+                 failed=False,
+@@ -977,11 +1027,14 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+             "--out-dir",
+             str(tmp_path / "rendered"),
+             "--json",
++            "--max-open-sessions",
++            "3",
+             "--progress",
+         ]
+     else:
+
+-        def fake_render_bundle(*_args, on_progress, **_kwargs):
++        def fake_render_bundle(*_args, on_progress, **kwargs):
++            captured_kwargs.update(kwargs)
+             event_callback(on_progress, "book")
+             return SimpleNamespace(to_dict=lambda: {"items": []}, exit_code=0)
+
+@@ -993,12 +1046,15 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
+             "--variant",
+             "narration",
+             "--json",
++            "--max-open-sessions",
++            "3",
+             "--progress",
+         ]
+
+     assert cli.main(args) == 0
+     stdout = capsys.readouterr().out
+     assert isinstance(__import__("json").loads(stdout), dict)
++    assert captured_kwargs["max_open_sessions"] == 3
+     assert "progress 50.0%" in stderr.getvalue()
+     assert "\\r" not in stderr.getvalue() and "\\x1b" not in stderr.getvalue()
+
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index ad22e93..6de11e6 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -185,6 +185,90 @@ def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> N
+     assert caught.value.code == "variant.not_found"
+
+
++def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    from types import SimpleNamespace
++
++    from renderplan import Producer, RenderManifest, SpeechArtifact, save_manifest
++
++    import voicerender.document as document_module
++    from voicerender.storage import atomic_wav
++
++    root = _workspace(tmp_path / "story.ssmd-bundle")
++    profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    profile_obj = codec.load_profile(profile)
++    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
++        "sha256:"
++    )[:12]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / "renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
++    )
++    request = document_module._resolve_document_request(root, variant=variant)
++    request.output_dir.mkdir(parents=True)
++    item = request.plan.speech[0]
++    info = atomic_wav(request.output_dir / item.wav, [0.0, 0.1, -0.1], 24000)
++    artifact = SpeechArtifact(
++        segment_number=item.number,
++        segment_id=item.segment_id or item.computed_id(),
++        wav=item.wav,
++        sha256=f"sha256:{info['sha256']}",
++        frames=int(info["frames"]),
++        sample_rate=int(info["sample_rate"]),
++        channels=int(info["channels"]),
++    )
++    manifest = RenderManifest(
++        render_plan_id=request.plan.plan_id or request.plan.computed_id(),
++        speech=(artifact,),
++        complete=False,
++        producer=Producer(name="test", version="1"),
++    ).with_identity()
++    manifest_path = request.output_dir / "render-manifest.toml"
++    save_manifest(manifest, manifest_path)
++
++    monkeypatch.setattr(
++        document_module,
++        "_get_preflight",
++        lambda *_args, **_kwargs: SimpleNamespace(status="reject"),
++    )
++    monkeypatch.setattr(
++        document_module,
++        "render_renderplan",
++        lambda *_args, **_kwargs: pytest.fail(
++            "render started after rejected preflight"
++        ),
++    )
++
++    result = document_module.render_document(root, variant=variant)
++
++    assert result.status == "failed"
++    assert result.available_speech == 1
++    assert result.manifest == manifest_path
++    assert result.rendered == result.reused == 0
++
++    from voicerender.errors import RenderLockedError
++
++    monkeypatch.setattr(
++        document_module,
++        "_get_preflight",
++        lambda *_args, **_kwargs: SimpleNamespace(status="ok"),
++    )
++
++    def locked_render(*_args: object, **_kwargs: object) -> object:
++        raise RenderLockedError("output is locked")
++
++    monkeypatch.setattr(document_module, "render_renderplan", locked_render)
++    locked = document_module.render_document(root, variant=variant)
++    assert locked.error_code == "render.locked"
++    assert locked.available_speech == 1
++    assert locked.manifest == manifest_path
++
++
+ def test_document_render_uses_preflight_and_existing_renderplan_executor(
+     tmp_path: Path,
+     monkeypatch: pytest.MonkeyPatch,
+@@ -211,10 +295,16 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
+         variant_dir / "document.renderplan.toml",
+     )
+     calls: list[dict[str, object]] = []
++    preflight_calls: list[dict[str, object]] = []
++
++    def fake_preflight(*_args: object, **kwargs: object) -> object:
++        preflight_calls.append(kwargs)
++        return SimpleNamespace(status="ok")
++
+     monkeypatch.setattr(
+         document_module,
+         "_get_preflight",
+-        lambda *args, **kwargs: SimpleNamespace(status="ok"),
++        fake_preflight,
+     )
+
+     def fake_render(plan: object, **kwargs: object) -> object:
+@@ -242,11 +332,14 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
+         force=True,
+         reset_stale_output=True,
+         emphasis_policy="defer-to-compose",
++        max_open_sessions=3,
+     )
+     assert result.status == "partial"
+     assert result.selected_speech == 1
+     assert result.report_path.is_file()
+     assert calls[0]["speech_numbers"] == frozenset({1})
++    assert preflight_calls[0]["max_open_sessions"] == 3
++    assert calls[0]["max_open_sessions"] == 3
+     assert calls[0]["force"] is True
+     assert calls[0]["reset_stale_output"] is True
+
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index fb10726..87f7067 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -230,15 +230,19 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+
+     policy_calls: list[str] = []
+
++    session_limits: list[int] = []
++
+     def preflight(
+         plan: RenderPlan,
+         path: str | Path,
+         *,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++        max_open_sessions: int = 1,
+         on_event: Any = None,
+     ) -> PreflightReport:
+         preflight_calls.append(plan.plan_id or plan.computed_id())
+         policy_calls.append(f"preflight:{emphasis_policy.value}")
++        session_limits.append(max_open_sessions)
+         report = _preflight(plan, Path(path))
+         if on_event is not None:
+             required = [item for item in plan.speech if item.preflight_required]
+@@ -299,10 +303,12 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+         recheck_report_path: str | Path | None = None,
+         speech_numbers: set[int] | frozenset[int] | None = None,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++        max_open_sessions: int = 1,
+         on_event: Any = None,
+     ) -> RenderPlanResult:
+         del cache_dir, recheck_report_path, reset_stale_output
+         policy_calls.append(f"render:{emphasis_policy.value}")
++        session_limits.append(max_open_sessions)
+         selected = (
+             tuple(plan.speech)
+             if speech_numbers is None
+@@ -450,6 +456,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+     return {
+         "preflight": preflight_calls,
+         "render": render_calls,
++        "session_limits": session_limits,
+         "policy": policy_calls,
+     }
+
+@@ -525,7 +532,7 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
+     calls = _install_fake_execution(monkeypatch)
+     workspace, variant = _book(tmp_path)
+
+-    first = book_module.render_book(workspace, variant=variant)
++    first = book_module.render_book(workspace, variant=variant, max_open_sessions=3)
+     assert first.exit_code == 0
+     assert first.workspace == workspace.resolve()
+     assert first.variant == variant
+@@ -551,6 +558,7 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
+     assert first.full_chapters == 3
+     assert len(calls["preflight"]) == 3
+     assert len(calls["render"]) == 3
++    assert calls["session_limits"] == [3] * 6
+     for outcome in first.outcomes:
+         assert outcome.manifest is not None and outcome.manifest.is_file()
+         assert (outcome.output_dir / "000001.wav").is_file()
+@@ -568,6 +576,45 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
+     assert second.success is True
+     assert len(calls["preflight"]) == 3
+     assert len(calls["render"]) == 3
++    assert calls["session_limits"] == [3] * 6
++
++
++def test_book_preflight_failure_preserves_verified_manifest_counts(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from types import SimpleNamespace
++
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path)
++    initial = book_module.render_book(workspace, variant=variant)
++    assert initial.success
++
++    monkeypatch.setattr(
++        book_module,
++        "_get_preflight",
++        lambda *_args, **_kwargs: SimpleNamespace(status="reject"),
++    )
++    failed = book_module.render_book(workspace, variant=variant, force=True)
++
++    assert [outcome.status for outcome in failed.outcomes] == ["failed"] * 3
++    assert [outcome.available_speech for outcome in failed.outcomes] == [2, 3, 1]
++    assert all(outcome.manifest is not None for outcome in failed.outcomes)
++
++    from voicerender.errors import RenderLockedError
++
++    monkeypatch.setattr(
++        book_module,
++        "_get_preflight",
++        lambda *_args, **_kwargs: SimpleNamespace(status="ok"),
++    )
++
++    def locked_render(*_args: Any, **_kwargs: Any) -> Any:
++        raise RenderLockedError("output is locked")
++
++    monkeypatch.setattr(book_module, "render_renderplan", locked_render)
++    locked = book_module.render_book(workspace, variant=variant, force=True)
++    assert [outcome.error_code for outcome in locked.outcomes] == ["render.locked"] * 3
++    assert [outcome.available_speech for outcome in locked.outcomes] == [2, 3, 1]
+
+
+ def test_book_chapter_and_speech_selectors_use_source_and_speech_numbers(
+@@ -652,8 +699,9 @@ def test_book_preserves_initial_preflight_report_handoff(
+         path: str | Path,
+         *,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++        max_open_sessions: int = 1,
+     ) -> PreflightReport:
+-        del emphasis_policy
++        del emphasis_policy, max_open_sessions
+         speech = plan.speech[0]
+         segment_id = speech.segment_id or speech.computed_id()
+         check = PreflightCheck(
+@@ -736,6 +784,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+         recheck_report_path: str | Path | None = None,
+         speech_numbers: set[int] | frozenset[int] | None = None,
+         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
++        max_open_sessions: int = 1,
+     ) -> RenderPlanResult:
+         result = original_render(
+             plan,
+@@ -747,6 +796,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
+             recheck_report_path=recheck_report_path,
+             speech_numbers=speech_numbers,
+             emphasis_policy=emphasis_policy,
++            max_open_sessions=max_open_sessions,
+         )
+         assert recheck_report_path is not None
+         speech = plan.speech[0]
+diff --git a/tests/test_render_lock.py b/tests/test_render_lock.py
+new file mode 100644
+index 0000000..5558b42
+--- /dev/null
++++ b/tests/test_render_lock.py
+@@ -0,0 +1,184 @@
++from __future__ import annotations
++
++import json
++import os
++
++import pytest
++
++from voicerender import render_lock
++from voicerender.errors import RenderLockedError, RenderLockInvalidError
++from voicerender.render_lock import exclusive_render_lock
++
++
++def _json_lock(
++    *,
++    pid: int,
++    hostname: str | None = None,
++    process_start: str | None = "old-start",
++) -> str:
++    return json.dumps(
++        {
++            "schema": "voicerender.render-lock.v1",
++            "pid": pid,
++            "hostname": hostname or render_lock.socket.gethostname(),
++            "created_at": "2026-10-23T17:42:12Z",
++            "process_start": process_start,
++        }
++    )
++
++
++def _raise_process_lookup(_pid: int, _signal: int) -> None:
++    raise ProcessLookupError
++
++
++def test_lock_is_complete_json_during_render_and_removed_afterward(tmp_path):
++    lock_path = tmp_path / ".voicerender.lock"
++    with exclusive_render_lock(tmp_path) as acquisition:
++        assert acquisition.path == lock_path
++        assert acquisition.recovered_stale is False
++        assert acquisition.previous_owner is None
++        payload = json.loads(lock_path.read_text(encoding="utf-8"))
++        assert payload["schema"] == "voicerender.render-lock.v1"
++        assert payload["pid"] == os.getpid()
++        assert payload["hostname"]
++        assert "created_at" in payload
++        assert "process_start" in payload
++    assert not lock_path.exists()
++
++
++def test_active_legacy_pid_lock_is_preserved(tmp_path):
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(str(os.getpid()), encoding="utf-8")
++
++    with pytest.raises(RenderLockedError) as caught, exclusive_render_lock(tmp_path):
++        pytest.fail("active lock was stolen")
++
++    assert caught.value.code == "render.locked"
++    assert lock_path.read_text(encoding="utf-8") == str(os.getpid())
++
++
++def test_dead_legacy_pid_lock_is_replaced_and_only_its_temp_is_removed(
++    tmp_path, monkeypatch
++):
++    dead_pid = 987654321
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(str(dead_pid), encoding="utf-8")
++    owned_temp = tmp_path / f".000001-a1b2c3d4e5f6.wav.tmp-{dead_pid}"
++    other_temp = tmp_path / ".000002-a1b2c3d4e5f6.wav.tmp-111"
++    unrelated = tmp_path / "keep.tmp"
++    for path in (owned_temp, other_temp, unrelated):
++        path.write_text("partial", encoding="utf-8")
++    monkeypatch.setattr(render_lock.os, "kill", _raise_process_lookup)
++
++    with exclusive_render_lock(tmp_path) as acquisition:
++        assert acquisition.recovered_stale is True
++        assert acquisition.previous_owner is not None
++        assert acquisition.previous_owner.pid == dead_pid
++        assert acquisition.previous_owner.legacy is True
++        assert json.loads(lock_path.read_text(encoding="utf-8"))["pid"] == os.getpid()
++        assert not owned_temp.exists()
++        assert other_temp.exists()
++        assert unrelated.exists()
++
++    assert not lock_path.exists()
++
++
++def test_dead_new_format_lock_is_reclaimed(tmp_path, monkeypatch):
++    dead_pid = 987654321
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(_json_lock(pid=dead_pid), encoding="utf-8")
++    monkeypatch.setattr(render_lock.os, "kill", _raise_process_lookup)
++
++    with exclusive_render_lock(tmp_path) as acquisition:
++        assert acquisition.recovered_stale is True
++        assert acquisition.previous_owner is not None
++        assert acquisition.previous_owner.legacy is False
++        assert acquisition.previous_owner.pid == dead_pid
++
++
++def test_pid_reuse_is_reclaimed_when_start_token_differs(tmp_path, monkeypatch):
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(
++        _json_lock(pid=123, process_start="old-start"), encoding="utf-8"
++    )
++    monkeypatch.setattr(render_lock.os, "kill", lambda _pid, _signal: None)
++    monkeypatch.setattr(render_lock, "_process_start_token", lambda _pid: "new-start")
++
++    with exclusive_render_lock(tmp_path) as acquisition:
++        assert acquisition.recovered_stale is True
++        assert acquisition.previous_owner is not None
++        assert acquisition.previous_owner.pid == 123
++
++
++def test_active_matching_process_is_never_stolen(tmp_path, monkeypatch):
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(
++        _json_lock(pid=123, process_start="same-start"), encoding="utf-8"
++    )
++    monkeypatch.setattr(render_lock.os, "kill", lambda _pid, _signal: None)
++    monkeypatch.setattr(render_lock, "_process_start_token", lambda _pid: "same-start")
++
++    with pytest.raises(RenderLockedError) as caught, exclusive_render_lock(tmp_path):
++        pytest.fail("matching owner was stolen")
++
++    assert caught.value.code == "render.locked"
++    assert json.loads(lock_path.read_text(encoding="utf-8"))["pid"] == 123
++
++
++def test_foreign_host_lock_is_not_reclaimed(tmp_path, monkeypatch):
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(_json_lock(pid=123, hostname="another-host"), encoding="utf-8")
++    monkeypatch.setattr(render_lock.socket, "gethostname", lambda: "test-host")
++    monkeypatch.setattr(render_lock.os, "kill", _raise_process_lookup)
++
++    with pytest.raises(RenderLockedError) as caught, exclusive_render_lock(tmp_path):
++        pytest.fail("foreign-host lock was stolen")
++
++    assert caught.value.code == "render.locked"
++    assert lock_path.exists()
++
++
++def test_malformed_lock_fails_closed(tmp_path):
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text("not a pid or lock document", encoding="utf-8")
++
++    with (
++        pytest.raises(RenderLockInvalidError) as caught,
++        exclusive_render_lock(tmp_path),
++    ):
++        pytest.fail("malformed lock was ignored")
++
++    assert caught.value.code == "render.lock_invalid"
++    assert lock_path.exists()
++
++
++def test_lock_replacement_during_inspection_is_not_deleted(tmp_path, monkeypatch):
++    lock_path = tmp_path / ".voicerender.lock"
++    lock_path.write_text(
++        _json_lock(pid=123, process_start="dead-start"), encoding="utf-8"
++    )
++    monkeypatch.setattr(render_lock.os, "kill", lambda _pid, _signal: None)
++    monkeypatch.setattr(
++        render_lock, "_process_start_token", lambda _pid: "active-start"
++    )
++    real_identity = render_lock._lock_file_identity
++    identity_calls = 0
++    active_lock = _json_lock(pid=456, process_start="active-start")
++
++    def replace_after_read(path):
++        nonlocal identity_calls
++        if path == lock_path:
++            identity_calls += 1
++            if identity_calls == 2:
++                replacement = tmp_path / ".replacement-lock"
++                replacement.write_text(active_lock, encoding="utf-8")
++                os.replace(replacement, lock_path)
++        return real_identity(path)
++
++    monkeypatch.setattr(render_lock, "_lock_file_identity", replace_after_read)
++
++    with pytest.raises(RenderLockedError) as caught, exclusive_render_lock(tmp_path):
++        pytest.fail("changed lock was stolen")
++
++    assert caught.value.code == "render.locked"
++    assert json.loads(lock_path.read_text(encoding="utf-8"))["pid"] == 456
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 362de0d..f9afd6d 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -924,7 +924,7 @@ def test_partial_speech_windows_keep_original_numbers_and_merge_manifest_artifac
+     ] + [f"speech {number}" for number in range(50, 61)]
+
+
+-def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup(
++def test_partial_output_resumes_after_dead_lock_and_reuses_without_engine_startup(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     adapter = _install(monkeypatch)
+@@ -944,6 +944,18 @@ def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup
+     assert not partial.manifest.complete
+     initial_synthesized = list(adapter.synthesized_texts)
+
++    from voicerender import render_lock as render_lock_module
++
++    committed_wavs = {
++        artifact.wav: (output / artifact.wav).read_bytes()
++        for artifact in partial.manifest.speech
++    }
++    lock_path = output / ".voicerender.lock"
++    lock_path.write_text("999999", encoding="ascii")
++    monkeypatch.setattr(
++        render_lock_module, "_owner_is_definitely_dead", lambda _owner: True
++    )
++
+     full = render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
+     assert not full.failed
+     assert full.selection_complete
+@@ -951,6 +963,10 @@ def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup
+     assert full.planned_count == full.available_count == 5
+     assert full.reused_count == 2
+     assert full.rendered_count == 3
++    assert not lock_path.exists()
++    assert {
++        name: (output / name).read_bytes() for name in committed_wavs
++    } == committed_wavs
+     assert len(adapter.synthesized_texts) == len(initial_synthesized) + 3
+
+     open_count = adapter.open_count
+@@ -964,6 +980,97 @@ def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup
+     assert adapter.open_count == open_count
+
+
++def test_batch_variant_resumes_partial_output_after_dead_lock(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from types import SimpleNamespace
++
++    import voicerender.bundle_batch as batch_module
++    from voicerender.bundle import BundleRenderResult
++    from voicerender.variants import BundleVariant, BundleVariantsResult
++
++    adapter = _install(monkeypatch)
++    plan = _plan("batch one", "batch two", "batch three")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "batch-chapter"
++    cache = tmp_path / "batch-cache"
++    partial = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        speech_numbers={1},
++    )
++    assert not partial.manifest.complete
++    assert partial.available_count == 1
++    committed_wav = (output / "000001.wav").read_bytes()
++
++    from voicerender import render_lock as render_lock_module
++
++    lock_path = output / ".voicerender.lock"
++    lock_path.write_text("999999", encoding="ascii")
++    monkeypatch.setattr(
++        render_lock_module, "_owner_is_definitely_dead", lambda _owner: True
++    )
++
++    bundle = tmp_path / "batch-story.ssmd-bundle"
++    variant_name = "narration--test"
++
++    def listing(state: str, available: int) -> BundleVariantsResult:
++        return BundleVariantsResult(
++            bundle=bundle,
++            kind="book",
++            renderplan_root=bundle / "renderplan",
++            output_root=bundle / "voicerender",
++            variants=(
++                BundleVariant(
++                    name=variant_name,
++                    profile_id="sha256:profile",
++                    plan_status="valid",
++                    validation_error=None,
++                    render_status=state,
++                    state=state,
++                    unit_kind="chapters",
++                    completed_units=0,
++                    total_units=1,
++                    planned_speech=3,
++                    available_speech=available,
++                    pending_composition=None,
++                    report_path=None,
++                ),
++            ),
++        )
++
++    listings = iter((listing("partial", 1), listing("complete", 3)))
++    monkeypatch.setattr(
++        batch_module, "list_bundle_variants", lambda *_args, **_kwargs: next(listings)
++    )
++    render_results = []
++
++    def render_variant(*_args: Any, **_kwargs: Any) -> BundleRenderResult:
++        result = render_renderplan(
++            plan, preflight=report, output_dir=output, cache_dir=cache
++        )
++        render_results.append(result)
++        return BundleRenderResult(
++            kind="book",
++            value=SimpleNamespace(exit_code=0, error_code=None, error_message=None),
++        )
++
++    monkeypatch.setattr(batch_module, "render_bundle", render_variant)
++    batch_result = batch_module.render_bundle_batch(bundle)
++
++    assert batch_result.exit_code == 0
++    assert batch_result.summary.attempted == batch_result.summary.completed == 1
++    assert batch_result.variants[0].final_state == "complete"
++    assert render_results[0].manifest.complete
++    assert render_results[0].available_count == 3
++    assert render_results[0].reused_count == 1
++    assert render_results[0].rendered_count == 2
++    assert (output / "000001.wav").read_bytes() == committed_wav
++    assert not lock_path.exists()
++
++
+ def test_corrupt_manifest_output_wav_is_dropped_and_regenerated_from_cache(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+@@ -1499,6 +1606,12 @@ def test_existing_output_reuse_advances_progress_without_opening_engine(
+     assert events[1].completed_count == 1
+     assert events[1].progress == 1.0
+
++    diagnostics = json.loads(
++        (output / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
++    )
++    assert diagnostics["session_residency"]["opens"] == 0
++    assert diagnostics["session_residency"]["peak_open_sessions"] == 0
++
+
+ def test_cache_reuse_is_reported_after_materialization(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@@ -1751,3 +1864,77 @@ def test_diagnostic_serializer_failure_does_not_mask_render_failure(
+     assert result.error_diagnostic["message"].startswith(
+         "[diagnostic serialization failed;"
+     )
++
++
++def test_default_session_pool_bounds_clones_and_preserves_plan_order(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from voicerender import session_pool as pool_module
++
++    adapter = _install(monkeypatch)
++    voices = ("clone-a", "clone-b", "clone-a", "clone-c", "clone-b", "clone-d")
++    plan = _plan(*(f"speech {index}" for index in range(1, len(voices) + 1)))
++    plan = replace(
++        plan,
++        flow=tuple(
++            replace(item, binding={**item.binding, "voice": voice}, segment_id=None)
++            for item, voice in zip(plan.speech, voices, strict=True)
++        ),
++        plan_id=None,
++    ).with_identity()
++    report = _report(adapter, plan, tmp_path)
++    active: set[str | None] = set()
++    open_close_order: list[tuple[str, str | None]] = []
++    peak_open = 0
++
++    @contextmanager
++    def open_tracked(selection: EngineSelection) -> Iterator[EngineSession]:
++        nonlocal peak_open
++        assert not active
++        active.add(selection.voice)
++        peak_open = max(peak_open, len(active))
++        open_close_order.append(("open", selection.voice))
++        try:
++            yield adapter.session
++        finally:
++            active.remove(selection.voice)
++            open_close_order.append(("close", selection.voice))
++
++    monkeypatch.setattr(pool_module, "open_session", open_tracked)
++    events: list[RenderEvent] = []
++    output = tmp_path / "bounded-sessions"
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=tmp_path / "bounded-cache",
++        on_event=events.append,
++    )
++
++    assert peak_open == 1
++    assert active == set()
++    assert adapter.synthesized_texts == [item.text for item in plan.speech]
++    assert [artifact.segment_number for artifact in result.manifest.speech] == list(
++        range(1, len(voices) + 1)
++    )
++    assert open_close_order == [
++        pair for voice in voices for pair in (("open", voice), ("close", voice))
++    ]
++    diagnostics = json.loads(
++        (output / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
++    )
++    assert diagnostics["session_residency"] == {
++        "max_open_sessions": 1,
++        "peak_open_sessions": 1,
++        "opens": len(voices),
++        "closes": len(voices),
++        "evictions": len(voices) - 1,
++        "hits": 0,
++    }
++    close_events = [
++        event for event in events if event.kind is RenderEventKind.ENGINE_CLOSE_STARTED
++    ]
++    assert [event.status for event in close_events] == [
++        *("evicted" for _ in range(len(voices) - 1)),
++        "render_complete",
++    ]
+diff --git a/tests/test_session_pool.py b/tests/test_session_pool.py
+new file mode 100644
+index 0000000..3333ae2
+--- /dev/null
++++ b/tests/test_session_pool.py
+@@ -0,0 +1,112 @@
++from __future__ import annotations
++
++from contextlib import contextmanager
++from typing import cast
++
++import pytest
++
++from voicerender import session_pool
++from voicerender.engines.base import EngineSelection
++from voicerender.errors import PlanError
++from voicerender.session_pool import EngineSessionPool, SessionOpenFailure
++
++
++class _Session:
++    def measure(self, _request):
++        return None
++
++    def synthesize(self, _request):
++        return None
++
++
++def _selection(key: str) -> EngineSelection:
++    return EngineSelection(engine="test", target_id=key, language="en-US")
++
++
++def _install_open(monkeypatch, events, active):
++    @contextmanager
++    def open_session(selection):
++        events.append(("open", selection.target_id))
++        active.add(selection.target_id)
++        assert len(active) <= 2
++        try:
++            yield _Session()
++        finally:
++            active.remove(selection.target_id)
++            events.append(("close", selection.target_id))
++
++    monkeypatch.setattr(session_pool, "open_session", open_session)
++
++
++def test_lru_eviction_closes_before_open_and_closes_in_reverse_use_order(
++    monkeypatch,
++):
++    events = []
++    active = set()
++    _install_open(monkeypatch, events, active)
++
++    with EngineSessionPool(max_open_sessions=2) as pool:
++        assert pool.acquire("A", _selection("A"))
++        assert pool.acquire("B", _selection("B"))
++        assert pool.acquire("A", _selection("A"))
++        assert pool.acquire("C", _selection("C"))
++        assert events[:4] == [
++            ("open", "A"),
++            ("open", "B"),
++            ("close", "B"),
++            ("open", "C"),
++        ]
++        assert pool.stats.peak_open == 2
++        assert pool.stats.evictions == 1
++        assert pool.stats.hits == 1
++
++    assert active == set()
++    assert events[-2:] == [("close", "C"), ("close", "A")]
++    assert pool.stats.opens == pool.stats.closes == 3
++
++
++def test_default_limit_adjacent_hits_and_cleanup_after_exception(monkeypatch):
++    events = []
++    active = set()
++    _install_open(monkeypatch, events, active)
++
++    with (
++        pytest.raises(RuntimeError, match="render failed"),
++        EngineSessionPool(max_open_sessions=1) as pool,
++    ):
++        assert pool.acquire("A", _selection("A"))
++        assert pool.acquire("A", _selection("A"))
++        assert pool.stats.hits == 1
++        assert pool.stats.peak_open == 1
++        raise RuntimeError("render failed")
++
++    assert active == set()
++    assert events == [("open", "A"), ("close", "A")]
++    assert pool.stats.opens == pool.stats.closes == 1
++
++
++def test_open_failure_is_memoized_and_does_not_occupy_capacity(monkeypatch):
++    attempts = []
++
++    @contextmanager
++    def open_session(selection):
++        attempts.append(selection.target_id)
++        if selection.target_id == "failed":
++            raise RuntimeError("startup failed")
++        yield _Session()
++
++    monkeypatch.setattr(session_pool, "open_session", open_session)
++    with EngineSessionPool(max_open_sessions=1) as pool:
++        first = pool.acquire("failed", _selection("failed"))
++        second = pool.acquire("failed", _selection("failed"))
++        assert isinstance(first, SessionOpenFailure)
++        assert second is first
++        assert pool.acquire("good", _selection("good"))
++        assert attempts == ["failed", "good"]
++        assert pool.stats.peak_open == 1
++
++
++def test_invalid_session_limits_are_rejected():
++    for value in (True, False, 0, -1, 1.5, "2"):
++        with pytest.raises(PlanError, match="max_open_sessions"):
++            EngineSessionPool(max_open_sessions=cast(int, value))
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 43d1593..c4be098 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -51,7 +51,7 @@ from .book_layout import (
+     resolve_workspace as _resolve_workspace,
+ )
+ from .error_diagnostics import diagnostic_summary_fields
+-from .errors import ArtifactError, PlanError
++from .errors import ArtifactError, PlanError, RenderLockedError, RenderLockInvalidError
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .preflight import preflight_render_plan
+ from .progress import EtaConfidence, ProgressTracker, RenderProgress, RollingEta
+@@ -59,8 +59,10 @@ from .renderplan_input import EMPHASIS_COMPOSITION_CAPABILITY, EmphasisPolicy
+ from .renderplan_render import (
+     RENDER_DIAGNOSTICS_FILENAME,
+     RENDER_MANIFEST_FILENAME,
++    _verified_manifest_artifact_count,
+     render_renderplan,
+ )
++from .session_pool import validate_max_open_sessions
+ from .storage import verified_wav
+
+ BOOK_REPORT_FILENAME = "voicerender-report.toml"
+@@ -468,9 +470,11 @@ def render_book(
+     reset_stale_output: bool = False,
+     fail_fast: bool = False,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> BookRenderResult:
+     """Render selected chapters in a RenderPlan variant using shared preflight and render APIs."""
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+     book_started = monotonic()
+     try:
+         resolved_emphasis_policy = EmphasisPolicy(emphasis_policy)
+@@ -544,7 +548,12 @@ def render_book(
+             )
+         else:
+             if on_event is None:
+-                outcome = _render_chapter(request, chapter, index)
++                outcome = _render_chapter(
++                    request,
++                    chapter,
++                    index,
++                    max_open_sessions=max_open_sessions,
++                )
+             else:
+
+                 def forward_child_event(
+@@ -566,6 +575,7 @@ def render_book(
+                     request,
+                     chapter,
+                     index,
++                    max_open_sessions=max_open_sessions,
+                     on_event=forward_child_event,
+                 )
+             if outcome.status == "reused":
+@@ -829,6 +839,7 @@ def _render_chapter(
+     chapter: _LoadedChapter,
+     index: int,
+     *,
++    max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> ChapterRenderOutcome:
+     entry = chapter.entry
+@@ -882,6 +893,7 @@ def _render_chapter(
+             chapter.plan,
+             preflight_path,
+             emphasis_policy=request.emphasis_policy,
++            max_open_sessions=max_open_sessions,
+             **preflight_options,
+         )
+     except BookRenderError as exc:
+@@ -926,9 +938,18 @@ def _render_chapter(
+             recheck_report_path=recheck_report_path,
+             speech_numbers=chapter.speech_numbers,
+             emphasis_policy=request.emphasis_policy,
++            max_open_sessions=max_open_sessions,
+             **render_options,
+         )
+-    except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
++    except (
++        ArtifactError,
++        PlanError,
++        RenderLockInvalidError,
++        RenderLockedError,
++        OSError,
++        ValueError,
++        TypeError,
++    ) as exc:
+         error_code = getattr(exc, "code", None)
+         return _failure_outcome(
+             chapter,
+@@ -986,6 +1007,7 @@ def _get_preflight(
+     path: Path,
+     *,
+     emphasis_policy: EmphasisPolicy,
++    max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> PreflightReport:
+     if path.exists() or path.is_symlink():
+@@ -1006,12 +1028,18 @@ def _get_preflight(
+             except (OSError, ValueError, TypeError):
+                 pass
+     if on_event is None:
+-        return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
++        return preflight_render_plan(
++            plan,
++            path,
++            emphasis_policy=emphasis_policy,
++            max_open_sessions=max_open_sessions,
++        )
+     return preflight_render_plan(
+         plan,
+         path,
+         emphasis_policy=emphasis_policy,
+         on_event=on_event,
++        max_open_sessions=max_open_sessions,
+     )
+
+
+@@ -1223,6 +1251,11 @@ def _failure_outcome(
+     preflight_report: Path | None = None,
+     replan_required: bool = False,
+ ) -> ChapterRenderOutcome:
++    available_speech = _verified_manifest_artifact_count(
++        chapter.plan, chapter.output_dir
++    )
++    if manifest is None and available_speech:
++        manifest = chapter.output_dir / RENDER_MANIFEST_FILENAME
+     return ChapterRenderOutcome(
+         index=index,
+         id=chapter.entry.id,
+@@ -1234,7 +1267,7 @@ def _failure_outcome(
+         status="failed",
+         planned_speech=planned,
+         selected_speech=selected,
+-        available_speech=0,
++        available_speech=available_speech,
+         rendered=0,
+         reused=0,
+         error_code=error_code,
+diff --git a/voicerender/bundle.py b/voicerender/bundle.py
+index c3b441b..4ffbe98 100644
+--- a/voicerender/bundle.py
++++ b/voicerender/bundle.py
+@@ -11,6 +11,7 @@ from .bundle_contract import BundleKind, load_bundle_identity
+ from .document import DocumentRenderResult, render_document
+ from .events import RenderEventCallback
+ from .renderplan_input import EmphasisPolicy
++from .session_pool import validate_max_open_sessions
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -46,9 +47,11 @@ def render_bundle(
+     reset_stale: bool = False,
+     emphasis_policy: Literal["reject", "defer-to-compose"] = "reject",
+     fail_fast: bool = False,
++    max_open_sessions: int = 1,
+     on_progress: RenderEventCallback | None = None,
+ ) -> BundleRenderResult:
+     """Render one canonical bundle root, dispatching by its manifest identity."""
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+     identity = load_bundle_identity(bundle)
+     if identity.kind == "book":
+         book_result = render_book(
+@@ -64,6 +67,7 @@ def render_bundle(
+             fail_fast=fail_fast,
+             emphasis_policy=EmphasisPolicy(emphasis_policy),
+             on_event=on_progress,
++            max_open_sessions=max_open_sessions,
+         )
+         return BundleRenderResult(kind=identity.kind, value=book_result)
+
+@@ -80,6 +84,7 @@ def render_bundle(
+         reset_stale_output=reset_stale,
+         emphasis_policy=EmphasisPolicy(emphasis_policy),
+         on_event=on_progress,
++        max_open_sessions=max_open_sessions,
+     )
+     return BundleRenderResult(kind=identity.kind, value=document_result)
+
+diff --git a/voicerender/bundle_batch.py b/voicerender/bundle_batch.py
+index c4b6979..81551d9 100644
+--- a/voicerender/bundle_batch.py
++++ b/voicerender/bundle_batch.py
+@@ -10,6 +10,7 @@ from .bundle import BundleRenderResult, render_bundle
+ from .bundle_contract import BundleKind
+ from .error_diagnostics import diagnostic_summary_fields, exception_diagnostic
+ from .events import RenderEventCallback
++from .session_pool import validate_max_open_sessions
+ from .variants import BundleVariant, VariantState, list_bundle_variants
+
+ BatchVariantStatus = Literal[
+@@ -165,6 +166,7 @@ def render_bundle_batch(
+     reset_stale: bool = False,
+     emphasis_policy: Literal["reject", "defer-to-compose"] = "reject",
+     fail_fast: bool = False,
++    max_open_sessions: int = 1,
+     on_progress: RenderEventCallback | None = None,
+ ) -> BundleBatchRenderResult:
+     """Render valid, incomplete variants in deterministic discovery order.
+@@ -173,6 +175,7 @@ def render_bundle_batch(
+     single-variant renderer, which performs its normal identity and output
+     safety validation before writing.
+     """
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+     listing = list_bundle_variants(
+         bundle,
+         renderplan_root=renderplan_root,
+@@ -219,6 +222,7 @@ def render_bundle_batch(
+                 emphasis_policy=emphasis_policy,
+                 fail_fast=fail_fast,
+                 on_progress=on_progress,
++                max_open_sessions=max_open_sessions,
+             )
+         except Exception as exc:  # noqa: BLE001 - Keep batch failures isolated.
+             error_code, error_message = _exception_details(exc)
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 93430a5..2747b70 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -499,6 +499,13 @@ def build_parser() -> argparse.ArgumentParser:
+         action="store_true",
+         help="Reset output owned by a different RenderPlan while reusing cache entries",
+     )
++    render.add_argument(
++        "--max-open-sessions",
++        type=int,
++        default=1,
++        metavar="N",
++        help="Maximum number of open engine sessions (default: 1)",
++    )
+     render.add_argument("--json", action="store_true")
+     _add_progress_option(render)
+     render.add_argument(
+@@ -544,6 +551,13 @@ def build_parser() -> argparse.ArgumentParser:
+         action="store_true",
+         help="Reset stale VoiceRender output while reusing cache entries",
+     )
++    bundle_render.add_argument(
++        "--max-open-sessions",
++        type=int,
++        default=1,
++        metavar="N",
++        help="Maximum number of open engine sessions (default: 1)",
++    )
+     bundle_render.add_argument(
+         "--emphasis-policy",
+         choices=("reject", "defer-to-compose"),
+@@ -2501,6 +2515,7 @@ def main(argv: list[str] | None = None) -> int:
+                     force=args.force,
+                     reset_stale_output=args.reset_stale,
+                     emphasis_policy=args.emphasis_policy,
++                    max_open_sessions=args.max_open_sessions,
+                     on_event=progress,
+                 )
+             finally:
+@@ -2546,6 +2561,7 @@ def main(argv: list[str] | None = None) -> int:
+                             reset_stale=args.reset_stale,
+                             emphasis_policy=args.emphasis_policy,
+                             fail_fast=args.fail_fast,
++                            max_open_sessions=args.max_open_sessions,
+                             on_progress=progress,
+                         )
+                     else:
+@@ -2561,6 +2577,7 @@ def main(argv: list[str] | None = None) -> int:
+                             reset_stale=args.reset_stale,
+                             emphasis_policy=args.emphasis_policy,
+                             fail_fast=args.fail_fast,
++                            max_open_sessions=args.max_open_sessions,
+                             on_progress=progress,
+                         )
+                 finally:
+diff --git a/voicerender/document.py b/voicerender/document.py
+index c447688..a970977 100644
+--- a/voicerender/document.py
++++ b/voicerender/document.py
+@@ -17,10 +17,21 @@ from renderplan import codec as renderplan_codec
+ from .book import _get_preflight
+ from .document_contract import DocumentWorkspaceError, load_document_workspace
+ from .error_diagnostics import diagnostic_summary_fields
+-from .errors import ArtifactError, DocumentRenderError, PlanError
++from .errors import (
++    ArtifactError,
++    DocumentRenderError,
++    PlanError,
++    RenderLockedError,
++    RenderLockInvalidError,
++)
+ from .events import RenderEventCallback
+ from .renderplan_input import EmphasisPolicy
+-from .renderplan_render import RENDER_MANIFEST_FILENAME, render_renderplan
++from .renderplan_render import (
++    RENDER_MANIFEST_FILENAME,
++    _verified_manifest_artifact_count,
++    render_renderplan,
++)
++from .session_pool import validate_max_open_sessions
+
+ DOCUMENT_RENDERPLAN_FILENAME = "document.renderplan.toml"
+
+@@ -259,9 +270,11 @@ def render_document(
+     force: bool = False,
+     reset_stale_output: bool = False,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> DocumentRenderResult:
+     start = monotonic()
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+     request = _resolve_document_request(
+         workspace,
+         variant=variant,
+@@ -284,6 +297,7 @@ def render_document(
+             preflight_path,
+             emphasis_policy=request.emphasis_policy,
+             on_event=on_event,
++            max_open_sessions=max_open_sessions,
+         )
+         if preflight.status != "ok":
+             code = (
+@@ -291,18 +305,21 @@ def render_document(
+                 if preflight.status == "replan"
+                 else "preflight.reject"
+             )
++            available = _verified_manifest_artifact_count(
++                request.plan, request.output_dir
++            )
+             result = DocumentRenderResult(
+                 request,
+                 report_path,
+                 preflight_path,
+                 None,
+-                None,
++                manifest_path if available else None,
+                 "failed",
+                 len(request.plan.speech),
+                 len(request.plan.speech)
+                 if request.speech_numbers is None
+                 else len(request.speech_numbers),
+-                0,
++                available,
+                 0,
+                 0,
+                 False,
+@@ -321,6 +338,7 @@ def render_document(
+                 recheck_report_path=recheck_path,
+                 speech_numbers=request.speech_numbers,
+                 emphasis_policy=request.emphasis_policy,
++                max_open_sessions=max_open_sessions,
+                 on_event=on_event,
+             )
+             result = DocumentRenderResult(
+@@ -357,7 +375,15 @@ def render_document(
+                     getattr(rendered, "error_diagnostic", None)
+                 ),
+             )
+-    except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
++    except (
++        ArtifactError,
++        PlanError,
++        RenderLockInvalidError,
++        RenderLockedError,
++        OSError,
++        ValueError,
++        TypeError,
++    ) as exc:
+         code = getattr(exc, "code", None) or "render.failed"
+         result = DocumentRenderResult(
+             request,
+@@ -370,7 +396,7 @@ def render_document(
+             len(request.plan.speech)
+             if request.speech_numbers is None
+             else len(request.speech_numbers),
+-            0,
++            _verified_manifest_artifact_count(request.plan, request.output_dir),
+             0,
+             0,
+             False,
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+index 726b736..f164a3f 100644
+--- a/voicerender/errors.py
++++ b/voicerender/errors.py
+@@ -5,6 +5,18 @@ class VoiceRenderError(Exception):
+     """Base error for VoiceRender."""
+
+
++class RenderLockedError(VoiceRenderError, RuntimeError):
++    """The render output is currently owned by a live/unknown process."""
++
++    code = "render.locked"
++
++
++class RenderLockInvalidError(VoiceRenderError, RuntimeError):
++    """The render lock cannot be interpreted or safely reclaimed."""
++
++    code = "render.lock_invalid"
++
++
+ class DocumentRenderError(VoiceRenderError, ValueError):
+     """A document bundle or document-render request is invalid."""
+
+diff --git a/voicerender/events.py b/voicerender/events.py
+index b4fdfb6..78f912b 100644
+--- a/voicerender/events.py
++++ b/voicerender/events.py
+@@ -27,6 +27,8 @@ class RenderEventKind(str, Enum):
+     CHAPTER_SKIPPED = "chapter_skipped"
+     ENGINE_OPEN_STARTED = "engine_open_started"
+     ENGINE_OPEN_FINISHED = "engine_open_finished"
++    ENGINE_CLOSE_STARTED = "engine_close_started"
++    ENGINE_CLOSE_FINISHED = "engine_close_finished"
+     SEGMENT_STARTED = "segment_started"
+     SEGMENT_RENDERED = "segment_rendered"
+     SEGMENT_REUSED = "segment_reused"
+diff --git a/voicerender/preflight.py b/voicerender/preflight.py
+index 379dbfd..e29097c 100644
+--- a/voicerender/preflight.py
++++ b/voicerender/preflight.py
+@@ -3,8 +3,7 @@
+ from __future__ import annotations
+
+ import json
+-from contextlib import ExitStack
+-from dataclasses import asdict, dataclass
++from dataclasses import asdict
+ from importlib.metadata import PackageNotFoundError, version
+ from pathlib import Path
+ from typing import Any, Literal
+@@ -19,8 +18,8 @@ from renderplan import (
+     save_preflight,
+ )
+
+-from .engines.base import EngineSelection, EngineSession
+-from .engines.registry import get_adapter, open_session
++from .engines.base import EngineSelection
++from .engines.registry import get_adapter
+ from .errors import PlanError
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .progress import ProgressTracker
+@@ -32,12 +31,11 @@ from .renderplan_input import (
+     engine_selection_from_binding,
+     speech_request_conversion_from_renderplan,
+ )
+-
+-
+-@dataclass(frozen=True, slots=True)
+-class _OpenFailure:
+-    source: str
+-    detail: str
++from .session_pool import (
++    EngineSessionPool,
++    SessionOpenFailure,
++    validate_max_open_sessions,
++)
+
+
+ def _preflight_progress_event(
+@@ -80,13 +78,14 @@ def preflight_render_plan(
+     output: str | Path,
+     *,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> PreflightReport:
+     """Measure each required speech occurrence, then validate and persist its report."""
+     if not isinstance(plan, RenderPlan):
+         raise PlanError("preflight input must be a RenderPlan")
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+     checks: list[PreflightCheck] = []
+-    sessions: dict[str, EngineSession | _OpenFailure] = {}
+
+     required_count = sum(item.preflight_required for item in plan.speech)
+     progress_tracker = ProgressTracker(required_count)
+@@ -99,7 +98,7 @@ def preflight_render_plan(
+             plan_id=plan_id,
+         ),
+     )
+-    with ExitStack() as stack:
++    with EngineSessionPool(max_open_sessions=max_open_sessions) as sessions:
+         for item in plan.speech:
+             if not item.preflight_required:
+                 continue
+@@ -141,23 +140,9 @@ def preflight_render_plan(
+                 )
+                 continue
+
+-            cached = sessions.get(session_key)
+-            if cached is None:
+-                try:
+-                    cached = stack.enter_context(open_session(selection))
+-                except Exception as exc:  # noqa: BLE001 - Session startup failures are persisted as reject checks.
+-                    cached = _OpenFailure(
+-                        source=_error_source(exc),
+-                        detail=str(exc) or "Cannot open renderer session",
+-                    )
+-                sessions[session_key] = cached
+-            if isinstance(cached, _OpenFailure):
+-                check = _error_check(
+-                    item,
+-                    segment_id,
+-                    RuntimeError(cached.detail),
+-                    source=cached.source,
+-                )
++            cached = sessions.acquire(session_key, selection)
++            if isinstance(cached, SessionOpenFailure):
++                check = _error_check(item, segment_id, cached.error)
+                 checks.append(check)
+                 progress_tracker.advance()
+                 emit_render_event(
+diff --git a/voicerender/render.py b/voicerender/render.py
+index 4ab2418..c11dc83 100644
+--- a/voicerender/render.py
++++ b/voicerender/render.py
+@@ -5,8 +5,8 @@ from __future__ import annotations
+ import json
+ import os
+ import shutil
+-from collections.abc import Iterable, Iterator
+-from contextlib import ExitStack, contextmanager
++from collections.abc import Iterable
++from contextlib import ExitStack
+ from pathlib import Path
+ from time import monotonic
+ from typing import Any
+@@ -23,6 +23,7 @@ from .models import (
+     VoiceProfile,
+ )
+ from .progress import ProgressTracker
++from .render_lock import exclusive_render_lock as _exclusive_run
+ from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
+
+ RENDER_ALGORITHM = "voicerender.batch.v1"
+@@ -98,22 +99,6 @@ def _select(
+     return result
+
+
+-@contextmanager
+-def _exclusive_run(output_dir: Path) -> Iterator[None]:
+-    output_dir.mkdir(parents=True, exist_ok=True)
+-    lock = output_dir / ".voicerender.lock"
+-    try:
+-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+-    except FileExistsError as exc:
+-        raise ArtifactError(f"Render directory is locked: {output_dir}") from exc
+-    try:
+-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+-            stream.write(str(os.getpid()))
+-        yield
+-    finally:
+-        lock.unlink(missing_ok=True)
+-
+-
+ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None:
+     wav = cache_dir / f"{key}.wav"
+     meta = cache_dir / f"{key}.json"
+diff --git a/voicerender/render_lock.py b/voicerender/render_lock.py
+new file mode 100644
+index 0000000..40ce060
+--- /dev/null
++++ b/voicerender/render_lock.py
+@@ -0,0 +1,369 @@
++"""Crash-safe exclusive locks for render output directories."""
++
++from __future__ import annotations
++
++import ctypes
++import errno
++import json
++import os
++import re
++import socket
++import stat
++import tempfile
++from collections.abc import Iterator
++from contextlib import contextmanager
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from pathlib import Path
++
++try:
++    import fcntl
++except (
++    ImportError
++):  # pragma: no cover - non-POSIX hosts cannot safely reclaim stale locks.
++    fcntl = None  # type: ignore[assignment]
++
++from .errors import RenderLockedError, RenderLockInvalidError
++
++_LOCK_FILENAME = ".voicerender.lock"
++_LOCK_SCHEMA = "voicerender.render-lock.v1"
++_MAX_RECLAIM_ATTEMPTS = 8
++_TEMP_COPY_PATTERN = re.compile(r"^\.[A-Za-z0-9._-]+\.wav\.tmp-(\d+)$")
++
++
++@dataclass(frozen=True, slots=True)
++class RenderLockInfo:
++    pid: int
++    hostname: str | None
++    created_at: str | None
++    process_start: str | None
++    legacy: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class RenderLockAcquisition:
++    path: Path
++    recovered_stale: bool
++    previous_owner: RenderLockInfo | None
++
++
++@dataclass(frozen=True, slots=True)
++class _FileIdentity:
++    device: int
++    inode: int
++    mtime_ns: int
++    size: int
++
++
++def _lock_file_identity(path: Path) -> _FileIdentity:
++    info = path.lstat()
++    if not stat.S_ISREG(info.st_mode):
++        raise OSError(errno.EINVAL, "render lock is not a regular file", str(path))
++    return _FileIdentity(info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
++
++
++def _process_start_token(pid: int) -> str | None:
++    """Return Linux procfs starttime (stat field 22), if available."""
++    try:
++        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
++        closing_paren = stat.rfind(")")
++        if closing_paren < 0:
++            return None
++        fields_from_state = stat[closing_paren + 1 :].split()
++        return fields_from_state[19]
++    except (OSError, UnicodeError, IndexError):
++        return None
++
++
++def _created_at() -> str:
++    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
++
++
++def _make_lock_payload() -> bytes:
++    payload = {
++        "schema": _LOCK_SCHEMA,
++        "pid": os.getpid(),
++        "hostname": socket.gethostname(),
++        "created_at": _created_at(),
++        "process_start": _process_start_token(os.getpid()),
++    }
++    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
++        "utf-8"
++    )
++
++
++def _parse_lock(text: str) -> RenderLockInfo:
++    stripped = text.strip()
++    if re.fullmatch(r"[0-9]+", stripped):
++        pid = int(stripped)
++        if pid < 1:
++            raise ValueError("PID must be positive")
++        return RenderLockInfo(pid, None, None, None, legacy=True)
++
++    try:
++        payload = json.loads(stripped)
++    except (ValueError, TypeError) as exc:
++        raise ValueError("contents are neither a legacy PID nor valid JSON") from exc
++    if not isinstance(payload, dict) or payload.get("schema") != _LOCK_SCHEMA:
++        raise ValueError("unsupported lock schema")
++
++    pid = payload.get("pid")
++    hostname = payload.get("hostname")
++    created_at = payload.get("created_at")
++    process_start = payload.get("process_start")
++    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
++        raise ValueError("lock PID must be a positive integer")
++    if hostname is not None and not isinstance(hostname, str):
++        raise ValueError("lock hostname must be a string or null")
++    if created_at is not None and not isinstance(created_at, str):
++        raise ValueError("lock created_at must be a string or null")
++    if process_start is not None and not isinstance(process_start, str):
++        raise ValueError("lock process_start must be a string or null")
++    return RenderLockInfo(pid, hostname, created_at, process_start)
++
++
++def _owner_is_definitely_dead(owner: RenderLockInfo) -> bool:
++    hostname = socket.gethostname()
++    if owner.legacy:
++        pass  # Legacy locks were always produced on this host's POSIX process space.
++    elif owner.hostname != hostname:
++        return False
++
++    try:
++        os.kill(owner.pid, 0)
++    except ProcessLookupError:
++        return True
++    except PermissionError:
++        return False
++    except OSError as exc:
++        return exc.errno == errno.ESRCH
++
++    if owner.legacy or owner.process_start is None:
++        return False
++    current_start = _process_start_token(owner.pid)
++    return current_start is not None and current_start != owner.process_start
++
++
++@contextmanager
++def _directory_guard(output_dir: Path) -> Iterator[bool]:
++    """Serialize lock inspection/reclamation among VoiceRender processes."""
++    if fcntl is None:
++        yield False
++        return
++    descriptor = os.open(output_dir, os.O_RDONLY)
++    try:
++        fcntl.flock(descriptor, fcntl.LOCK_EX)
++        try:
++            yield True
++        finally:
++            fcntl.flock(descriptor, fcntl.LOCK_UN)
++    finally:
++        os.close(descriptor)
++
++
++def _install_no_replace(source: Path, destination: Path) -> None:
++    """Atomically move a complete temp file into place without replacement."""
++    native_library = ctypes.CDLL(None, use_errno=True)
++    try:
++        renameat2 = native_library.renameat2
++    except AttributeError:
++        renameat2 = None
++    if renameat2 is not None:
++        renameat2.argtypes = (
++            ctypes.c_int,
++            ctypes.c_char_p,
++            ctypes.c_int,
++            ctypes.c_char_p,
++            ctypes.c_uint,
++        )
++        renameat2.restype = ctypes.c_int
++        result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
++        if result == 0:
++            return
++        error_number = ctypes.get_errno()
++        if error_number == errno.EEXIST:
++            raise FileExistsError(
++                error_number, os.strerror(error_number), str(destination)
++            )
++        if error_number not in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
++            raise OSError(error_number, os.strerror(error_number), str(destination))
++
++    python_link = getattr(os, "link", None)
++    if python_link is not None:
++        python_link(source, destination)
++        return
++    raise OSError(errno.ENOSYS, "atomic no-replace install is unavailable")
++
++
++def _install_lock(path: Path, payload: bytes) -> bool:
++    """Atomically install a complete lock without replacing an existing path."""
++    descriptor, temporary_name = tempfile.mkstemp(
++        prefix=".voicerender-lock-tmp-", dir=path.parent
++    )
++    temporary = Path(temporary_name)
++    try:
++        os.fchmod(descriptor, 0o600)
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(payload)
++            stream.flush()
++            os.fsync(stream.fileno())
++        try:
++            _install_no_replace(temporary, path)
++        except FileExistsError:
++            return False
++        except OSError as exc:
++            raise RenderLockInvalidError(
++                f"Cannot safely install render lock {path}: {exc}"
++            ) from exc
++        _fsync_directory(path.parent)
++        return True
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
++def _fsync_directory(path: Path) -> None:
++    try:
++        descriptor = os.open(path, os.O_RDONLY)
++    except OSError:
++        return
++    try:
++        os.fsync(descriptor)
++    except OSError:
++        pass
++    finally:
++        os.close(descriptor)
++
++
++def _remove_owned_output_temps(output_dir: Path, dead_pid: int) -> None:
++    try:
++        for candidate in output_dir.iterdir():
++            match = _TEMP_COPY_PATTERN.fullmatch(candidate.name)
++            if match is None or int(match.group(1)) != dead_pid:
++                continue
++            try:
++                if candidate.is_file() and not candidate.is_symlink():
++                    candidate.unlink()
++            except OSError:
++                # A leftover temp is harmless; never widen cleanup or mask recovery.
++                continue
++    except OSError:
++        # Directory enumeration is best-effort; recovery must remain possible.
++        return
++
++
++def _read_existing_lock(path: Path) -> tuple[RenderLockInfo, _FileIdentity]:
++    try:
++        before = _lock_file_identity(path)
++        text = path.read_text(encoding="utf-8")
++        after = _lock_file_identity(path)
++    except FileNotFoundError as exc:
++        raise _LockChanged from exc
++    except (OSError, UnicodeError) as exc:
++        raise RenderLockInvalidError(
++            f"Cannot determine lock owner safely from {path}: {exc}"
++        ) from exc
++    if before != after:
++        raise _LockChanged
++    try:
++        owner = _parse_lock(text)
++    except ValueError as exc:
++        raise RenderLockInvalidError(
++            f"Cannot determine lock owner safely from {path}: {exc}"
++        ) from exc
++    return owner, after
++
++
++class _LockChanged(Exception):
++    """The canonical lock changed while it was being inspected."""
++
++
++def _unlink_if_unchanged(path: Path, identity: _FileIdentity) -> bool:
++    try:
++        current = _lock_file_identity(path)
++    except FileNotFoundError:
++        return True
++    except OSError as exc:
++        raise RenderLockInvalidError(
++            f"Cannot safely inspect render lock {path}: {exc}"
++        ) from exc
++    if current != identity:
++        return False
++    try:
++        path.unlink()
++    except FileNotFoundError:
++        return True
++    return True
++
++
++@contextmanager
++def exclusive_render_lock(
++    output_dir: Path,
++    *,
++    recover_stale: bool = True,
++) -> Iterator[RenderLockAcquisition]:
++    """Hold the output-directory render lock, reclaiming only proven-dead owners."""
++    output_dir = Path(output_dir)
++    output_dir.mkdir(parents=True, exist_ok=True)
++    path = output_dir / _LOCK_FILENAME
++    payload = _make_lock_payload()
++    recovered_stale = False
++    previous_owner: RenderLockInfo | None = None
++    installed_identity: _FileIdentity | None = None
++
++    for _attempt in range(_MAX_RECLAIM_ATTEMPTS):
++        should_yield = False
++        with _directory_guard(output_dir) as serialized:
++            if _install_lock(path, payload):
++                installed_identity = _lock_file_identity(path)
++                should_yield = True
++            else:
++                try:
++                    owner, identity = _read_existing_lock(path)
++                except _LockChanged:
++                    continue
++                if not recover_stale or not _owner_is_definitely_dead(owner):
++                    raise RenderLockedError(
++                        f"Render directory is already being rendered by pid {owner.pid}: "
++                        f"{output_dir}"
++                    )
++                if not serialized:
++                    raise RenderLockInvalidError(
++                        f"Cannot safely reclaim stale render lock without process-safe "
++                        f"directory locking: {path}"
++                    )
++                try:
++                    unchanged = _unlink_if_unchanged(path, identity)
++                except _LockChanged:
++                    continue
++                if not unchanged:
++                    continue
++                previous_owner = owner
++                recovered_stale = True
++                _remove_owned_output_temps(output_dir, owner.pid)
++                _fsync_directory(output_dir)
++                continue
++        if should_yield:
++            break
++    else:
++        raise RenderLockedError(
++            f"Could not acquire render lock after concurrent lock changes: {path}"
++        )
++
++    acquisition = RenderLockAcquisition(path, recovered_stale, previous_owner)
++    try:
++        yield acquisition
++    finally:
++        if installed_identity is not None:
++            try:
++                _unlink_if_unchanged(path, installed_identity)
++                _fsync_directory(output_dir)
++            except RenderLockInvalidError:
++                # Preserve the original render result if lock cleanup cannot be proven safe.
++                pass
++
++
++__all__ = [
++    "RenderLockAcquisition",
++    "RenderLockInfo",
++    "exclusive_render_lock",
++]
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 5382b85..500d7dd 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -6,8 +6,7 @@ import json
+ import os
+ import re
+ import shutil
+-from collections.abc import Collection, Iterator, Mapping
+-from contextlib import ExitStack, contextmanager
++from collections.abc import Callable, Collection, Mapping
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
+ from time import monotonic
+@@ -29,8 +28,8 @@ from renderplan import (
+     save_preflight,
+ )
+
+-from .engines.base import EngineSelection, EngineSession, SpeechRequest
+-from .engines.registry import get_adapter, open_session
++from .engines.base import EngineSelection, SpeechRequest
++from .engines.registry import get_adapter
+ from .error_diagnostics import (
+     ERROR_DIAGNOSTIC_SCHEMA,
+     diagnostic_summary_fields,
+@@ -45,6 +44,7 @@ from .errors import (
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .preflight import _session_compatibility_key
+ from .progress import ProgressTracker, TerminalOutcome
++from .render_lock import exclusive_render_lock as _exclusive_render
+ from .renderplan_input import (
+     EMPHASIS_COMPOSITION_CAPABILITY,
+     EmphasisPolicy,
+@@ -55,6 +55,11 @@ from .renderplan_input import (
+     engine_selection_from_binding,
+     speech_request_conversion_from_renderplan,
+ )
++from .session_pool import (
++    EngineSessionPool,
++    SessionOpenFailure,
++    validate_max_open_sessions,
++)
+ from .storage import atomic_json, atomic_wav, digest, verified_wav, wav_info
+
+ RENDER_MANIFEST_FILENAME = "render-manifest.toml"
+@@ -102,11 +107,6 @@ class _PreparedSpeech:
+     execution_fingerprint: dict[str, Any]
+
+
+-@dataclass(frozen=True, slots=True)
+-class _OpenFailure:
+-    error: Exception
+-
+-
+ @dataclass(frozen=True, slots=True)
+ class _RenderFailure:
+     message: str
+@@ -172,9 +172,11 @@ def render_renderplan(
+     recheck_report_path: str | Path | None = None,
+     speech_numbers: Collection[int] | None = None,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> RenderPlanResult:
+     """Render selected speech items, retaining verified artifacts from prior runs."""
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
+     if not isinstance(parsed_plan, RenderPlan):
+         raise PlanError("render input must be a RenderPlan")
+@@ -347,8 +349,45 @@ def render_renderplan(
+             complete=len(current_artifacts) == len(parsed_plan.speech),
+             producer=producer,
+         )
+-        with ExitStack() as opened:
+-            sessions: dict[str, EngineSession | _OpenFailure] = {}
++
++        def session_event_callback(kind: RenderEventKind) -> Callable[..., None]:
++            def emit_event(
++                _key: str,
++                selection: EngineSelection,
++                context: Mapping[str, object],
++                status: str | None = None,
++                error: Exception | None = None,
++                elapsed: float | None = None,
++            ) -> None:
++                event_context = dict(context)
++                event_context["engine"] = selection.engine
++                if status is not None:
++                    event_context["status"] = status
++                if error is not None:
++                    event_context["error_type"] = type(error).__name__
++                    event_context["error_code"] = getattr(error, "code", None)
++                if elapsed is not None:
++                    event_context["phase_elapsed_seconds"] = elapsed
++                emit_render_event(
++                    on_event,
++                    _render_progress_event(kind, progress_tracker, **event_context),
++                )
++
++            return emit_event
++
++        with EngineSessionPool(
++            max_open_sessions=max_open_sessions,
++            on_open_started=session_event_callback(RenderEventKind.ENGINE_OPEN_STARTED),
++            on_open_finished=session_event_callback(
++                RenderEventKind.ENGINE_OPEN_FINISHED
++            ),
++            on_close_started=session_event_callback(
++                RenderEventKind.ENGINE_CLOSE_STARTED
++            ),
++            on_close_finished=session_event_callback(
++                RenderEventKind.ENGINE_CLOSE_FINISHED
++            ),
++        ) as sessions:
+             for current in prepared:
+                 item = current.item
+                 key = (item.number, current.segment_id)
+@@ -383,54 +422,12 @@ def render_renderplan(
+                         fingerprint["execution_status"] = "cache_reused"
+                     else:
+                         fingerprint["execution_status"] = "synthesized"
+-                        session = sessions.get(current.session_key)
+-                        if session is None:
+-                            emit_render_event(
+-                                on_event,
+-                                _render_progress_event(
+-                                    RenderEventKind.ENGINE_OPEN_STARTED,
+-                                    progress_tracker,
+-                                    **item_context,
+-                                ),
+-                            )
+-                            open_started = monotonic()
+-                            try:
+-                                session = opened.enter_context(
+-                                    open_session(current.selection)
+-                                )
+-                            except RenderEventCallbackError:
+-                                raise
+-                            except Exception as exc:  # noqa: BLE001 - Renderer setup becomes a partial-render result.
+-                                session = _OpenFailure(exc)
+-                                emit_render_event(
+-                                    on_event,
+-                                    _render_progress_event(
+-                                        RenderEventKind.ENGINE_OPEN_FINISHED,
+-                                        progress_tracker,
+-                                        **item_context,
+-                                        status="failed",
+-                                        error_type=type(exc).__name__,
+-                                        error_code=getattr(exc, "code", None),
+-                                        phase_elapsed_seconds=max(
+-                                            0.0, monotonic() - open_started
+-                                        ),
+-                                    ),
+-                                )
+-                            else:
+-                                emit_render_event(
+-                                    on_event,
+-                                    _render_progress_event(
+-                                        RenderEventKind.ENGINE_OPEN_FINISHED,
+-                                        progress_tracker,
+-                                        **item_context,
+-                                        status="opened",
+-                                        phase_elapsed_seconds=max(
+-                                            0.0, monotonic() - open_started
+-                                        ),
+-                                    ),
+-                                )
+-                            sessions[current.session_key] = session
+-                        if isinstance(session, _OpenFailure):
++                        session = sessions.acquire(
++                            current.session_key,
++                            current.selection,
++                            context=item_context,
++                        )
++                        if isinstance(session, SessionOpenFailure):
+                             fingerprint["execution_status"] = "session_open_failed"
+                             execution_fingerprints[key] = (
+                                 _finalize_execution_fingerprint(fingerprint)
+@@ -662,6 +659,13 @@ def render_renderplan(
+                     )
+                     break
+
++            sessions.close(
++                status="failure_cleanup" if failure is not None else "render_complete"
++            )
++            diagnostics["session_residency"] = {
++                "max_open_sessions": max_open_sessions,
++                **sessions.stats.as_dict(),
++            }
+         if (
+             failure is not None
+             and failure.fresh_preflight is not None
+@@ -851,6 +855,22 @@ def _load_existing_artifacts(
+         return {}, True
+
+
++def _verified_manifest_artifact_count(plan: RenderPlan, output_dir: Path) -> int:
++    """Count existing manifest artifacts whose output WAVs still verify."""
++    try:
++        artifacts, _ = _load_existing_artifacts(
++            plan,
++            output_dir,
++            output_dir / RENDER_MANIFEST_FILENAME,
++            plan.plan_id or plan.computed_id(),
++            force=False,
++            reset_stale_output=False,
++        )
++    except (ArtifactError, OSError, ValueError, TypeError):
++        return 0
++    return len(artifacts)
++
++
+ def _reset_owned_artifacts(output_dir: Path) -> None:
+     """Remove only VoiceRender's well-known chapter output files."""
+     for child in output_dir.iterdir():
+@@ -1112,22 +1132,6 @@ def _voicerender_version() -> str:
+         return "0+unknown"
+
+
+-@contextmanager
+-def _exclusive_render(output_dir: Path) -> Iterator[None]:
+-    output_dir.mkdir(parents=True, exist_ok=True)
+-    lock = output_dir / ".voicerender.lock"
+-    try:
+-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+-    except FileExistsError as exc:
+-        raise ArtifactError(f"Render directory is locked: {output_dir}") from exc
+-    try:
+-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+-            stream.write(str(os.getpid()))
+-        yield
+-    finally:
+-        lock.unlink(missing_ok=True)
+-
+-
+ __all__ = [
+     "RENDER_DIAGNOSTICS_FILENAME",
+     "RENDER_MANIFEST_FILENAME",
+diff --git a/voicerender/session_pool.py b/voicerender/session_pool.py
+new file mode 100644
+index 0000000..3fe5ba8
+--- /dev/null
++++ b/voicerender/session_pool.py
+@@ -0,0 +1,222 @@
++"""Bounded LRU residency for engine sessions."""
++
++from __future__ import annotations
++
++from collections import OrderedDict
++from collections.abc import Callable, Mapping
++from contextlib import ExitStack
++from dataclasses import dataclass, field
++from time import monotonic
++from typing import Any
++
++from .engines.base import EngineSelection, EngineSession
++from .engines.registry import open_session
++from .errors import PlanError
++
++
++@dataclass(slots=True)
++class SessionPoolStats:
++    opens: int = 0
++    closes: int = 0
++    evictions: int = 0
++    hits: int = 0
++    peak_open: int = 0
++
++    def as_dict(self) -> dict[str, int]:
++        return {
++            "opens": self.opens,
++            "closes": self.closes,
++            "evictions": self.evictions,
++            "hits": self.hits,
++            "peak_open_sessions": self.peak_open,
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class SessionOpenFailure:
++    error: Exception
++
++
++@dataclass(slots=True)
++class _SessionEntry:
++    key: str
++    selection: EngineSelection
++    session: EngineSession
++    stack: ExitStack
++    context: Mapping[str, object] = field(default_factory=dict)
++
++
++SessionCallback = Callable[..., None]
++
++
++def validate_max_open_sessions(value: int) -> int:
++    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
++        raise PlanError(
++            "max_open_sessions must be an integer greater than or equal to 1"
++        )
++    return value
++
++
++class EngineSessionPool:
++    """Keep at most N sessions resident, evicting the least-recently-used first."""
++
++    def __init__(
++        self,
++        *,
++        max_open_sessions: int,
++        on_open_started: SessionCallback | None = None,
++        on_open_finished: SessionCallback | None = None,
++        on_close_started: SessionCallback | None = None,
++        on_close_finished: SessionCallback | None = None,
++    ) -> None:
++        self.max_open_sessions = validate_max_open_sessions(max_open_sessions)
++        self.on_open_started = on_open_started
++        self.on_open_finished = on_open_finished
++        self.on_close_started = on_close_started
++        self.on_close_finished = on_close_finished
++        self.stats = SessionPoolStats()
++        self._entries: OrderedDict[str, _SessionEntry] = OrderedDict()
++        self._failures: dict[str, SessionOpenFailure] = {}
++        self._closed = False
++
++    def acquire(
++        self,
++        key: str,
++        selection: EngineSelection,
++        *,
++        context: Mapping[str, object] | None = None,
++    ) -> EngineSession | SessionOpenFailure:
++        if self._closed:
++            raise RuntimeError(
++                "Cannot acquire a session from a closed EngineSessionPool"
++            )
++        failed = self._failures.get(key)
++        if failed is not None:
++            return failed
++        entry = self._entries.get(key)
++        if entry is not None:
++            self._entries.move_to_end(key)
++            self.stats.hits += 1
++            return entry.session
++
++        if len(self._entries) >= self.max_open_sessions:
++            oldest_key = next(iter(self._entries))
++            self.stats.evictions += 1
++            self._close_entry(oldest_key, status="evicted")
++
++        event_context = dict(context or {})
++        started = monotonic()
++        self._notify(self.on_open_started, key, selection, event_context)
++        stack = ExitStack()
++        try:
++            session = stack.enter_context(open_session(selection))
++        except Exception as exc:  # noqa: BLE001 - adapter startup errors are memoized per key.
++            failure = SessionOpenFailure(exc)
++            self._failures[key] = failure
++            self._notify(
++                self.on_open_finished,
++                key,
++                selection,
++                event_context,
++                "failed",
++                exc,
++                max(0.0, monotonic() - started),
++            )
++            return failure
++
++        entry = _SessionEntry(key, selection, session, stack, event_context)
++        self._entries[key] = entry
++        self.stats.opens += 1
++        self.stats.peak_open = max(self.stats.peak_open, len(self._entries))
++        self._notify(
++            self.on_open_finished,
++            key,
++            selection,
++            event_context,
++            "opened",
++            None,
++            max(0.0, monotonic() - started),
++        )
++        return session
++
++    def _close_entry(self, key: str, *, status: str) -> None:
++        entry = self._entries.pop(key)
++        started = monotonic()
++        first_error: Exception | None = None
++        try:
++            self._notify(
++                self.on_close_started,
++                entry.key,
++                entry.selection,
++                entry.context,
++                status,
++            )
++        except Exception as exc:  # noqa: BLE001 - cleanup must proceed after callback errors.
++            first_error = exc
++
++        close_error: Exception | None = None
++        try:
++            entry.stack.close()
++        except Exception as exc:  # noqa: BLE001 - continue closing remaining sessions.
++            close_error = exc
++            if first_error is None:
++                first_error = exc
++        self.stats.closes += 1
++        elapsed = max(0.0, monotonic() - started)
++        try:
++            self._notify(
++                self.on_close_finished,
++                entry.key,
++                entry.selection,
++                entry.context,
++                status,
++                close_error,
++                elapsed,
++            )
++        except Exception as exc:  # noqa: BLE001 - run all close-finished callbacks.
++            if first_error is None:
++                first_error = exc
++        if first_error is not None:
++            raise first_error
++
++    @staticmethod
++    def _notify(callback: SessionCallback | None, *args: Any) -> None:
++        if callback is not None:
++            callback(*args)
++
++    def close(self, *, status: str = "render_complete") -> None:
++        if self._closed:
++            return
++        self._closed = True
++        first_error: Exception | None = None
++        while self._entries:
++            newest_key = next(reversed(self._entries))
++            try:
++                self._close_entry(newest_key, status=status)
++            except Exception as exc:  # noqa: BLE001 - continue closing the pool.
++                if first_error is None:
++                    first_error = exc
++        if first_error is not None:
++            raise first_error
++
++    def __enter__(self) -> EngineSessionPool:  # noqa: PYI034 - Python 3.10 support.
++        if self._closed:
++            raise RuntimeError("Cannot re-enter a closed EngineSessionPool")
++        return self
++
++    def __exit__(self, exc_type: object, exc: object, _traceback: object) -> bool:
++        status = "failure_cleanup" if exc_type is not None else "render_complete"
++        try:
++            self.close(status=status)
++        except Exception:
++            if exc is None:
++                raise
++        return False
++
++
++__all__ = [
++    "EngineSessionPool",
++    "SessionOpenFailure",
++    "SessionPoolStats",
++    "validate_max_open_sessions",
++]

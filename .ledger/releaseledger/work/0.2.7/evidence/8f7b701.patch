@@ -1,0 +1,71 @@
+ tests/test_render_lock.py  | 29 +++++++++++++++++++++++++++++
+ voicerender/render_lock.py |  9 ++++-----
+ 2 files changed, 33 insertions(+), 5 deletions(-)
+
+diff --git a/tests/test_render_lock.py b/tests/test_render_lock.py
+index 5558b42..677fd23 100644
+--- a/tests/test_render_lock.py
++++ b/tests/test_render_lock.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+
+ import json
+ import os
++from pathlib import Path
+
+ import pytest
+
+@@ -46,6 +47,34 @@ def test_lock_is_complete_json_during_render_and_removed_afterward(tmp_path):
+     assert not lock_path.exists()
+
+
++def test_lock_install_uses_portable_fallback_on_windows(tmp_path, monkeypatch):
++    source = tmp_path / "lock.tmp"
++    destination = tmp_path / ".voicerender.lock"
++    source.write_bytes(b"lock")
++
++    monkeypatch.setattr(render_lock.os, "name", "nt")
++
++    def link_without_replacement(source_path: Path, destination_path: Path) -> None:
++        destination_path.write_bytes(source_path.read_bytes())
++
++    monkeypatch.setattr(
++        render_lock.os,
++        "link",
++        link_without_replacement,
++        raising=False,
++    )
++    monkeypatch.setattr(
++        render_lock.ctypes,
++        "CDLL",
++        lambda *_args, **_kwargs: pytest.fail("Windows must not load the process library"),
++    )
++
++    render_lock._install_no_replace(source, destination)
++
++    assert destination.read_bytes() == b"lock"
++    assert source.exists()
++
++
+ def test_active_legacy_pid_lock_is_preserved(tmp_path):
+     lock_path = tmp_path / ".voicerender.lock"
+     lock_path.write_text(str(os.getpid()), encoding="utf-8")
+diff --git a/voicerender/render_lock.py b/voicerender/render_lock.py
+index 90a3042..0fd4cdc 100644
+--- a/voicerender/render_lock.py
++++ b/voicerender/render_lock.py
+@@ -164,11 +164,10 @@ def _directory_guard(output_dir: Path) -> Iterator[bool]:
+
+ def _install_no_replace(source: Path, destination: Path) -> None:
+     """Atomically move a complete temp file into place without replacement."""
+-    native_library = ctypes.CDLL(None, use_errno=True)
+-    try:
+-        renameat2 = native_library.renameat2
+-    except AttributeError:
+-        renameat2 = None
++    renameat2 = None
++    if os.name != "nt":
++        native_library = ctypes.CDLL(None, use_errno=True)
++        renameat2 = getattr(native_library, "renameat2", None)
+     if renameat2 is not None:
+         renameat2.argtypes = (
+             ctypes.c_int,

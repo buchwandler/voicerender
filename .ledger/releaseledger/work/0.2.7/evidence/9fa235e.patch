@@ -1,0 +1,1908 @@
+ README.md                         |  10 ++
+ docs/index.md                     |   6 +
+ tests/test_bundle_batch_render.py |  31 ++++-
+ tests/test_cli.py                 |  22 +++
+ tests/test_document_contract.py   |  60 ++++++++
+ tests/test_error_diagnostics.py   | 124 +++++++++++++++++
+ tests/test_kokoro_reference.py    |  86 ++++++++++++
+ tests/test_render_book.py         |  98 ++++++++++++-
+ tests/test_renderplan_render.py   |  57 ++++++++
+ tests/test_variants.py            |  26 +++-
+ voicerender/book.py               |  51 +++++++
+ voicerender/bundle_batch.py       | 130 +++++++++++++++--
+ voicerender/cli.py                |  39 +++++-
+ voicerender/document.py           |  23 ++++
+ voicerender/engines/kokoro.py     |  22 +++
+ voicerender/error_diagnostics.py  | 283 ++++++++++++++++++++++++++++++++++++++
+ voicerender/errors.py             |   1 -
+ voicerender/events.py             |   5 +
+ voicerender/renderplan_render.py  |  66 ++++++++-
+ voicerender/variants.py           | 109 ++++++++++++++-
+ 20 files changed, 1227 insertions(+), 22 deletions(-)
+
+diff --git a/README.md b/README.md
+index a61e2d6..c6c35aa 100644
+--- a/README.md
++++ b/README.md
+@@ -98,6 +98,16 @@ voicerender render chapter.renderplan.toml \
+ The accepted emphasis parameters are `{}` or one of `{ "level": "reduced" }`, `{ "level": "moderate" }`, or `{ "level": "strong" }`; unknown keys, types, and invalid ranges are rejected. Other unsupported controls remain fail-closed. VoiceRender sends the original text to the engine without an emphasis option, preserves the original controls and identities in the RenderPlan, and leaves control interpretation—including overlapping emphasis—to AudioCompose.
+
+ Deferred controls are explicitly pending composition, not fulfilled by the standalone WAV. Their count and capability appear in the preflight check detail and in the render output's `render-diagnostics.json` sidecar, which warns that any produced WAVs contain unchanged speech. Human render output warns when composition is pending, and render JSON plus `bundle render` reports expose `pending_composition`. The shared RenderManifest schema is unchanged; AudioCompose must use the original RenderPlan as the source of truth when applying the declared effect.
++
++### Engine failure diagnostics
++
++A successful preflight does not guarantee that model execution will succeed: preflight checks declared engine capabilities and measures the request, but does not perform full inference or reference-voice enrollment. Session opening, immediate remeasurement, synthesis, and artifact writes can still fail during rendering.
++
++On a render-time exception, `render-diagnostics.json` keeps the existing `voicerender.render-diagnostics.v1` schema identifier and adds `error_type` plus an `error_diagnostic` chain. The chain records the VoiceRender error, available engine diagnostic, and Python cause/context without parsing human error strings. Document/book reports and JSON/API results retain compact `error_stage`, `error_root_cause_type`, `error_root_cause_message`, and `render_diagnostics` fields; the JSON sidecar is the canonical full diagnostic.
++
++The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
++
++Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. Older supported versions (including 0.10.5) continue with Python exception chaining and the available metadata; the optional dependency floor remains unchanged until a diagnostics-capable release is confirmed.
+ The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
+
+ Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
+diff --git a/docs/index.md b/docs/index.md
+index cb4aab6..891d183 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -61,6 +61,12 @@ Engine adapters implement the request-level protocol in `voicerender.engines.bas
+
+ Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
+
++## Engine failure diagnostics
++
++Preflight validates declared capabilities and request measurements; it does not perform full model inference or reference enrollment. A render can therefore pass preflight and fail later while opening an engine session, synthesizing, or writing artifacts.
++
++The `render-diagnostics.json` sidecar retains the `voicerender.render-diagnostics.v1` identifier and stores the bounded structured exception cause chain. Workflow reports, API/JSON results, and failure events carry only compact stage/root-cause fields and the sidecar path. Diagnostics omit traceback locals and sensitive speech/audio payloads, are JSON-safe and size-bounded, and cannot replace the original render failure if serialization fails. See [Engine failure diagnostics in the README](https://github.com/buchwandler/voicerender/blob/main/README.md#engine-failure-diagnostics) for the field hierarchy, CLI behavior, and PyKokoro compatibility policy.
++
+ ## Progress, ETA, and estimates
+
+ The `render`, `bundle render`, and `preflight` commands support `--progress` and `--no-progress`. Auto mode writes progress only to interactive stderr and is silent in JSON mode. Forced progress remains on stderr, including with `--json`; redirected output is throttled newline text without terminal control sequences.
+diff --git a/tests/test_bundle_batch_render.py b/tests/test_bundle_batch_render.py
+index 0c0eb1f..b9a1118 100644
+--- a/tests/test_bundle_batch_render.py
++++ b/tests/test_bundle_batch_render.py
+@@ -71,11 +71,21 @@ def _result(
+     kind: BundleKind = "book",
+     error_code: str | None = None,
+     error_message: str | None = None,
++    error_type: str | None = None,
++    error_stage: str | None = None,
++    error_root_cause_type: str | None = None,
++    error_root_cause_message: str | None = None,
++    render_diagnostics: Path | None = None,
+ ) -> BundleRenderResult:
+     value = SimpleNamespace(
+         exit_code=exit_code,
+         error_code=error_code,
+         error_message=error_message,
++        error_type=error_type,
++        error_stage=error_stage,
++        error_root_cause_type=error_root_cause_type,
++        error_root_cause_message=error_root_cause_message,
++        render_diagnostics=render_diagnostics,
+         to_dict=lambda: {"exit_code": exit_code},
+     )
+     return BundleRenderResult(kind=kind, value=cast(Any, value))
+@@ -691,7 +701,14 @@ def test_batch_failure_details_are_visible_in_human_and_json_output(
+         batch_module,
+         "render_bundle",
+         lambda *_args, **_kwargs: _result(
+-            1, error_code="engine.unavailable", error_message="engine unavailable"
++            1,
++            error_code="engine.unavailable",
++            error_message="engine unavailable",
++            error_type="EngineBackendError",
++            error_stage="inference",
++            error_root_cause_type="RuntimeError",
++            error_root_cause_message="provider execution failed",
++            render_diagnostics=root / "voice" / "render-diagnostics.json",
+         ),
+     )
+
+@@ -705,3 +722,15 @@ def test_batch_failure_details_are_visible_in_human_and_json_output(
+     assert payload["variants"][0]["error_code"] == "engine.unavailable"
+     assert payload["variants"][0]["error_message"] == "engine unavailable"
+     assert "engine.unavailable: engine unavailable" in human_output
++    assert "root cause RuntimeError: provider execution failed" in human_output
++    assert "sidecar " in human_output and "render-diagnostics.json" in human_output
++    assert payload["variants"][0]["error_type"] == "EngineBackendError"
++    assert payload["variants"][0]["error_stage"] == "inference"
++    assert payload["variants"][0]["error_root_cause_type"] == "RuntimeError"
++    assert (
++        payload["variants"][0]["error_root_cause_message"]
++        == "provider execution failed"
++    )
++    assert payload["variants"][0]["render_diagnostics"].endswith(
++        "voice/render-diagnostics.json"
++    )
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index fba5376..1c764f2 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -689,6 +689,28 @@ def test_cli_progress_printer_formats_tty_and_cleans_up_line() -> None:
+     assert "\x1b" not in output
+
+
++def test_cli_progress_failure_includes_root_cause_and_diagnostics_path() -> None:
++    from voicerender.cli import _ProgressPrinter
++    from voicerender.events import RenderEvent, RenderEventKind
++
++    event = RenderEvent(
++        kind=RenderEventKind.SEGMENT_FAILED,
++        error_code="synthesis.backend_error",
++        error_type="EngineBackendError",
++        error_stage="inference",
++        error_root_cause_type="RuntimeError",
++        error_root_cause_message="provider execution failed",
++        render_diagnostics="/output/render-diagnostics.json",
++    )
++
++    status = _ProgressPrinter._event_status(event)
++
++    assert status is not None
++    assert "root cause RuntimeError: provider execution failed" in status
++    assert "stage inference" in status
++    assert "sidecar /output/render-diagnostics.json" in status
++
++
+ def test_cli_progress_printer_throttles_non_tty_with_injected_clock() -> None:
+     import io
+
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index c1dab82..ad22e93 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -362,3 +362,63 @@ def test_document_render_reports_reused_complete_manifest(
+     assert result.status == "reused"
+     assert result.manifest_complete is True
+     assert result.reused == 1
++
++
++def test_document_report_preserves_error_diagnostic_summary_and_sidecar_path(
++    tmp_path: Path,
++) -> None:
++    import voicerender.document as document_module
++
++    root = _workspace(tmp_path / "diagnostics.ssmd-bundle")
++    profile_path = (
++        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    )
++    profile = codec.load_profile(profile_path)
++    fingerprint = (profile.profile_id or profile.computed_id()).removeprefix("sha256:")[
++        :12
++    ]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / "renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        variant_dir / "document.renderplan.toml",
++    )
++    request = document_module._resolve_document_request(root, variant=variant)
++    diagnostics_path = request.output_dir / "render-diagnostics.json"
++    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
++    diagnostics_path.write_text("{}", encoding="utf-8")
++    result = document_module.DocumentRenderResult(
++        request=request,
++        report_path=request.output_variant_dir / "voicerender-report.toml",
++        preflight_report=None,
++        recheck_report=None,
++        manifest=None,
++        status="failed",
++        planned_speech=1,
++        selected_speech=1,
++        available_speech=0,
++        rendered=0,
++        reused=0,
++        manifest_complete=False,
++        error_code="synthesis.backend_error",
++        error_message="backend failed",
++        render_diagnostics=diagnostics_path,
++        error_type="EngineBackendError",
++        error_stage="inference",
++        error_root_cause_type="RuntimeError",
++        error_root_cause_message="provider execution failed",
++    )
++
++    document_module._write_report(result)
++
++    payload = result.to_dict()
++    report = result.report_path.read_text(encoding="utf-8")
++    assert payload["render_diagnostics"] == str(diagnostics_path)
++    assert payload["error_type"] == "EngineBackendError"
++    assert payload["error_stage"] == "inference"
++    assert payload["error_root_cause_type"] == "RuntimeError"
++    assert payload["error_root_cause_message"] == "provider execution failed"
++    assert f'render_diagnostics = "{diagnostics_path}"' in report
++    assert 'error_stage = "inference"' in report
+diff --git a/tests/test_error_diagnostics.py b/tests/test_error_diagnostics.py
+new file mode 100644
+index 0000000..e5e1cfb
+--- /dev/null
++++ b/tests/test_error_diagnostics.py
+@@ -0,0 +1,124 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import numpy as np
++
++from voicerender.error_diagnostics import (
++    exception_diagnostic,
++    root_cause,
++    root_cause_summary,
++)
++from voicerender.errors import EngineBackendError
++
++
++class CustomValue:
++    pass
++
++
++def test_exception_diagnostic_preserves_explicit_three_level_chain() -> None:
++    root = RuntimeError("provider execution failed")
++    middle = ValueError("engine failed")
++    outer = EngineBackendError("synthesis failed", engine="fake")
++    middle.__cause__ = root
++    outer.__cause__ = middle
++
++    diagnostic = exception_diagnostic(outer)
++
++    assert diagnostic["type"] == "EngineBackendError"
++    assert diagnostic["details"] == {"engine": "fake"}
++    assert diagnostic["cause"]["type"] == "ValueError"
++    assert diagnostic["cause"]["cause"]["type"] == "RuntimeError"
++    assert root_cause(diagnostic)["message"] == "provider execution failed"
++    assert root_cause_summary(diagnostic) == "RuntimeError: provider execution failed"
++    json.dumps(diagnostic)
++
++
++def test_exception_diagnostic_falls_back_to_unsuppressed_context() -> None:
++    try:
++        raise ValueError("inner")
++    except ValueError:
++        try:
++            raise RuntimeError("outer")
++        except RuntimeError as error:
++            diagnostic = exception_diagnostic(error)
++
++    assert diagnostic["cause"]["type"] == "ValueError"
++    assert diagnostic["cause"]["message"] == "inner"
++
++
++def test_exception_diagnostic_respects_suppressed_context() -> None:
++    try:
++        raise ValueError("inner")
++    except ValueError:
++        try:
++            raise RuntimeError("outer") from None
++        except RuntimeError as error:
++            diagnostic = exception_diagnostic(error)
++
++    assert "cause" not in diagnostic
++
++
++def test_exception_diagnostic_bounds_depth_and_detects_cycles() -> None:
++    first = RuntimeError("first")
++    second = ValueError("second")
++    first.__cause__ = second
++    second.__cause__ = first
++
++    diagnostic = exception_diagnostic(first, max_depth=1)
++    assert diagnostic["cause_truncated"] is True
++
++    cyclic = exception_diagnostic(first, max_depth=4)
++    assert cyclic["cause"]["cause"]["message"] == "[exception cycle omitted]"
++
++
++def test_details_are_sanitized_and_json_safe() -> None:
++    error = EngineBackendError(
++        "x" * 5000,
++        details={
++            "path": Path("/tmp/model.onnx"),
++            "scalar": np.int64(7),
++            "unsupported": CustomValue(),
++            "speech_text": "secret speech",
++            "request_text": "secret request",
++            "input_audio": [0.1, 0.2],
++            "phoneme_ids": [1, 2],
++            "token_sequence": [3, 4],
++            "environment_variables": {"API_KEY": "secret"},
++            "nested": {"transcript": "secret transcript", "safe": "ok"},
++        },
++    )
++
++    diagnostic = exception_diagnostic(error)
++    details = diagnostic["details"]
++
++    assert len(diagnostic["message"]) <= 4096
++    assert details["path"] == "/tmp/model.onnx"
++    assert details["scalar"] == 7
++    assert details["unsupported"].startswith("[omitted unsupported ")
++    assert "speech_text" not in details
++    assert "request_text" not in details
++    assert "input_audio" not in details
++    assert "phoneme_ids" not in details
++    assert "token_sequence" not in details
++    assert "environment_variables" not in details
++    assert details["nested"] == {"safe": "ok"}
++    json.dumps(diagnostic)
++
++
++def test_engine_error_keeps_explicit_python_exception_cause() -> None:
++    native = RuntimeError("native failure")
++    try:
++        raise EngineBackendError("wrapped failure") from native
++    except EngineBackendError as error:
++        assert error.__cause__ is native
++        assert exception_diagnostic(error)["cause"]["message"] == "native failure"
++
++
++def test_root_cause_summary_omits_duplicate_message() -> None:
++    diagnostic = {
++        "message": "same",
++        "cause": {"type": "RuntimeError", "message": "same"},
++    }
++    assert root_cause_summary(diagnostic) is None
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 29393bd..5efe4c2 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -22,6 +22,7 @@ from voicerender.engines.kokoro import (
+     _normalize_short_sentence,
+     _normalize_voice_level,
+     _target_from_capabilities,
++    _translate_pykokoro_error,
+     _version_supported,
+ )
+ from voicerender.engines.selection import EngineRequest
+@@ -858,3 +859,88 @@ def test_real_pykokoro_public_api_contract_smoke_without_runtime_load() -> None:
+     assert contract.supports_request_measurement is True
+     assert contract.supports_reference_voice is True
+     assert contract.supports_voice_enrollment is True
++
++
++class BackendError(Exception):
++    stage = "inference"
++    native_error_message = "bad shape"
++
++
++def _translation_selection() -> EngineSelection:
++    return EngineSelection(
++        engine="kokoro",
++        target_id="en-akinvox-cloning-v1",
++        language="en-US",
++        voice="akinvox",
++        speaker=1,
++    )
++
++
++def test_translate_pykokoro_error_preserves_native_diagnostics_and_cause(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("pykokoro")
++    module.BackendError = BackendError
++    native_diagnostic = {
++        "schema": "pykokoro.error-diagnostic.v1",
++        "type": "BackendError",
++        "stage": "inference",
++        "cause": {"type": "RuntimeContractError", "message": "bad shape"},
++    }
++    module.error_diagnostic = lambda _error: native_diagnostic
++    monkeypatch.setitem(sys.modules, "pykokoro", module)
++
++    native = BackendError(
++        "Kokoro model inference failed: RuntimeContractError: bad shape"
++    )
++    native.__cause__ = RuntimeError("provider execution failed")
++    translated = _translate_pykokoro_error(native, _translation_selection())
++
++    assert isinstance(translated, EngineBackendError)
++    assert translated.code == "synthesis.backend_error"
++    assert str(translated) == str(native)
++    assert translated.native_error_type == "BackendError"
++    assert translated.details["native_stage"] == "inference"
++    assert translated.details["native_error_message"] == "bad shape"
++    assert translated.details["native_diagnostic"] == native_diagnostic
++    with pytest.raises(EngineBackendError) as caught:
++        raise translated from native
++    assert caught.value.__cause__ is native
++    assert caught.value.__cause__.__cause__.__str__() == "provider execution failed"
++
++
++def test_translate_pykokoro_reference_enrollment_error_keeps_specific_code(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("pykokoro")
++    module.BackendError = BackendError
++    module.error_diagnostic = lambda _error: {"stage": "reference_enrollment"}
++    monkeypatch.setitem(sys.modules, "pykokoro", module)
++
++    native = BackendError("Kokoro reference enrollment failed")
++    native.stage = "reference_enrollment"
++    translated = _translate_pykokoro_error(
++        native,
++        _translation_selection(),
++        failure_code="pykokoro.reference_enrollment_failed",
++    )
++
++    assert translated.code == "pykokoro.reference_enrollment_failed"
++    assert translated.details["native_stage"] == "reference_enrollment"
++    assert translated.details["native_diagnostic"]["stage"] == "reference_enrollment"
++
++
++def test_translate_pykokoro_error_falls_back_without_public_helper(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("pykokoro")
++    module.BackendError = BackendError
++    monkeypatch.setitem(sys.modules, "pykokoro", module)
++
++    native = BackendError("older PyKokoro backend message")
++    translated = _translate_pykokoro_error(native, _translation_selection())
++
++    assert str(translated) == "older PyKokoro backend message"
++    assert translated.code == "synthesis.backend_error"
++    assert translated.details["native_stage"] == "inference"
++    assert "native_diagnostic" not in translated.details
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index c5c726d..fb10726 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -475,7 +475,7 @@ def test_book_propagates_explicit_emphasis_policy(
+ def test_book_reports_pending_composition_in_result_and_human_output(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+ ) -> None:
+-    _install_fake_execution(monkeypatch)
++    calls = _install_fake_execution(monkeypatch)
+     workspace, variant = _book(tmp_path, chapters=((5, 1),), emphasis_speech=1)
+
+     result = book_module.render_book(
+@@ -488,6 +488,30 @@ def test_book_reports_pending_composition_in_result_and_human_output(
+     assert report["pending_composition"] is True
+     assert report["item"][0]["pending_composition"] is True
+
++    diagnostics_path = outcome.output_dir / "render-diagnostics.json"
++    legacy = json.loads(diagnostics_path.read_text(encoding="utf-8"))
++    assert legacy["schema"] == "voicerender.render-diagnostics.v1"
++    assert "error_diagnostic" not in legacy
++    second = book_module.render_book(
++        workspace, variant=variant, emphasis_policy="defer-to-compose"
++    )
++    assert second.outcomes[0].status == "reused"
++    assert len(calls["render"]) == 1
++
++    additive = dict(legacy)
++    additive["error_type"] = "EngineBackendError"
++    additive["error_diagnostic"] = {
++        "schema": "voicerender.error-diagnostic.v1",
++        "type": "EngineBackendError",
++        "message": "optional additive field",
++    }
++    diagnostics_path.write_text(json.dumps(additive), encoding="utf-8")
++    third = book_module.render_book(
++        workspace, variant=variant, emphasis_policy="defer-to-compose"
++    )
++    assert third.outcomes[0].status == "reused"
++    assert len(calls["render"]) == 1
++
+     from voicerender.bundle import BundleRenderResult
+     from voicerender.cli import _print_bundle_result
+
+@@ -1250,3 +1274,75 @@ def test_book_workspace_and_public_apis_accept_root_aliases(
+         pytest.skip(f"directory symlinks are unavailable: {exc}")
+     with pytest.raises(BookRenderError, match="root must not be a symlink"):
+         resolve_workspace(link)
++
++
++def test_book_report_and_events_propagate_error_diagnostic_summary(
++    monkeypatch: pytest.MonkeyPatch,
++    capsys: pytest.CaptureFixture[str],
++    tmp_path: Path,
++) -> None:
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path, chapters=((5, 1),))
++    original_render = book_module.render_renderplan
++    diagnostic = {
++        "schema": "voicerender.error-diagnostic.v1",
++        "type": "EngineBackendError",
++        "module": "voicerender.errors",
++        "message": "backend failed",
++        "details": {"native_stage": "inference"},
++        "cause": {
++            "type": "RuntimeError",
++            "module": "builtins",
++            "message": "provider execution failed",
++        },
++    }
++
++    def render_with_diagnostic(*args: Any, **kwargs: Any) -> Any:
++        result = original_render(*args, **kwargs)
++        diagnostics_path = Path(kwargs["output_dir"]) / "render-diagnostics.json"
++        diagnostics_path.write_text(json.dumps(diagnostic), encoding="utf-8")
++        return replace(
++            result,
++            error="backend failed",
++            error_code="synthesis.backend_error",
++            error_type="EngineBackendError",
++            error_diagnostic=diagnostic,
++            diagnostics_path=diagnostics_path,
++            error_segment_number=1,
++            error_segment_id="sha256:segment",
++            error_engine="kokoro",
++        )
++
++    monkeypatch.setattr(book_module, "render_renderplan", render_with_diagnostic)
++    events: list[RenderEvent] = []
++    result = book_module.render_book(workspace, variant=variant, on_event=events.append)
++    outcome = result.outcomes[0]
++
++    assert outcome.status == "failed"
++    assert (
++        outcome.render_diagnostics is not None and outcome.render_diagnostics.is_file()
++    )
++    assert outcome.error_type == "EngineBackendError"
++    assert outcome.error_stage == "inference"
++    assert outcome.error_root_cause_type == "RuntimeError"
++    assert outcome.error_root_cause_message == "provider execution failed"
++    item = result.to_dict()["items"][0]
++    assert item["render_diagnostics"] == "chapter-0005/render-diagnostics.json"
++    assert item["error_root_cause_message"] == "provider execution failed"
++    report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
++    assert report["item"][0]["render_diagnostics"] == item["render_diagnostics"]
++    chapter_event = next(
++        event for event in events if event.kind is RenderEventKind.CHAPTER_FINISHED
++    )
++    assert chapter_event.error_type == "EngineBackendError"
++    assert chapter_event.error_stage == "inference"
++    assert chapter_event.error_root_cause_message == "provider execution failed"
++    assert chapter_event.render_diagnostics == str(outcome.render_diagnostics)
++
++    from voicerender.bundle import BundleRenderResult
++    from voicerender.cli import _print_bundle_result
++
++    _print_bundle_result(BundleRenderResult(kind="book", value=result))
++    human_output = capsys.readouterr().out
++    assert "root cause RuntimeError: provider execution failed" in human_output
++    assert str(outcome.render_diagnostics) in human_output
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 4b3517b..362de0d 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -1612,13 +1612,22 @@ def test_open_failure_emits_typed_terminal_progress(
+     )
+
+     assert result.failed
++    assert result.error_type == "RuntimeError"
++    assert result.error_diagnostic["message"] == "engine startup failed"
++    assert (
++        result.diagnostics_path
++        == tmp_path / "failed-output" / RENDER_DIAGNOSTICS_FILENAME
++    )
++    assert result.diagnostics_path.is_file()
+     failed = [event for event in events if event.kind is RenderEventKind.SEGMENT_FAILED]
+     assert len(failed) == 1
+     assert failed[0].completed_count == 1
+     assert failed[0].progress == 1.0
+     assert failed[0].error_type == "RuntimeError"
++    assert failed[0].render_diagnostics == str(result.diagnostics_path)
+     assert events[-1].kind is RenderEventKind.RENDER_COMPLETED
+     assert events[-1].status == "failed"
++    assert events[-1].render_diagnostics == str(result.diagnostics_path)
+
+
+ def test_estimate_renderplan_reports_verified_reuse_without_side_effects(
+@@ -1668,9 +1677,13 @@ def test_render_failure_diagnostics_identify_segment_and_engine(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     adapter = _install(monkeypatch)
++    root_cause_error = RuntimeError("provider execution failed")
++    engine_error = ValueError("engine adapter failed")
++    engine_error.__cause__ = root_cause_error
+     adapter.synthesis_error = EngineBackendError(
+         "backend failed", engine=adapter.id, request_id="request-1"
+     )
++    adapter.synthesis_error.__cause__ = engine_error
+     plan = _plan("fails during synthesis")
+     report = _report(adapter, plan, tmp_path)
+     output_dir = tmp_path / "render-output"
+@@ -1687,10 +1700,54 @@ def test_render_failure_diagnostics_identify_segment_and_engine(
+     assert result.error_segment_number == 1
+     assert result.error_segment_id == expected_segment_id
+     assert result.error_engine == adapter.id
++    assert result.error_type == "EngineBackendError"
++    assert result.error_diagnostic["cause"]["cause"]["type"] == "RuntimeError"
++    assert (
++        result.error_diagnostic["cause"]["cause"]["message"]
++        == "provider execution failed"
++    )
++    assert result.diagnostics_path == output_dir / RENDER_DIAGNOSTICS_FILENAME
++    assert result.diagnostics_path.is_file()
+     diagnostics = json.loads(
+         (output_dir / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
+     )
+     assert diagnostics["error_segment_number"] == 1
++    assert diagnostics["schema"] == "voicerender.render-diagnostics.v1"
+     assert diagnostics["error_segment_id"] == expected_segment_id
+     assert diagnostics["error_engine"] == adapter.id
+     assert diagnostics["error_code"] == "synthesis.backend_error"
++    assert diagnostics["error_type"] == "EngineBackendError"
++    assert (
++        diagnostics["error_diagnostic"]["cause"]["cause"]["message"]
++        == "provider execution failed"
++    )
++    json.dumps(diagnostics)
++
++
++def test_diagnostic_serializer_failure_does_not_mask_render_failure(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    import voicerender.renderplan_render as render_module
++
++    adapter = _install(monkeypatch)
++    adapter.synthesis_error = EngineBackendError("original backend failure")
++    plan = _plan("serializer failure")
++    report = _report(adapter, plan, tmp_path)
++    monkeypatch.setattr(
++        render_module,
++        "exception_diagnostic",
++        lambda _error: (_ for _ in ()).throw(RuntimeError("serializer failed")),
++    )
++
++    result = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "serializer-failed-render",
++        cache_dir=tmp_path / "serializer-failed-cache",
++    )
++
++    assert result.error == "original backend failure"
++    assert result.error_code == "synthesis.backend_error"
++    assert result.error_diagnostic["message"].startswith(
++        "[diagnostic serialization failed;"
++    )
+diff --git a/tests/test_variants.py b/tests/test_variants.py
+index 04727fc..444752e 100644
+--- a/tests/test_variants.py
++++ b/tests/test_variants.py
+@@ -258,7 +258,11 @@ def test_document_failed_report_and_pending_composition_are_preserved(
+         'format = "voicerender-bundle-document-report"\n'
+         'version = 1\nstatus = "failed"\nplanned_speech = 2\n'
+         "available_speech = 1\npending_composition = true\n"
+-        'error_code = "render.failed"\nerror_message = "backend unavailable"\n',
++        'error_code = "render.failed"\nerror_message = "backend unavailable"\n'
++        'error_type = "EngineBackendError"\nerror_stage = "inference"\n'
++        'error_root_cause_type = "RuntimeError"\n'
++        'error_root_cause_message = "provider failed"\n'
++        'render_diagnostics = "document-0001/render-diagnostics.json"\n',
+         encoding="utf-8",
+     )
+     found = list_bundle_variants(root).variants[0]
+@@ -268,6 +272,13 @@ def test_document_failed_report_and_pending_composition_are_preserved(
+     assert found.pending_composition is True
+     assert found.report_path == report
+     assert found.available_speech == 1
++    assert found.error_type == "EngineBackendError"
++    assert found.error_stage == "inference"
++    assert found.error_root_cause_type == "RuntimeError"
++    assert found.error_root_cause_message == "provider failed"
++    assert found.render_diagnostics == (
++        report.parent / "document-0001" / "render-diagnostics.json"
++    )
+
+
+ def test_book_failed_report_is_surfaced_with_existing_manifest(tmp_path: Path) -> None:
+@@ -284,7 +295,11 @@ def test_book_failed_report_is_surfaced_with_existing_manifest(tmp_path: Path) -
+         'format = "voicerender-bundle-book-report"\nversion = 1\n'
+         "failed = 1\npartial_chapters = 0\nskipped = 0\n"
+         'pending_composition = false\n[[item]]\nstatus = "failed"\n'
+-        'error_code = "preflight.reject"\nerror_message = "capacity"\n',
++        'error_code = "preflight.reject"\nerror_message = "capacity"\n'
++        'error_type = "EngineBackendError"\nerror_stage = "inference"\n'
++        'error_root_cause_type = "RuntimeError"\n'
++        'error_root_cause_message = "provider failed"\n'
++        'render_diagnostics = "chapter-0001/render-diagnostics.json"\n',
+         encoding="utf-8",
+     )
+     found = list_bundle_variants(root).variants[0]
+@@ -292,6 +307,13 @@ def test_book_failed_report_is_surfaced_with_existing_manifest(tmp_path: Path) -
+     assert found.error_code == "preflight.reject"
+     assert found.error_message == "capacity"
+     assert found.available_speech == 1
++    assert found.error_type == "EngineBackendError"
++    assert found.error_stage == "inference"
++    assert found.error_root_cause_type == "RuntimeError"
++    assert found.error_root_cause_message == "provider failed"
++    assert found.render_diagnostics == (
++        report.parent / "chapter-0001" / "render-diagnostics.json"
++    )
+
+
+ def test_boolean_report_version_is_malformed(tmp_path: Path) -> None:
+diff --git a/voicerender/book.py b/voicerender/book.py
+index ea9f6bb..43d1593 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -50,6 +50,7 @@ from .book_layout import (
+ from .book_layout import (
+     resolve_workspace as _resolve_workspace,
+ )
++from .error_diagnostics import diagnostic_summary_fields
+ from .errors import ArtifactError, PlanError
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .preflight import preflight_render_plan
+@@ -125,6 +126,11 @@ class ChapterRenderOutcome:
+     error_segment_number: int | None = None
+     error_segment_id: str | None = None
+     error_engine: str | None = None
++    render_diagnostics: Path | None = None
++    error_type: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -348,6 +354,13 @@ class _BookProgress:
+         chapter_count: int | None = None,
+         phase: str = "render",
+         status: str | None = None,
++        error_type: str | None = None,
++        error_code: str | None = None,
++        error_message: str | None = None,
++        error_stage: str | None = None,
++        error_root_cause_type: str | None = None,
++        error_root_cause_message: str | None = None,
++        render_diagnostics: str | None = None,
+     ) -> RenderEvent:
+         snapshot = self.snapshot()
+         return RenderEvent(
+@@ -358,6 +371,13 @@ class _BookProgress:
+             chapter_index=chapter_index,
+             chapter_count=chapter_count,
+             status=status,
++            error_type=error_type,
++            error_code=error_code,
++            error_message=error_message,
++            error_stage=error_stage,
++            error_root_cause_type=error_root_cause_type,
++            error_root_cause_message=error_root_cause_message,
++            render_diagnostics=render_diagnostics,
+             completed_count=snapshot.completed_count,
+             total_count=self.total_count,
+             progress=snapshot.progress,
+@@ -566,6 +586,17 @@ def render_book(
+                     chapter_index=index,
+                     chapter_count=chapter_count,
+                     status=outcome.status,
++                    error_code=outcome.error_code,
++                    error_type=outcome.error_type,
++                    error_message=outcome.error_message,
++                    error_stage=outcome.error_stage,
++                    error_root_cause_type=outcome.error_root_cause_type,
++                    error_root_cause_message=outcome.error_root_cause_message,
++                    render_diagnostics=(
++                        str(outcome.render_diagnostics)
++                        if outcome.render_diagnostics is not None
++                        else None
++                    ),
+                 ),
+             )
+         outcome = replace(
+@@ -832,6 +863,11 @@ def _render_chapter(
+                     for item in chapter.plan.speech
+                     for control in item.controls
+                 ),
++                render_diagnostics=(
++                    chapter.output_dir / RENDER_DIAGNOSTICS_FILENAME
++                    if (chapter.output_dir / RENDER_DIAGNOSTICS_FILENAME).is_file()
++                    else None
++                ),
+             )
+
+     try:
+@@ -927,6 +963,9 @@ def _render_chapter(
+         error_segment_number=getattr(result, "error_segment_number", None),
+         error_segment_id=getattr(result, "error_segment_id", None),
+         error_engine=getattr(result, "error_engine", None),
++        render_diagnostics=getattr(result, "diagnostics_path", None),
++        error_type=getattr(result, "error_type", None),
++        **diagnostic_summary_fields(getattr(result, "error_diagnostic", None)),
+         recheck_report=(
+             recheck_report_path if result.fresh_preflight is not None else None
+         ),
+@@ -1272,6 +1311,18 @@ def _outcome_to_dict(
+         item["error_segment_id"] = outcome.error_segment_id
+     if outcome.error_engine is not None:
+         item["error_engine"] = outcome.error_engine
++    if outcome.render_diagnostics is not None:
++        item["render_diagnostics"] = _relative_posix(
++            outcome.render_diagnostics, output_variant_dir
++        )
++    for key, value in (
++        ("error_type", outcome.error_type),
++        ("error_stage", outcome.error_stage),
++        ("error_root_cause_type", outcome.error_root_cause_type),
++        ("error_root_cause_message", outcome.error_root_cause_message),
++    ):
++        if value is not None:
++            item[key] = value
+     return item
+
+
+diff --git a/voicerender/bundle_batch.py b/voicerender/bundle_batch.py
+index 4d35cf0..c4b6979 100644
+--- a/voicerender/bundle_batch.py
++++ b/voicerender/bundle_batch.py
+@@ -8,6 +8,7 @@ from typing import Any, Literal
+
+ from .bundle import BundleRenderResult, render_bundle
+ from .bundle_contract import BundleKind
++from .error_diagnostics import diagnostic_summary_fields, exception_diagnostic
+ from .events import RenderEventCallback
+ from .variants import BundleVariant, VariantState, list_bundle_variants
+
+@@ -36,6 +37,11 @@ class BundleVariantRenderOutcome:
+     exit_code: int | None = None
+     error_code: str | None = None
+     error_message: str | None = None
++    error_type: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
++    render_diagnostics: Path | None = None
+     validation_error: str | None = None
+     output_error: str | None = None
+     pending_composition: bool | None = None
+@@ -53,6 +59,13 @@ class BundleVariantRenderOutcome:
+             "exit_code": self.exit_code,
+             "error_code": self.error_code,
+             "error_message": self.error_message,
++            "error_type": self.error_type,
++            "error_stage": self.error_stage,
++            "error_root_cause_type": self.error_root_cause_type,
++            "error_root_cause_message": self.error_root_cause_message,
++            "render_diagnostics": str(self.render_diagnostics)
++            if self.render_diagnostics
++            else None,
+             "validation_error": self.validation_error,
+             "output_error": self.output_error,
+             "pending_composition": self.pending_composition,
+@@ -102,6 +115,11 @@ class BundleBatchRenderResult:
+     exit_code: int
+     error_code: str | None = None
+     error_message: str | None = None
++    error_type: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
++    render_diagnostics: Path | None = None
+
+     @property
+     def no_work(self) -> bool:
+@@ -124,6 +142,13 @@ class BundleBatchRenderResult:
+             "variants": [variant.to_dict() for variant in self.variants],
+             "error_code": self.error_code,
+             "error_message": self.error_message,
++            "error_type": self.error_type,
++            "error_stage": self.error_stage,
++            "error_root_cause_type": self.error_root_cause_type,
++            "error_root_cause_message": self.error_root_cause_message,
++            "render_diagnostics": str(self.render_diagnostics)
++            if self.render_diagnostics
++            else None,
+             "exit_code": self.exit_code,
+         }
+
+@@ -197,6 +222,7 @@ def render_bundle_batch(
+             )
+         except Exception as exc:  # noqa: BLE001 - Keep batch failures isolated.
+             error_code, error_message = _exception_details(exc)
++            error_summary = _exception_summary_fields(exc)
+             outcomes[outcome_index[name]] = replace(
+                 outcomes[outcome_index[name]],
+                 status="failed",
+@@ -204,13 +230,23 @@ def render_bundle_batch(
+                 exit_code=1,
+                 error_code=error_code,
+                 error_message=error_message,
++                error_type=type(exc).__name__,
++                **error_summary,
+             )
+             failed = True
+             continue
+
+         exit_code = result.exit_code
++        (
++            result_error_code,
++            result_error_message,
++            result_error_type,
++            result_error_stage,
++            result_error_root_cause_type,
++            result_error_root_cause_message,
++            result_render_diagnostics,
++        ) = _result_error_details(result)
+         if exit_code != 0:
+-            result_error_code, result_error_message = _result_error_details(result)
+             if result_error_code is None:
+                 result_error_code = "render.failed"
+             if result_error_message is None:
+@@ -222,6 +258,11 @@ def render_bundle_batch(
+                 exit_code=exit_code,
+                 error_code=result_error_code,
+                 error_message=result_error_message,
++                error_type=result_error_type,
++                error_stage=result_error_stage,
++                error_root_cause_type=result_error_root_cause_type,
++                error_root_cause_message=result_error_root_cause_message,
++                render_diagnostics=result_render_diagnostics,
+                 result=result,
+             )
+             failed = True
+@@ -232,6 +273,13 @@ def render_bundle_batch(
+                 attempt_status="complete",
+                 exit_code=0,
+                 result=result,
++                error_code=result_error_code,
++                error_message=result_error_message,
++                error_type=result_error_type,
++                error_stage=result_error_stage,
++                error_root_cause_type=result_error_root_cause_type,
++                error_root_cause_message=result_error_root_cause_message,
++                render_diagnostics=result_render_diagnostics,
+             )
+
+     final_listing_error: Exception | None = None
+@@ -298,6 +346,16 @@ def render_bundle_batch(
+         exit_code=exit_code,
+         error_code=final_error_code,
+         error_message=final_error_message,
++        error_type=(
++            type(final_listing_error).__name__
++            if final_listing_error is not None
++            else None
++        ),
++        **(
++            _exception_summary_fields(final_listing_error)
++            if final_listing_error is not None
++            else diagnostic_summary_fields(None)
++        ),
+     )
+
+
+@@ -354,23 +412,67 @@ def _exception_details(exc: Exception) -> tuple[str, str]:
+     )
+
+
++def _exception_summary_fields(exc: Exception) -> dict[str, str | None]:
++    try:
++        diagnostic = exception_diagnostic(exc)
++    except Exception:  # noqa: BLE001 - reporting must not mask a batch error.
++        return diagnostic_summary_fields(None)
++    return diagnostic_summary_fields(diagnostic)
++
++
+ def _result_error_details(
+     result: BundleRenderResult,
+-) -> tuple[str | None, str | None]:
++) -> tuple[
++    str | None,
++    str | None,
++    str | None,
++    str | None,
++    str | None,
++    str | None,
++    Path | None,
++]:
+     value = result.value
+-    code = getattr(value, "error_code", None)
+-    message = getattr(value, "error_message", None)
+-    if code is None or message is None:
+-        for outcome in getattr(value, "outcomes", ()):
+-            if getattr(outcome, "status", None) == "failed":
+-                code = code or getattr(outcome, "error_code", None)
+-                message = message or getattr(outcome, "error_message", None)
+-                if code is not None or message is not None:
+-                    break
+-    return (
+-        code if isinstance(code, str) else None,
+-        message if isinstance(message, str) else None,
++    fields: dict[str, object] = {
++        "error_code": getattr(value, "error_code", None),
++        "error_message": getattr(value, "error_message", None),
++        "error_type": getattr(value, "error_type", None),
++        "error_stage": getattr(value, "error_stage", None),
++        "error_root_cause_type": getattr(value, "error_root_cause_type", None),
++        "error_root_cause_message": getattr(value, "error_root_cause_message", None),
++        "render_diagnostics": getattr(value, "render_diagnostics", None),
++    }
++    for outcome in getattr(value, "outcomes", ()):
++        if getattr(outcome, "status", None) != "failed":
++            continue
++        for name in (
++            "error_code",
++            "error_message",
++            "error_type",
++            "error_stage",
++            "error_root_cause_type",
++            "error_root_cause_message",
++            "render_diagnostics",
++        ):
++            if fields[name] is None:
++                fields[name] = getattr(outcome, name, None)
++        if any(fields[name] is not None for name in fields):
++            break
++
++    text_fields = (
++        "error_code",
++        "error_message",
++        "error_type",
++        "error_stage",
++        "error_root_cause_type",
++        "error_root_cause_message",
++    )
++    values = tuple(
++        value if isinstance(value, str) else None
++        for value in (fields[name] for name in text_fields)
+     )
++    diagnostics = fields["render_diagnostics"]
++    diagnostics_path = diagnostics if isinstance(diagnostics, Path) else None
++    return (*values, diagnostics_path)
+
+
+ __all__ = [
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index c9b11cc..93430a5 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -832,7 +832,9 @@ class _ProgressPrinter:
+         if event.kind is RenderEventKind.SEGMENT_STARTED and event.engine:
+             return f"synthesizing {event.engine}"
+         if event.kind is RenderEventKind.SEGMENT_FAILED:
+-            return f"failed {event.error_code or event.status or 'speech item'}"
++            failure = f"failed {event.error_code or event.status or 'speech item'}"
++            summary = _diagnostic_summary_text(event)
++            return f"{failure}; {summary}" if summary else failure
+         return None
+
+     def finish(self) -> None:
+@@ -1147,6 +1149,7 @@ def _print_bundle_variants(result: BundleVariantsResult) -> None:
+                 value for value in (variant.error_code, variant.error_message) if value
+             )
+             print(f"  Last render error: {error}")
++            _print_diagnostic_summary(variant, prefix="    ")
+         if variant.output_error:
+             print(f"  Output metadata warning: {variant.output_error}")
+         if variant.report_path:
+@@ -1281,10 +1284,40 @@ def _print_bundle_inspect(result: BundleInspectResult) -> None:
+                 item for item in (variant.error_code, variant.error_message) if item
+             )
+             print(f"    render error: {error}")
++            _print_diagnostic_summary(variant, prefix="    ")
+         if variant.output_error:
+             print(f"    output warning: {variant.output_error}")
+
+
++def _diagnostic_summary_text(value: Any) -> str | None:
++    parts: list[str] = []
++    error_type = getattr(value, "error_type", None)
++    error_stage = getattr(value, "error_stage", None)
++    cause_type = getattr(value, "error_root_cause_type", None)
++    cause_message = getattr(value, "error_root_cause_message", None)
++    if isinstance(error_type, str) and error_type:
++        parts.append(f"type {error_type}")
++    if isinstance(error_stage, str) and error_stage:
++        parts.append(f"stage {error_stage}")
++    cause = ": ".join(
++        item for item in (cause_type, cause_message) if isinstance(item, str) and item
++    )
++    if cause:
++        parts.append(f"root cause {cause}")
++    diagnostics = getattr(value, "render_diagnostics", None)
++    if diagnostics is None:
++        diagnostics = getattr(value, "diagnostics_path", None)
++    if diagnostics is not None:
++        parts.append(f"sidecar {diagnostics}")
++    return "; ".join(parts) if parts else None
++
++
++def _print_diagnostic_summary(value: Any, *, prefix: str) -> None:
++    summary = _diagnostic_summary_text(value)
++    if summary:
++        print(f"{prefix}diagnostics: {summary}")
++
++
+ def _print_bundle_result(result: BundleRenderResult) -> None:
+     value: Any = result.value
+     if result.kind == "book":
+@@ -1314,6 +1347,7 @@ def _print_bundle_result(result: BundleRenderResult) -> None:
+                     f"       {outcome.error_code or 'render.failed'}: "
+                     f"{outcome.error_message or 'render failed'}"
+                 )
++                _print_diagnostic_summary(outcome, prefix="       ")
+                 if outcome.preflight_report is not None:
+                     label = (
+                         "replan report"
+@@ -1358,6 +1392,7 @@ def _print_bundle_result(result: BundleRenderResult) -> None:
+             print(f"  preflight: {value.preflight_report}")
+         if value.error_code:
+             print(f"FAILED: {value.error_code}: {value.error_message or ''}")
++            _print_diagnostic_summary(value, prefix="  ")
+         if value.pending_composition:
+             print(
+                 "WARNING: emphasis remains pending composition; see "
+@@ -1418,6 +1453,7 @@ def _print_bundle_batch_result(result: BundleBatchRenderResult) -> None:
+                     text for text in (variant.error_code, error_message) if text
+                 )
+             )
++            _print_diagnostic_summary(variant, prefix="  ")
+         if variant.output_error:
+             print(f"  output warning: {variant.output_error}")
+         if variant.pending_composition:
+@@ -1427,6 +1463,7 @@ def _print_bundle_batch_result(result: BundleBatchRenderResult) -> None:
+         print(
+             f"Batch inspection error: {result.error_code or 'bundle.invalid'}: {result.error_message}"
+         )
++        _print_diagnostic_summary(result, prefix="  ")
+     print("\nVoiceRender batch summary")
+     print(f"  completed:       {summary.completed}")
+     print(f"  partial:         {summary.partial}")
+diff --git a/voicerender/document.py b/voicerender/document.py
+index 3036139..c447688 100644
+--- a/voicerender/document.py
++++ b/voicerender/document.py
+@@ -16,6 +16,7 @@ from renderplan import codec as renderplan_codec
+
+ from .book import _get_preflight
+ from .document_contract import DocumentWorkspaceError, load_document_workspace
++from .error_diagnostics import diagnostic_summary_fields
+ from .errors import ArtifactError, DocumentRenderError, PlanError
+ from .events import RenderEventCallback
+ from .renderplan_input import EmphasisPolicy
+@@ -66,6 +67,11 @@ class DocumentRenderResult:
+     error_segment_number: int | None = None
+     error_segment_id: str | None = None
+     error_engine: str | None = None
++    render_diagnostics: Path | None = None
++    error_type: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
+
+     @property
+     def exit_code(self) -> int:
+@@ -102,6 +108,13 @@ class DocumentRenderResult:
+             "error_segment_number": self.error_segment_number,
+             "error_segment_id": self.error_segment_id,
+             "error_engine": self.error_engine,
++            "render_diagnostics": str(self.render_diagnostics)
++            if self.render_diagnostics
++            else None,
++            "error_type": self.error_type,
++            "error_stage": self.error_stage,
++            "error_root_cause_type": self.error_root_cause_type,
++            "error_root_cause_message": self.error_root_cause_message,
+             "exit_code": self.exit_code,
+         }
+
+@@ -338,6 +351,11 @@ def render_document(
+                 error_segment_number=getattr(rendered, "error_segment_number", None),
+                 error_segment_id=getattr(rendered, "error_segment_id", None),
+                 error_engine=getattr(rendered, "error_engine", None),
++                render_diagnostics=getattr(rendered, "diagnostics_path", None),
++                error_type=getattr(rendered, "error_type", None),
++                **diagnostic_summary_fields(
++                    getattr(rendered, "error_diagnostic", None)
++                ),
+             )
+     except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
+         code = getattr(exc, "code", None) or "render.failed"
+@@ -399,6 +417,11 @@ def _write_report(result: DocumentRenderResult) -> None:
+         ("error_segment_number", result.error_segment_number),
+         ("error_segment_id", result.error_segment_id),
+         ("error_engine", result.error_engine),
++        ("render_diagnostics", result.render_diagnostics),
++        ("error_type", result.error_type),
++        ("error_stage", result.error_stage),
++        ("error_root_cause_type", result.error_root_cause_type),
++        ("error_root_cause_message", result.error_root_cause_message),
+     ):
+         if val is not None:
+             data[key] = str(val) if isinstance(val, Path) else val
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index 18a9a3b..6e9a08e 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -623,6 +623,28 @@ def _translate_pykokoro_error(
+         )
+     if failure_code is not None and error_type is EngineBackendError:
+         context["code"] = failure_code
++    details: dict[str, object] = {}
++    for attribute, detail_name in (
++        ("stage", "native_stage"),
++        ("native_error_message", "native_error_message"),
++    ):
++        try:
++            value = getattr(error, attribute, None)
++        except Exception:  # noqa: BLE001 - optional diagnostic fields must not block rendering.
++            value = None
++        if isinstance(value, str):
++            details[detail_name] = value
++
++    native_diagnostic = getattr(pykokoro, "error_diagnostic", None)
++    if callable(native_diagnostic):
++        try:
++            diagnostic = native_diagnostic(error)
++        except Exception:  # noqa: BLE001 - diagnostics are best-effort.
++            diagnostic = None
++        if isinstance(diagnostic, Mapping):
++            details["native_diagnostic"] = diagnostic
++    if details:
++        context["details"] = details
+     return error_type(str(error), **context)
+
+
+diff --git a/voicerender/error_diagnostics.py b/voicerender/error_diagnostics.py
+new file mode 100644
+index 0000000..51b00bf
+--- /dev/null
++++ b/voicerender/error_diagnostics.py
+@@ -0,0 +1,283 @@
++"""Safe, engine-neutral serialization for exception diagnostics."""
++
++from __future__ import annotations
++
++import math
++from collections.abc import Mapping
++from pathlib import Path
++
++ERROR_DIAGNOSTIC_SCHEMA = "voicerender.error-diagnostic.v1"
++_MAX_MESSAGE_LENGTH = 4096
++_MAX_DETAIL_STRING_LENGTH = 2048
++_MAX_DETAIL_ITEMS = 100
++_MAX_DETAIL_DEPTH = 8
++_OMIT = object()
++
++
++def _limited_text(value: object, limit: int) -> str:
++    try:
++        text = str(value)
++    except Exception:  # noqa: BLE001 - diagnostics must not mask the original error.
++        text = f"<{type(value).__name__} message unavailable>"
++    if len(text) > limit:
++        return text[: limit - 1] + "…"
++    return text
++
++
++def _sensitive_key(key: str) -> bool:
++    normalized = "".join(character for character in key.lower() if character.isalnum())
++    sensitive_markers = (
++        "audio",
++        "environment",
++        "phoneme",
++        "speech",
++        "token",
++        "transcript",
++        "utterance",
++    )
++    return (
++        normalized in {"env", "envvars", "text"}
++        or any(marker in normalized for marker in sensitive_markers)
++        or (normalized.endswith("text") and normalized != "context")
++    )
++
++
++def sanitize_json_value(
++    value: object,
++    *,
++    max_depth: int = _MAX_DETAIL_DEPTH,
++    _seen: set[int] | None = None,
++) -> object:
++    """Return JSON-native data, limiting size and omitting sensitive fields."""
++    seen = set() if _seen is None else _seen
++    if value is None or isinstance(value, (bool, int, str)):
++        if isinstance(value, str):
++            return _limited_text(value, _MAX_DETAIL_STRING_LENGTH)
++        return value
++    if isinstance(value, float):
++        return value if math.isfinite(value) else None
++    if isinstance(value, Path):
++        return _limited_text(value, _MAX_DETAIL_STRING_LENGTH)
++
++    value_type = type(value)
++    if value_type.__module__.startswith("numpy"):
++        item = getattr(value, "item", None)
++        if callable(item):
++            try:
++                scalar = item()
++            except Exception:  # noqa: BLE001
++                scalar = _OMIT
++            if scalar is not _OMIT and scalar is not value:
++                return sanitize_json_value(scalar, max_depth=max_depth, _seen=seen)
++
++    if max_depth <= 0:
++        return f"[omitted nested {value_type.__name__}]"
++
++    if isinstance(value, Mapping):
++        identity = id(value)
++        if identity in seen:
++            return "[cycle omitted]"
++        seen.add(identity)
++        sanitized: dict[str, object] = {}
++        try:
++            for index, (key, child) in enumerate(value.items()):
++                if index >= _MAX_DETAIL_ITEMS:
++                    sanitized["_truncated"] = True
++                    break
++                if not isinstance(key, str) or _sensitive_key(key):
++                    continue
++                child_value = sanitize_json_value(
++                    child, max_depth=max_depth - 1, _seen=seen
++                )
++                if child_value is not _OMIT:
++                    sanitized[_limited_text(key, 128)] = child_value
++        except Exception:  # noqa: BLE001 - hostile mappings are omitted safely.
++            return f"[omitted unreadable {value_type.__name__}]"
++        finally:
++            seen.discard(identity)
++        return sanitized
++
++    if isinstance(value, (list, tuple, set, frozenset)):
++        identity = id(value)
++        if identity in seen:
++            return "[cycle omitted]"
++        seen.add(identity)
++        result: list[object] = []
++        try:
++            for index, child in enumerate(value):
++                if index >= _MAX_DETAIL_ITEMS:
++                    result.append("[truncated]")
++                    break
++                child_value = sanitize_json_value(
++                    child, max_depth=max_depth - 1, _seen=seen
++                )
++                if child_value is not _OMIT:
++                    result.append(child_value)
++        except Exception:  # noqa: BLE001
++            return f"[omitted unreadable {value_type.__name__}]"
++        finally:
++            seen.discard(identity)
++        return result
++
++    return f"[omitted unsupported {value_type.__module__}.{value_type.__name__}]"
++
++
++def _safe_attribute(error: BaseException, name: str) -> str | None:
++    try:
++        value = getattr(error, name, None)
++    except Exception:  # noqa: BLE001
++        return None
++    if isinstance(value, (str, int, float, bool)):
++        return _limited_text(value, _MAX_DETAIL_STRING_LENGTH)
++    return None
++
++
++def _exception_node(error: BaseException) -> dict[str, object]:
++    error_type = type(error)
++    node: dict[str, object] = {
++        "type": error_type.__name__,
++        "module": error_type.__module__,
++        "message": _limited_text(error, _MAX_MESSAGE_LENGTH),
++    }
++    for attribute in ("code", "stage", "native_error_type", "native_error_message"):
++        value = _safe_attribute(error, attribute)
++        if value is not None:
++            node[attribute] = value
++
++    try:
++        raw_details = getattr(error, "details", None)
++    except Exception:  # noqa: BLE001
++        raw_details = None
++    if isinstance(raw_details, Mapping):
++        details = sanitize_json_value(raw_details)
++        if isinstance(details, dict):
++            engine_diagnostic = details.pop("native_diagnostic", None)
++            if details:
++                node["details"] = details
++            if isinstance(engine_diagnostic, (dict, list)):
++                node["engine_diagnostic"] = engine_diagnostic
++    return node
++
++
++def exception_diagnostic(
++    error: BaseException,
++    *,
++    max_depth: int = 8,
++) -> dict[str, object]:
++    """Serialize a bounded Python cause/context chain without traceback locals."""
++    max_depth = max(max_depth, 1)
++    diagnostic: dict[str, object] = {
++        "schema": ERROR_DIAGNOSTIC_SCHEMA,
++    }
++    seen: set[int] = set()
++    current: BaseException | None = error
++    previous: dict[str, object] | None = None
++
++    for index in range(max_depth):
++        if current is None:
++            break
++        identity = id(current)
++        if identity in seen:
++            if previous is not None:
++                previous["cause"] = {
++                    "type": type(current).__name__,
++                    "module": type(current).__module__,
++                    "message": "[exception cycle omitted]",
++                }
++            break
++        seen.add(identity)
++        node = _exception_node(current)
++        if previous is None:
++            diagnostic.update(node)
++            previous = diagnostic
++        else:
++            previous["cause"] = node
++            previous = node
++
++        explicit_cause = current.__cause__
++        if explicit_cause is not None:
++            current = explicit_cause
++        elif not current.__suppress_context__:
++            current = current.__context__
++        else:
++            current = None
++        if current is not None and index == max_depth - 1:
++            previous["cause_truncated"] = True
++
++    return diagnostic
++
++
++def root_cause(diagnostic: Mapping[str, object]) -> Mapping[str, object]:
++    """Return the deepest mapping in a serialized diagnostic cause chain."""
++    current: Mapping[str, object] = diagnostic
++    seen: set[int] = set()
++    while id(current) not in seen:
++        seen.add(id(current))
++        cause = current.get("cause")
++        if not isinstance(cause, Mapping):
++            break
++        current = cause
++    return current
++
++
++def diagnostic_stage(diagnostic: Mapping[str, object]) -> str | None:
++    """Find the most specific available engine/error stage in a diagnostic tree."""
++    pending: list[Mapping[str, object]] = [diagnostic]
++    seen: set[int] = set()
++    while pending:
++        current = pending.pop(0)
++        if id(current) in seen:
++            continue
++        seen.add(id(current))
++        stage = current.get("stage")
++        if isinstance(stage, str) and stage:
++            return stage
++        details = current.get("details")
++        if isinstance(details, Mapping):
++            stage = details.get("native_stage") or details.get("stage")
++            if isinstance(stage, str) and stage:
++                return stage
++        engine_diagnostic = current.get("engine_diagnostic")
++        cause = current.get("cause")
++        if isinstance(engine_diagnostic, Mapping):
++            pending.append(engine_diagnostic)
++        if isinstance(cause, Mapping):
++            pending.append(cause)
++    return None
++
++
++def diagnostic_summary_fields(
++    diagnostic: Mapping[str, object] | None,
++) -> dict[str, str | None]:
++    """Return compact stage and deepest-cause fields for report/API results."""
++    if diagnostic is None:
++        return {
++            "error_stage": None,
++            "error_root_cause_type": None,
++            "error_root_cause_message": None,
++        }
++    cause = root_cause(diagnostic)
++    error_type = cause.get("type")
++    error_message = cause.get("message")
++    return {
++        "error_stage": diagnostic_stage(diagnostic),
++        "error_root_cause_type": error_type if isinstance(error_type, str) else None,
++        "error_root_cause_message": (
++            error_message if isinstance(error_message, str) else None
++        ),
++    }
++
++
++def root_cause_summary(diagnostic: Mapping[str, object]) -> str | None:
++    """Return a compact root-cause line, unless it repeats the outer message."""
++    cause = root_cause(diagnostic)
++    message = cause.get("message")
++    if not isinstance(message, str) or not message:
++        return None
++    outer_message = diagnostic.get("message")
++    if message == outer_message:
++        return None
++    error_type = cause.get("type")
++    if isinstance(error_type, str) and error_type:
++        return f"{error_type}: {message}"
++    return message
+diff --git a/voicerender/errors.py b/voicerender/errors.py
+index 4c992f1..726b736 100644
+--- a/voicerender/errors.py
++++ b/voicerender/errors.py
+@@ -107,7 +107,6 @@ class EngineError(VoiceRenderError, RuntimeError):
+         )
+         for key, value in self.details.items():
+             setattr(self, key, value)
+-        self.__cause__ = None
+
+
+ class EngineUnavailableError(EngineError):
+diff --git a/voicerender/events.py b/voicerender/events.py
+index 7e19609..b4fdfb6 100644
+--- a/voicerender/events.py
++++ b/voicerender/events.py
+@@ -46,6 +46,11 @@ class RenderEvent:
+     status: str | None = None
+     error_type: str | None = None
+     error_code: str | None = None
++    error_message: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
++    render_diagnostics: str | None = None
+     rendered_count: int | None = None
+     reused_count: int | None = None
+     failed_count: int | None = None
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index b6b88fe..5382b85 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -6,7 +6,7 @@ import json
+ import os
+ import re
+ import shutil
+-from collections.abc import Collection, Iterator
++from collections.abc import Collection, Iterator, Mapping
+ from contextlib import ExitStack, contextmanager
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
+@@ -31,6 +31,11 @@ from renderplan import (
+
+ from .engines.base import EngineSelection, EngineSession, SpeechRequest
+ from .engines.registry import get_adapter, open_session
++from .error_diagnostics import (
++    ERROR_DIAGNOSTIC_SCHEMA,
++    diagnostic_summary_fields,
++    exception_diagnostic,
++)
+ from .errors import (
+     ArtifactError,
+     PlanError,
+@@ -70,6 +75,9 @@ class RenderPlanResult:
+     error: str | None = None
+     fresh_preflight: PreflightReport | None = None
+     error_code: str | None = None
++    error_type: str | None = None
++    error_diagnostic: Mapping[str, object] | None = None
++    diagnostics_path: Path | None = None
+     execution_fingerprint: tuple[dict[str, Any], ...] = ()
+     pending_composition: bool = False
+
+@@ -107,6 +115,22 @@ class _RenderFailure:
+     error_segment_number: int | None = None
+     error_segment_id: str | None = None
+     error_engine: str | None = None
++    error_type: str | None = None
++    error_diagnostic: dict[str, object] | None = None
++
++
++def _capture_exception_diagnostic(error: BaseException) -> dict[str, object]:
++    """Capture structured details without allowing diagnostics to mask failures."""
++    try:
++        return exception_diagnostic(error)
++    except Exception:  # noqa: BLE001 - retain the original render failure.
++        error_type = type(error)
++        return {
++            "schema": ERROR_DIAGNOSTIC_SCHEMA,
++            "type": error_type.__name__,
++            "module": error_type.__module__,
++            "message": "[diagnostic serialization failed; original error preserved]",
++        }
+
+
+ def _render_progress_event(
+@@ -431,6 +455,10 @@ def render_renderplan(
+                                 error_segment_number=item.number,
+                                 error_segment_id=current.segment_id,
+                                 error_engine=current.selection.engine,
++                                error_type=type(session.error).__name__,
++                                error_diagnostic=_capture_exception_diagnostic(
++                                    session.error
++                                ),
+                             )
+                             progress_tracker.complete("failed")
+                             emit_render_event(
+@@ -442,6 +470,13 @@ def render_renderplan(
+                                     status="failed",
+                                     error_type=type(session.error).__name__,
+                                     error_code=getattr(session.error, "code", None),
++                                    error_message=failure.message,
++                                    render_diagnostics=str(
++                                        out / RENDER_DIAGNOSTICS_FILENAME
++                                    ),
++                                    **diagnostic_summary_fields(
++                                        failure.error_diagnostic
++                                    ),
+                                 ),
+                             )
+                             break
+@@ -493,6 +528,9 @@ def render_renderplan(
+                                     status="failed",
+                                     error_type="MeasurementError",
+                                     error_code=failure.error_code,
++                                    render_diagnostics=str(
++                                        out / RENDER_DIAGNOSTICS_FILENAME
++                                    ),
+                                 ),
+                             )
+                             break
+@@ -598,6 +636,8 @@ def render_renderplan(
+                         error_engine=(
+                             getattr(exc, "engine", None) or current.selection.engine
+                         ),
++                        error_type=type(exc).__name__,
++                        error_diagnostic=_capture_exception_diagnostic(exc),
+                     )
+                     fingerprint["execution_status"] = "render_failed"
+                     execution_fingerprints[key] = _finalize_execution_fingerprint(
+@@ -615,6 +655,9 @@ def render_renderplan(
+                             error_code=(
+                                 error_code if isinstance(error_code, str) else None
+                             ),
++                            error_message=failure.message,
++                            render_diagnostics=str(out / RENDER_DIAGNOSTICS_FILENAME),
++                            **diagnostic_summary_fields(failure.error_diagnostic),
+                         ),
+                     )
+                     break
+@@ -634,6 +677,8 @@ def render_renderplan(
+                     error_segment_number=failure.error_segment_number,
+                     error_segment_id=failure.error_segment_id,
+                     error_engine=failure.error_engine,
++                    error_type=type(exc).__name__,
++                    error_diagnostic=_capture_exception_diagnostic(exc),
+                 )
+         if failure is not None:
+             diagnostics["error_code"] = failure.error_code
+@@ -644,6 +689,10 @@ def render_renderplan(
+                 diagnostics["error_segment_id"] = failure.error_segment_id
+             if failure.error_engine is not None:
+                 diagnostics["error_engine"] = failure.error_engine
++            if failure.error_type is not None:
++                diagnostics["error_type"] = failure.error_type
++            if failure.error_diagnostic is not None:
++                diagnostics["error_diagnostic"] = failure.error_diagnostic
+         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
+         current_artifacts = _ordered_artifacts(parsed_plan, artifact_map)
+         manifest = _persist_manifest(
+@@ -680,6 +729,13 @@ def render_renderplan(
+         ),
+         error_segment_id=failure.error_segment_id if failure is not None else None,
+         error_engine=failure.error_engine if failure is not None else None,
++        error_type=failure.error_type if failure is not None else None,
++        error_diagnostic=failure.error_diagnostic if failure is not None else None,
++        diagnostics_path=(
++            out / RENDER_DIAGNOSTICS_FILENAME
++            if (out / RENDER_DIAGNOSTICS_FILENAME).is_file()
++            else None
++        ),
+     )
+     emit_render_event(
+         on_event,
+@@ -689,6 +745,14 @@ def render_renderplan(
+             plan_id=report_id,
+             status="failed" if result.failed else "completed",
+             error_code=result.error_code,
++            error_type=result.error_type,
++            error_message=result.error,
++            render_diagnostics=(
++                str(result.diagnostics_path)
++                if result.diagnostics_path is not None
++                else None
++            ),
++            **diagnostic_summary_fields(result.error_diagnostic),
+         ),
+     )
+     return result
+diff --git a/voicerender/variants.py b/voicerender/variants.py
+index b3de0b8..cbe48c7 100644
+--- a/voicerender/variants.py
++++ b/voicerender/variants.py
+@@ -59,6 +59,11 @@ class BundleVariant:
+     error_code: str | None = None
+     error_message: str | None = None
+     output_error: str | None = None
++    render_diagnostics: Path | None = None
++    error_type: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
+
+     @property
+     def completed_chapters(self) -> int | None:
+@@ -86,6 +91,13 @@ class BundleVariant:
+             "error_code": self.error_code,
+             "error_message": self.error_message,
+             "output_error": self.output_error,
++            "render_diagnostics": str(self.render_diagnostics)
++            if self.render_diagnostics
++            else None,
++            "error_type": self.error_type,
++            "error_stage": self.error_stage,
++            "error_root_cause_type": self.error_root_cause_type,
++            "error_root_cause_message": self.error_root_cause_message,
+         }
+         if self.unit_kind == "chapters":
+             result["completed_chapters"] = self.completed_units
+@@ -150,6 +162,11 @@ class _Report:
+     error_code: str | None
+     error_message: str | None
+     issue: str | None = None
++    error_type: str | None = None
++    error_stage: str | None = None
++    error_root_cause_type: str | None = None
++    error_root_cause_message: str | None = None
++    render_diagnostics: Path | None = None
+
+
+ class _PlanInvalid(ValueError):
+@@ -364,6 +381,11 @@ def _inspect_candidate(
+         report_path=output.report_path,
+         error_code=output.error_code,
+         error_message=output.error_message,
++        render_diagnostics=output.render_diagnostics,
++        error_type=output.error_type,
++        error_stage=output.error_stage,
++        error_root_cause_type=output.error_root_cause_type,
++        error_root_cause_message=output.error_root_cause_message,
+         output_error=output.output_error,
+     )
+
+@@ -470,6 +492,11 @@ class _OutputStatus:
+     error_code: str | None
+     error_message: str | None
+     output_error: str | None
++    render_diagnostics: Path | None
++    error_type: str | None
++    error_stage: str | None
++    error_root_cause_type: str | None
++    error_root_cause_message: str | None
+
+
+ def _inspect_output(
+@@ -585,6 +612,15 @@ def _inspect_output(
+         report_path=visible_report_path,
+         error_code=code,
+         error_message=message,
++        render_diagnostics=report.render_diagnostics if report is not None else None,
++        error_type=report.error_type if report is not None else None,
++        error_stage=report.error_stage if report is not None else None,
++        error_root_cause_type=(
++            report.error_root_cause_type if report is not None else None
++        ),
++        error_root_cause_message=(
++            report.error_root_cause_message if report is not None else None
++        ),
+         output_error="; ".join(dict.fromkeys(errors)) or None,
+     )
+
+@@ -616,6 +652,29 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
+             raise ValueError("render report error_code must be text")
+         if message is not None and not isinstance(message, str):
+             raise ValueError("render report error_message must be text")
++        error_type = data.get("error_type")
++        error_stage = data.get("error_stage")
++        error_root_cause_type = data.get("error_root_cause_type")
++        error_root_cause_message = data.get("error_root_cause_message")
++        for label, value in (
++            ("error_type", error_type),
++            ("error_stage", error_stage),
++            ("error_root_cause_type", error_root_cause_type),
++            ("error_root_cause_message", error_root_cause_message),
++        ):
++            if value is not None and not isinstance(value, str):
++                raise ValueError(f"render report {label} must be text")
++        raw_diagnostics = data.get("render_diagnostics")
++        if raw_diagnostics is not None and not isinstance(raw_diagnostics, str):
++            raise ValueError("render report render_diagnostics must be text")
++        render_diagnostics = None
++        if raw_diagnostics is not None:
++            diagnostics_path = Path(raw_diagnostics)
++            render_diagnostics = (
++                diagnostics_path
++                if diagnostics_path.is_absolute()
++                else path.parent / diagnostics_path
++            )
+         available: int | None = None
+         status: Literal["failed", "partial", "complete"] | None
+         if kind == "document":
+@@ -641,6 +700,24 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
+                 item_status = item.get("status")
+                 item_code = item.get("error_code")
+                 item_message = item.get("error_message")
++                item_error_fields = {
++                    "error_type": item.get("error_type"),
++                    "error_stage": item.get("error_stage"),
++                    "error_root_cause_type": item.get("error_root_cause_type"),
++                    "error_root_cause_message": item.get("error_root_cause_message"),
++                }
++                for label, value in item_error_fields.items():
++                    if value is not None and not isinstance(value, str):
++                        raise ValueError(
++                            f"book render report item {label} must be text"
++                        )
++                item_diagnostics = item.get("render_diagnostics")
++                if item_diagnostics is not None and not isinstance(
++                    item_diagnostics, str
++                ):
++                    raise ValueError(
++                        "book render report item render_diagnostics must be text"
++                    )
+                 if item_status is not None and not isinstance(item_status, str):
+                     raise ValueError("book render report item status must be text")
+                 if item_code is not None and not isinstance(item_code, str):
+@@ -654,6 +731,25 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
+                         code = item_code
+                     if message is None:
+                         message = item_message
++                    if error_type is None:
++                        error_type = item_error_fields["error_type"]
++                    if error_stage is None:
++                        error_stage = item_error_fields["error_stage"]
++                    if error_root_cause_type is None:
++                        error_root_cause_type = item_error_fields[
++                            "error_root_cause_type"
++                        ]
++                    if error_root_cause_message is None:
++                        error_root_cause_message = item_error_fields[
++                            "error_root_cause_message"
++                        ]
++                    if render_diagnostics is None and item_diagnostics is not None:
++                        diagnostics_path = Path(item_diagnostics)
++                        render_diagnostics = (
++                            diagnostics_path
++                            if diagnostics_path.is_absolute()
++                            else path.parent / diagnostics_path
++                        )
+                 if "available_speech" in item:
+                     available_values.append(
+                         _nonnegative_int(
+@@ -662,7 +758,18 @@ def _load_report(path: Path, kind: BundleKind) -> _Report:
+                     )
+             if available_values:
+                 available = sum(available_values)
+-        return _Report(status, pending, available, code, message)
++        return _Report(
++            status,
++            pending,
++            available,
++            code,
++            message,
++            error_type=error_type,
++            error_stage=error_stage,
++            error_root_cause_type=error_root_cause_type,
++            error_root_cause_message=error_root_cause_message,
++            render_diagnostics=render_diagnostics,
++        )
+     except Exception as exc:  # noqa: BLE001 - Malformed reports become conservative status.
+         return _Report(
+             None,

@@ -1,0 +1,134 @@
+ voicerender/bundle_batch.py      |  4 ++--
+ voicerender/document.py          |  7 +++++-
+ voicerender/error_diagnostics.py |  2 +-
+ voicerender/render_lock.py       | 50 ++++++++++++++++++++++++++++++++--------
+ 4 files changed, 50 insertions(+), 13 deletions(-)
+
+diff --git a/voicerender/bundle_batch.py b/voicerender/bundle_batch.py
+index 2766588..303083f 100644
+--- a/voicerender/bundle_batch.py
++++ b/voicerender/bundle_batch.py
+@@ -64,7 +64,7 @@ class BundleVariantRenderOutcome:
+             "error_stage": self.error_stage,
+             "error_root_cause_type": self.error_root_cause_type,
+             "error_root_cause_message": self.error_root_cause_message,
+-            "render_diagnostics": str(self.render_diagnostics)
++            "render_diagnostics": self.render_diagnostics.as_posix()
+             if self.render_diagnostics
+             else None,
+             "validation_error": self.validation_error,
+@@ -147,7 +147,7 @@ class BundleBatchRenderResult:
+             "error_stage": self.error_stage,
+             "error_root_cause_type": self.error_root_cause_type,
+             "error_root_cause_message": self.error_root_cause_message,
+-            "render_diagnostics": str(self.render_diagnostics)
++            "render_diagnostics": self.render_diagnostics.as_posix()
+             if self.render_diagnostics
+             else None,
+             "exit_code": self.exit_code,
+diff --git a/voicerender/document.py b/voicerender/document.py
+index e228966..a9a610c 100644
+--- a/voicerender/document.py
++++ b/voicerender/document.py
+@@ -454,7 +454,12 @@ def _write_report(result: DocumentRenderResult) -> None:
+     ):
+         if val is not None:
+             data[key] = str(val) if isinstance(val, Path) else val
+-    _atomic_write_text(result.report_path, tomlkit.dumps(data))
++    content = tomlkit.dumps(data)
++    if os.name == "nt" and result.render_diagnostics is not None:
++        # Keep the native spelling discoverable without making the TOML invalid:
++        # basic TOML strings must escape Windows backslashes.
++        content += f'# render_diagnostics = "{result.render_diagnostics}" (native path)\n'
++    _atomic_write_text(result.report_path, content)
+
+
+ def _atomic_write_text(path: Path, content: str) -> None:
+diff --git a/voicerender/error_diagnostics.py b/voicerender/error_diagnostics.py
+index 51b00bf..94f7ac3 100644
+--- a/voicerender/error_diagnostics.py
++++ b/voicerender/error_diagnostics.py
+@@ -57,7 +57,7 @@ def sanitize_json_value(
+     if isinstance(value, float):
+         return value if math.isfinite(value) else None
+     if isinstance(value, Path):
+-        return _limited_text(value, _MAX_DETAIL_STRING_LENGTH)
++        return _limited_text(value.as_posix(), _MAX_DETAIL_STRING_LENGTH)
+
+     value_type = type(value)
+     if value_type.__module__.startswith("numpy"):
+diff --git a/voicerender/render_lock.py b/voicerender/render_lock.py
+index 0fd4cdc..e5a1693 100644
+--- a/voicerender/render_lock.py
++++ b/voicerender/render_lock.py
+@@ -23,9 +23,14 @@ except (
+ ):  # pragma: no cover - non-POSIX hosts cannot safely reclaim stale locks.
+     fcntl = None  # type: ignore[assignment]
+
++try:
++    import msvcrt
++except ImportError:  # pragma: no cover - POSIX hosts do not provide msvcrt.
++    msvcrt = None  # type: ignore[assignment]
+ from .errors import RenderLockedError, RenderLockInvalidError
+
+ _LOCK_FILENAME = ".voicerender.lock"
++_LOCK_GUARD_FILENAME = ".voicerender.lock.guard"
+ _LOCK_SCHEMA = "voicerender.render-lock.v1"
+ _MAX_RECLAIM_ATTEMPTS = 8
+ _TEMP_COPY_PATTERN = re.compile(r"^\.[A-Za-z0-9._-]+\.wav\.tmp-(\d+)$")
+@@ -148,19 +153,46 @@ def _owner_is_definitely_dead(owner: RenderLockInfo) -> bool:
+ @contextmanager
+ def _directory_guard(output_dir: Path) -> Iterator[bool]:
+     """Serialize lock inspection/reclamation among VoiceRender processes."""
+-    if fcntl is None:
+-        yield False
++    if fcntl is not None:
++        descriptor = os.open(output_dir, os.O_RDONLY)
++        try:
++            fcntl.flock(descriptor, fcntl.LOCK_EX)
++            try:
++                yield True
++            finally:
++                fcntl.flock(descriptor, fcntl.LOCK_UN)
++        finally:
++            os.close(descriptor)
+         return
+-    descriptor = os.open(output_dir, os.O_RDONLY)
+-    try:
+-        fcntl.flock(descriptor, fcntl.LOCK_EX)
++
++    if msvcrt is not None:
++        # Windows cannot open a directory as a file descriptor.  Keep a
++        # sidecar guard file and lock one byte in it instead.  The guard is
++        # deliberately retained so concurrent processes always coordinate on
++        # the same inode/file, including after stale-lock recovery.
++        guard = output_dir / _LOCK_GUARD_FILENAME
++        descriptor = os.open(
++            guard,
++            os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0),
++            0o600,
++        )
+         try:
+-            yield True
++            if os.fstat(descriptor).st_size == 0:
++                os.write(descriptor, b"0")
++            os.lseek(descriptor, 0, os.SEEK_SET)
++            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
++            try:
++                yield True
++            finally:
++                os.lseek(descriptor, 0, os.SEEK_SET)
++                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+         finally:
+-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+-    finally:
+-        os.close(descriptor)
++            os.close(descriptor)
++        return
+
++    # A platform without either primitive cannot prove that stale-lock
++    # reclamation is serialized, so callers must fail closed.
++    yield False
+
+ def _install_no_replace(source: Path, destination: Path) -> None:
+     """Atomically move a complete temp file into place without replacement."""
