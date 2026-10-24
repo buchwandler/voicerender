@@ -30,6 +30,7 @@ from ..voice_sources import (
 )
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
+    PCM_RANGE_POLICY,
     EngineCapabilities,
     EngineDiagnostic,
     EngineSelection,
@@ -37,6 +38,7 @@ from .base import (
     RenderProfileFragment,
     RequestMeasure,
     SpeechRequest,
+    adapt_pcm_full_scale,
     distribution_version,
     validate_rendered_speech,
     voice_level_metadata,
@@ -633,11 +635,24 @@ class PocketSynthEngineSession:
             measured = self.measure(request)
             if measured.amount is not None:
                 metadata["token_count"] = measured.amount
+
+        adaptation = adapt_pcm_full_scale(
+            result.audio,
+            engine_label="PocketSynth",
+        )
+        metadata["pcm_range"] = {
+            "policy": PCM_RANGE_POLICY,
+            "peak_before_clip": adaptation.peak_before_clip,
+            "clipped_samples": adaptation.clipped_samples,
+        }
+        warnings = tuple(result.warnings) + (
+            (adaptation.warning,) if adaptation.warning else ()
+        )
         rendered = RenderedSpeech(
             id=result.id,
-            audio=result.audio,
+            audio=adaptation.audio,
             sample_rate=result.sample_rate,
-            warnings=tuple(result.warnings),
+            warnings=warnings,
             word_timings=(),
             metadata=metadata,
         )
@@ -1114,6 +1129,7 @@ class PocketSynthEngineAdapter:
             "source_revision": selection.metadata.get("source_revision"),
             "engine": self.id,
             "engine_version": self.version(),
+            "pcm_range_policy": PCM_RANGE_POLICY,
             "target_id": selection.target_id,
             "language": normalize_language_key(selection.language),
             "precision": selection.options.get("precision", "int8"),

@@ -12,7 +12,7 @@ import voicefolio
 
 import voicerender.engines.pocketsynth as pocketsynth_adapter
 from voicerender import managed_voices
-from voicerender.engines.base import EngineSelection, SpeechRequest
+from voicerender.engines.base import PCM_RANGE_POLICY, EngineSelection, SpeechRequest
 from voicerender.engines.pocketsynth import (
     PocketSynthEngineAdapter,
     PocketSynthEngineSession,
@@ -595,3 +595,247 @@ def test_offline_voicefolio_cache_miss_keeps_precise_diagnostic(
 
     assert caught.value.code == "managed_voice.offline_cache_miss"
     assert caught.value.details["resolver"] == "voicefolio"
+
+
+def _synthesize_pocket_pcm(
+    monkeypatch: pytest.MonkeyPatch,
+    audio: Any,
+    *,
+    warnings: tuple[str, ...] = (),
+    result_id: str = "request-1",
+    sample_rate: int = 24000,
+) -> Any:
+    class Runtime:
+        def prepare_voice(self, voice: str) -> str:
+            return voice
+
+        def synthesize(
+            self,
+            native: Any,
+            *,
+            voice: Any,
+            config: Any,
+            voice_level: Any,
+        ) -> Any:
+            return SimpleNamespace(
+                id=result_id,
+                audio=audio,
+                sample_rate=sample_rate,
+                warnings=warnings,
+                metadata={"token_count": 1},
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pocketsynth",
+        SimpleNamespace(
+            SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    )
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        voice="default",
+    )
+    session = PocketSynthEngineSession(
+        Runtime(),
+        selection,
+        generation=None,
+        voice_level=SimpleNamespace(mode="off"),
+    )
+    request = SpeechRequest(
+        id="request-1",
+        text="hello",
+        language="en-US",
+        voice="default",
+    )
+    return session.synthesize(request)
+
+
+def test_pocket_pcm_in_range_audio_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio = np.array([-0.75, 0.0, 1.0], dtype=np.float32)
+
+    rendered = _synthesize_pocket_pcm(monkeypatch, audio)
+
+    assert np.array_equal(rendered.audio, audio)
+    assert rendered.audio.dtype == np.float32
+    assert rendered.warnings == ()
+    assert rendered.metadata["pcm_range"] == {
+        "policy": PCM_RANGE_POLICY,
+        "peak_before_clip": 1.0,
+        "clipped_samples": 0,
+    }
+
+
+def test_pocket_pcm_real_failure_peak_is_clamped_with_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _synthesize_pocket_pcm(
+        monkeypatch,
+        np.array([0.0, -0.25, 1.048518], dtype=np.float32),
+    )
+
+    assert np.max(np.abs(rendered.audio)) == 1.0
+    assert rendered.audio[-1] == 1.0
+    assert rendered.metadata["pcm_range"]["peak_before_clip"] == pytest.approx(1.048518)
+    assert rendered.metadata["pcm_range"]["clipped_samples"] == 1
+    assert len(rendered.warnings) == 1
+    assert "PocketSynth returned audio above full scale" in rendered.warnings[0]
+    assert "clamped 1 sample(s)" in rendered.warnings[0]
+    assert "1.048518" in rendered.warnings[0]
+
+
+def test_pocket_pcm_clamps_negative_and_multiple_overshoots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _synthesize_pocket_pcm(
+        monkeypatch,
+        np.array([-1.2, 0.0, 1.048518, -1.1], dtype=np.float32),
+    )
+
+    np.testing.assert_array_equal(rendered.audio, [-1.0, 0.0, 1.0, -1.0])
+    assert rendered.metadata["pcm_range"]["clipped_samples"] == 3
+
+
+def test_pocket_pcm_clamps_values_inside_validator_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _synthesize_pocket_pcm(
+        monkeypatch,
+        np.array([0.0, 1.000005], dtype=np.float32),
+    )
+
+    assert rendered.audio[-1] == 1.0
+    assert rendered.metadata["pcm_range"]["peak_before_clip"] == pytest.approx(1.000005)
+    assert rendered.metadata["pcm_range"]["clipped_samples"] == 1
+    assert len(rendered.warnings) == 1
+
+
+@pytest.mark.parametrize("sample", [np.nan, np.inf], ids=["nan", "infinity"])
+def test_pocket_pcm_non_finite_audio_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    sample: float,
+) -> None:
+    with pytest.raises(EngineBackendError, match="finite samples"):
+        _synthesize_pocket_pcm(
+            monkeypatch,
+            np.array([0.0, sample], dtype=np.float32),
+        )
+
+
+def test_pocket_pcm_malformed_multichannel_audio_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(EngineBackendError, match="audio must be mono"):
+        _synthesize_pocket_pcm(
+            monkeypatch,
+            np.array([[0.0, 1.1], [0.2, 0.3]], dtype=np.float32),
+        )
+
+
+def test_pocket_pcm_preserves_native_warning_before_clamp_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _synthesize_pocket_pcm(
+        monkeypatch,
+        np.array([0.0, 1.1], dtype=np.float32),
+        warnings=("native Pocket diagnostic",),
+    )
+
+    assert rendered.warnings[0] == "native Pocket diagnostic"
+    assert "PocketSynth returned audio above full scale" in rendered.warnings[1]
+
+
+@pytest.mark.parametrize(
+    ("audio", "result_id", "sample_rate", "message"),
+    [
+        (np.array([], dtype=np.float32), "request-1", 24000, "non-empty"),
+        (
+            np.array([0.5], dtype=np.float32),
+            "other-id",
+            24000,
+            "does not match request id",
+        ),
+        (
+            np.array([0.5], dtype=np.float32),
+            "request-1",
+            0,
+            "sample rate must be a positive integer",
+        ),
+    ],
+    ids=["empty-audio", "bad-id", "bad-sample-rate"],
+)
+def test_pocket_pcm_strict_validation_still_rejects_invalid_results(
+    monkeypatch: pytest.MonkeyPatch,
+    audio: np.ndarray,
+    result_id: str,
+    sample_rate: int,
+    message: str,
+) -> None:
+    with pytest.raises(EngineBackendError, match=message):
+        _synthesize_pocket_pcm(
+            monkeypatch,
+            audio,
+            result_id=result_id,
+            sample_rate=sample_rate,
+        )
+
+
+def test_pocket_canonical_identity_includes_pcm_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "pocketsynth",
+        SimpleNamespace(runtime_identity=lambda: {"runtime": "test"}),
+    )
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        voice="default",
+    )
+
+    identity = PocketSynthEngineAdapter().canonical_synthesis_identity(selection)
+
+    assert identity["pcm_range_policy"] == PCM_RANGE_POLICY
+
+
+def test_pocket_request_measurement_remains_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "pocketsynth",
+        SimpleNamespace(SynthesisRequest=lambda **kwargs: SimpleNamespace(**kwargs)),
+    )
+
+    class Runtime:
+        def measure_request(self, native: Any) -> Any:
+            assert native.text == "hello"
+            return SimpleNamespace(fits=True, amount=11, maximum=50)
+
+    selection = EngineSelection(
+        engine="pocket",
+        target_id="bundle-test",
+        language="en-US",
+        voice="default",
+    )
+    session = PocketSynthEngineSession(Runtime(), selection, None, None)
+    request = SpeechRequest(
+        id="request-1",
+        text="hello",
+        language="en-US",
+        voice="default",
+    )
+
+    measured = session.measure(request)
+
+    assert measured.fits is True
+    assert measured.amount == 11
+    assert measured.maximum == 50
+    assert measured.unit == "model_tokens"
+    assert measured.source == "pocketsynth.measure_request"
