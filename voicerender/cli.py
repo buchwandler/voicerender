@@ -2074,8 +2074,8 @@ def main(argv: list[str] | None = None) -> int:
                     offline=args.offline,
                     refresh=args.refresh,
                 )
-                rows = [model_artifact_to_dict(model) for model in models]
                 if args.json:
+                    rows = [model_artifact_to_dict(model) for model in models]
                     print(
                         json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True)
                     )
@@ -2090,8 +2090,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.models_command == "inspect":
                 artifact = model_status(args.engine, args.target, quality=args.quality)
-                payload = model_artifact_to_dict(artifact)
                 if args.json:
+                    payload = model_artifact_to_dict(artifact)
                     print(
                         json.dumps(
                             payload, ensure_ascii=False, indent=2, sort_keys=True

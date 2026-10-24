@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 from voicerender.engines.assets import (
     ModelArtifact,
@@ -15,6 +16,8 @@ from voicerender.engines.assets import (
 from voicerender.models_api import (
     install_model,
     list_models,
+    model_artifact_to_dict,
+    model_result_to_dict,
     remove_model,
     verify_model,
 )
@@ -125,3 +128,63 @@ def test_remove_and_verify_delegate_to_public_asset_manager(
 
     assert removed.status == "removed" and removed.changed
     assert verified.status == "verified" and verified.verified
+
+
+def test_model_artifact_to_dict_supports_nested_read_only_metadata() -> None:
+    model = ModelArtifact(
+        engine="sopro",
+        target_id="model-v1",
+        display_name="Sopro model v1",
+        installed=True,
+        status="ready",
+        languages=("en", "de"),
+        path=Path("/models/model-v1"),
+        metadata=MappingProxyType(
+            {
+                "backend": "onnx",
+                "catalog": MappingProxyType(
+                    {
+                        "profile": MappingProxyType(
+                            {
+                                "providers": ("CPUExecutionProvider",),
+                                "cache_path": Path("/models/cache"),
+                            }
+                        )
+                    }
+                ),
+            }
+        ),
+    )
+
+    payload = model_artifact_to_dict(model)
+
+    assert payload["path"] == "/models/model-v1"
+    assert payload["metadata"] == {
+        "backend": "onnx",
+        "catalog": {
+            "profile": {
+                "providers": ["CPUExecutionProvider"],
+                "cache_path": "/models/cache",
+            }
+        },
+    }
+    json.dumps(payload)
+
+
+def test_model_result_to_dict_serializes_nested_read_only_artifact_metadata() -> None:
+    model = ModelArtifact(
+        engine="sopro",
+        target_id="model-v1",
+        display_name="Sopro model v1",
+        installed=True,
+        status="ready",
+        metadata=MappingProxyType(
+            {"catalog": MappingProxyType({"profile": ("uint8",)})}
+        ),
+    )
+    result = ModelInstallResult("sopro", "model-v1", "installed", True, artifact=model)
+
+    payload = model_result_to_dict(result)
+
+    assert payload["artifact"]["metadata"] == {"catalog": {"profile": ["uint8"]}}
+    json.dumps(payload)

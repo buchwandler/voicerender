@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -165,7 +166,18 @@ def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
         profiles=("wasm-uint8",),
         source_revision="bundle-revision-1",
         source_commit="commit-1",
-        metadata={"max_input_tokens": 128},
+        metadata=MappingProxyType(
+            {
+                "max_input_tokens": 128,
+                "catalog": MappingProxyType(
+                    {
+                        "profile_metadata": MappingProxyType(
+                            {"wasm-uint8": MappingProxyType({"precision": "uint8"})}
+                        )
+                    }
+                ),
+            }
+        ),
     )
 
     def discover_bundles(**kwargs: Any) -> tuple[Any, ...]:
@@ -223,6 +235,15 @@ def test_sopro_api_probe_discovery_and_target_capabilities(
     assert targets[0].id == "model-v1"
     assert targets[0].metadata["bundle_ref"] == "sopro:model-v1"
     assert targets[0].metadata["source_revision"] == "bundle-revision-1"
+    catalog = targets[0].metadata["catalog"]
+    assert isinstance(catalog, Mapping)
+    profile_metadata = catalog["profile_metadata"]
+    assert isinstance(profile_metadata, Mapping)
+    profile = profile_metadata["wasm-uint8"]
+    assert isinstance(profile, Mapping)
+    assert profile["precision"] == "uint8"
+    with pytest.raises(TypeError):
+        profile["precision"] = "fp16"
     assert targets[0].voices == ()
     assert targets[0].default_voice is None
     assert {"reference_voice", "request_measurement", "voice_level"} <= targets[
