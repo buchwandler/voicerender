@@ -65,14 +65,15 @@ def test_lock_install_uses_atomic_rename_on_windows(tmp_path, monkeypatch):
     monkeypatch.setattr(
         render_lock.ctypes,
         "CDLL",
-        lambda *_args, **_kwargs: pytest.fail("Windows must not load the process library"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "Windows must not load the process library"
+        ),
     )
 
     render_lock._install_no_replace(source, destination)
 
     assert destination.read_bytes() == b"lock"
     assert not source.exists()
-
 
 
 def test_active_legacy_pid_lock_is_preserved(tmp_path):

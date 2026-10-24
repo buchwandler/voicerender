@@ -518,7 +518,12 @@ def build_parser() -> argparse.ArgumentParser:
     bundle = commands.add_parser("bundle", help="Operate on an SSMD bundle")
     bundle_commands = bundle.add_subparsers(dest="bundle_command", required=True)
     bundle_render = bundle_commands.add_parser(
-        "render", help="Render a book or document SSMD bundle"
+        "render",
+        help="Render a book or document SSMD bundle",
+        description=(
+            "Render a book or document SSMD bundle from a path resolving to a "
+            "canonical name.ssmd-bundle directory."
+        ),
     )
     bundle_render.add_argument(
         "bundle",

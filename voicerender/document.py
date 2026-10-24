@@ -458,7 +458,9 @@ def _write_report(result: DocumentRenderResult) -> None:
     if os.name == "nt" and result.render_diagnostics is not None:
         # Keep the native spelling discoverable without making the TOML invalid:
         # basic TOML strings must escape Windows backslashes.
-        content += f'# render_diagnostics = "{result.render_diagnostics}" (native path)\n'
+        content += (
+            f'# render_diagnostics = "{result.render_diagnostics}" (native path)\n'
+        )
     _atomic_write_text(result.report_path, content)
 
 

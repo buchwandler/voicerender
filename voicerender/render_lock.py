@@ -194,6 +194,7 @@ def _directory_guard(output_dir: Path) -> Iterator[bool]:
     # reclamation is serialized, so callers must fail closed.
     yield False
 
+
 def _install_no_replace(source: Path, destination: Path) -> None:
     """Atomically move a complete temp file into place without replacement."""
     if os.name == "nt":
