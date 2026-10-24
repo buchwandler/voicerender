@@ -14,6 +14,7 @@ from ..errors import (
     EngineUnavailableError,
     ProfileError,
 )
+from ..jsonutil import json_value
 from .assets import EngineAssetManager
 from .base import (
     EngineAdapter,
@@ -199,7 +200,10 @@ def engine_status(engine: str) -> dict[str, Any]:
     """Probe the installed public API without opening a model or runtime."""
     adapter = get_adapter(engine)
     probe = adapter.probe_api()
-    return asdict(probe)
+    return cast(
+        dict[str, Any],
+        json_value(probe, label=f"engine {adapter.id!r} API probe"),
+    )
 
 
 def discover_targets(
@@ -269,7 +273,9 @@ def open_session(selection: EngineSelection) -> Iterator[EngineSession]:
     adapter = get_adapter(selection.engine)
     probe = adapter.probe_api()
     if not probe.compatible:
-        details: dict[str, object] = {"probe": asdict(probe)}
+        details: dict[str, object] = {
+            "probe": json_value(probe, label=f"engine {adapter.id!r} API probe")
+        }
         if probe.status == "package_missing":
             raise EngineUnavailableError(
                 f"Engine {adapter.id!r} runtime package is unavailable",
@@ -290,7 +296,7 @@ def open_session(selection: EngineSelection) -> Iterator[EngineSession]:
             "schema": "voicerender.engine-session-identity.v1",
             "engine": adapter.id,
             "engine_version": adapter.version() or probe.distribution_version,
-            "api_probe": asdict(probe),
+            "api_probe": json_value(probe, label=f"engine {adapter.id!r} API probe"),
             "engine_identity": dict(adapter.canonical_synthesis_identity(selection)),
         }
         manager = adapter.open(selection)

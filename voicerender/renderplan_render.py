@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Literal
@@ -44,6 +44,7 @@ from .errors import (
     UnsupportedSynthesisFeatureError,
 )
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+from .jsonutil import json_value
 from .preflight import _session_compatibility_key
 from .progress import ProgressTracker, TerminalOutcome
 from .render_lock import exclusive_render_lock as _exclusive_render
@@ -916,7 +917,9 @@ def _prepare_speech(
         adapter = get_adapter(selection.engine)
         session_key = _session_compatibility_key(adapter, selection)
         adapter_version = adapter.version()
-        api_probe = asdict(adapter.probe_api())
+        api_probe = json_value(
+            adapter.probe_api(), label=f"engine {adapter.id!r} API probe"
+        )
         synthesis_identity = dict(adapter.canonical_synthesis_identity(selection))
         identity = {
             "schema": _CACHE_SCHEMA,

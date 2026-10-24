@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from types import MappingProxyType
 
 from voicerender import cli
 from voicerender.engines.catalog import SynthesisTarget, TargetVoice
@@ -62,6 +64,20 @@ def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
     assert inspected.kind == "builtin"
     assert inspected.gender == "female"
     assert voice_descriptor_to_dict(inspected)["languages"] == ["en-US"]
+
+
+def test_voice_descriptor_to_dict_serializes_nested_read_only_metadata() -> None:
+    descriptor = replace(
+        _target_descriptor(),
+        metadata=MappingProxyType(
+            {"catalog": MappingProxyType({"providers": ("CPUExecutionProvider",)})}
+        ),
+    )
+
+    payload = voice_descriptor_to_dict(descriptor)
+
+    assert payload["metadata"] == {"catalog": {"providers": ["CPUExecutionProvider"]}}
+    json.dumps(payload)
 
 
 def test_selector_rejects_noncanonical_delimiters() -> None:

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field, is_dataclass
-from enum import Enum
-from pathlib import Path
-from typing import Any, Literal, cast
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import numpy as np
 
@@ -21,6 +18,7 @@ from .engines.base import (
     validate_rendered_speech,
 )
 from .errors import EngineBackendError, SpeechRequestTooLongError
+from .jsonutil import json_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,25 +36,7 @@ CAPACITY_SCHEMA = "voicerender.capacity-fitting.v1"
 
 
 def _json_value(value: Any) -> Any:
-    if is_dataclass(value) and not isinstance(value, type):
-        return _json_value(asdict(cast(Any, value)))
-    if isinstance(value, Enum):
-        return _json_value(value.value)
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_json_value(item) for item in value]
-    if isinstance(value, bool | int | str) or value is None:
-        return value
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return value
-        raise ValueError("capacity metadata must contain finite numbers")
-    if hasattr(value, "tolist"):
-        return _json_value(value.tolist())
-    raise TypeError(f"capacity metadata is not JSON-compatible: {type(value).__name__}")
+    return json_value(value, label="capacity metadata")
 
 
 @dataclass(frozen=True, slots=True)

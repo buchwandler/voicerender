@@ -5,10 +5,11 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 
 import pytest
 
+from voicerender.engines.api_probe import EngineApiProbe
 from voicerender.engines.registry import (
     discover_targets,
     engine_status,
@@ -309,6 +310,28 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     status = engine_status(engine)
     assert status["compatible"] is True
     assert fake._probe_discovery_calls == []
+
+
+def test_engine_status_serializes_nested_read_only_probe_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = EngineApiProbe(
+        engine="test",
+        package="test-engine",
+        compatible=True,
+        status="ready",
+        details=MappingProxyType(
+            {"catalog": MappingProxyType({"providers": ("CPUExecutionProvider",)})}
+        ),
+    )
+    adapter = SimpleNamespace(id="test", probe_api=lambda: probe)
+    monkeypatch.setattr(
+        "voicerender.engines.registry.get_adapter", lambda _engine: adapter
+    )
+
+    status = engine_status("test")
+
+    assert status["details"] == {"catalog": {"providers": ["CPUExecutionProvider"]}}
 
 
 def test_inflect_probe_accepts_common_measurement_contract_without_capacity_api(

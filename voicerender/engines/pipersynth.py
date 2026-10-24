@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, is_dataclass, replace
-from typing import Any, cast
+from dataclasses import is_dataclass, replace
+from typing import Any
 
 from ..errors import (
     EmptySpeechTextError,
@@ -21,6 +21,7 @@ from ..errors import (
     SpeechRequestTooLongError,
     UnsupportedSynthesisFeatureError,
 )
+from ..jsonutil import json_value
 from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
 from .base import (
     EngineCapabilities,
@@ -320,7 +321,9 @@ class PiperSynthEngineSession:
         if is_dataclass(frontend_diagnostics) and not isinstance(
             frontend_diagnostics, type
         ):
-            metadata["frontend_diagnostics"] = asdict(cast(Any, frontend_diagnostics))
+            metadata["frontend_diagnostics"] = json_value(
+                frontend_diagnostics, label="Piper frontend diagnostics"
+            )
         metadata["voice_level"] = voice_level_metadata(
             metadata.get("voice_level"),
             str(self._selection.options.get("voice_level", "off")),

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+import pytest
+
 from voicerender.engines.assets import (
     ModelArtifact,
     ModelInstallRequest,
@@ -130,7 +132,7 @@ def test_remove_and_verify_delegate_to_public_asset_manager(
     assert verified.status == "verified" and verified.verified
 
 
-def test_model_artifact_to_dict_supports_nested_read_only_metadata() -> None:
+def test_model_artifact_serialization_does_not_use_deepcopy_asdict_semantics() -> None:
     model = ModelArtifact(
         engine="sopro",
         target_id="model-v1",
@@ -188,3 +190,23 @@ def test_model_result_to_dict_serializes_nested_read_only_artifact_metadata() ->
 
     assert payload["artifact"]["metadata"] == {"catalog": {"profile": ["uint8"]}}
     json.dumps(payload)
+
+
+def test_model_artifact_serializer_error_identifies_metadata_path() -> None:
+    model = ModelArtifact(
+        engine="sopro",
+        target_id="model-v1",
+        display_name="Sopro model v1",
+        installed=True,
+        status="ready",
+        metadata={"catalog": {"profile": {"session": object()}}},
+    )
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"model 'sopro' target 'model-v1' metadata at catalog\.profile\.session "
+            r"contains unsupported JSON value object"
+        ),
+    ):
+        model_artifact_to_dict(model)

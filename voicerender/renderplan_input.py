@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -30,6 +30,7 @@ from .errors import (
     SpeechRequestTooLongError,
     UnsupportedSynthesisFeatureError,
 )
+from .jsonutil import json_value
 
 
 class PreflightDisposition(str, Enum):
@@ -114,7 +115,9 @@ def engine_selection_from_binding(
     adapter = get_adapter(renderer)
     probe = adapter.probe_api()
     if not probe.compatible:
-        details: dict[str, object] = {"probe": asdict(probe)}
+        details: dict[str, object] = {
+            "probe": json_value(probe, label=f"engine {adapter.id!r} API probe")
+        }
         if probe.status == "package_missing":
             raise EngineUnavailableError(
                 f"Engine {adapter.id!r} runtime package is unavailable",

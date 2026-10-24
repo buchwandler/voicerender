@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .engines.registry import discover_targets, list_engines, normalize_engine_id
 from .errors import ProfileError
+from .jsonutil import json_value
 
 VoiceKind = Literal["builtin", "speaker", "managed-reference", "reference-capable"]
 
@@ -162,7 +163,11 @@ def _target_descriptors(target: Any) -> list[VoiceDescriptor]:
                 else None,
                 gender=detail.gender if detail else "unknown",
                 locale=detail.locale if detail else "unknown",
-                metadata={"voice": asdict(detail)} if detail else {},
+                metadata={
+                    "voice": json_value(detail, label=f"voice {voice!r} metadata")
+                }
+                if detail
+                else {},
             )
         )
         voices.append((voice, detail))
@@ -203,7 +208,13 @@ def _target_descriptors(target: Any) -> list[VoiceDescriptor]:
                         else None,
                         gender=detail.gender if detail else "unknown",
                         locale=detail.locale if detail else "unknown",
-                        metadata={"voice": asdict(detail)} if detail else {},
+                        metadata={
+                            "voice": json_value(
+                                detail, label=f"voice {voice!r} metadata"
+                            )
+                        }
+                        if detail
+                        else {},
                     )
                 )
     managed = target.metadata.get("managed_references", ())
@@ -281,10 +292,22 @@ def inspect_voice(selector: str, *, language: str | None = None) -> VoiceDescrip
 
 def voice_descriptor_to_dict(descriptor: VoiceDescriptor) -> dict[str, Any]:
     """Return the stable JSON representation of a voice descriptor."""
-    value = asdict(descriptor)
-    value["languages"] = list(descriptor.languages)
-    value["metadata"] = dict(descriptor.metadata)
-    return value
+    return {
+        "selector": descriptor.selector,
+        "engine": descriptor.engine,
+        "target_id": descriptor.target_id,
+        "voice": descriptor.voice,
+        "speaker": descriptor.speaker,
+        "kind": descriptor.kind,
+        "languages": list(descriptor.languages),
+        "gender": descriptor.gender,
+        "locale": descriptor.locale,
+        "installed": descriptor.installed,
+        "metadata": json_value(
+            descriptor.metadata,
+            label=f"voice {descriptor.selector!r} metadata",
+        ),
+    }
 
 
 __all__ = [

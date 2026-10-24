@@ -60,8 +60,6 @@ testpaths = ["tests"]
 
 [tool.ruff]
 extend-exclude = [
-  "02_audiocompose_voicerender_manual_pipeline_implementation_brief.md",
-  "03_voicerender_renderplan_preflight_and_execution_brief.md",
 ]
 
 [tool.mypy]

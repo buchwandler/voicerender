@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +17,7 @@ from .engines.assets import (
 )
 from .engines.registry import discover_targets, get_asset_manager, normalize_engine_id
 from .errors import ProfileError
+from .jsonutil import json_value
 
 
 def _unsupported(engine: str, operation: str, target_id: str) -> str:
@@ -241,20 +241,6 @@ def verify_model(
         )
 
 
-def _json_value(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_json_value(item) for item in value]
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    raise TypeError(
-        f"model metadata contains unsupported JSON value {type(value).__name__}"
-    )
-
-
 def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
     """Return the stable JSON representation of a model artifact."""
     return {
@@ -269,7 +255,10 @@ def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
         "source": model.source,
         "revision": model.revision,
         "path": str(model.path) if model.path is not None else None,
-        "metadata": _json_value(model.metadata),
+        "metadata": json_value(
+            model.metadata,
+            label=f"model {model.engine!r} target {model.target_id!r} metadata",
+        ),
     }
 
 

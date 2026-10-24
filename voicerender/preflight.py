@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Literal
@@ -22,6 +21,7 @@ from .engines.base import EngineSelection
 from .engines.registry import get_adapter
 from .errors import PlanError
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+from .jsonutil import json_value
 from .progress import ProgressTracker
 from .renderplan_input import (
     EmphasisPolicy,
@@ -339,7 +339,7 @@ def _session_compatibility_key(adapter: Any, selection: EngineSelection) -> str:
     identity = {
         "engine": adapter.id,
         "engine_version": adapter.version() or probe.distribution_version,
-        "api_probe": asdict(probe),
+        "api_probe": json_value(probe, label=f"engine {adapter.id!r} API probe"),
         "target_id": selection.target_id,
         "language": selection.language,
         "voice": selection.voice,
