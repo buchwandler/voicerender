@@ -64,7 +64,7 @@ class BundleVariantRenderOutcome:
             "error_stage": self.error_stage,
             "error_root_cause_type": self.error_root_cause_type,
             "error_root_cause_message": self.error_root_cause_message,
-            "render_diagnostics": str(self.render_diagnostics)
+            "render_diagnostics": self.render_diagnostics.as_posix()
             if self.render_diagnostics
             else None,
             "validation_error": self.validation_error,
@@ -147,7 +147,7 @@ class BundleBatchRenderResult:
             "error_stage": self.error_stage,
             "error_root_cause_type": self.error_root_cause_type,
             "error_root_cause_message": self.error_root_cause_message,
-            "render_diagnostics": str(self.render_diagnostics)
+            "render_diagnostics": self.render_diagnostics.as_posix()
             if self.render_diagnostics
             else None,
             "exit_code": self.exit_code,

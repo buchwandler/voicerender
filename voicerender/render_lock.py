@@ -23,9 +23,14 @@ except (
 ):  # pragma: no cover - non-POSIX hosts cannot safely reclaim stale locks.
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX hosts do not provide msvcrt.
+    msvcrt = None  # type: ignore[assignment]
 from .errors import RenderLockedError, RenderLockInvalidError
 
 _LOCK_FILENAME = ".voicerender.lock"
+_LOCK_GUARD_FILENAME = ".voicerender.lock.guard"
 _LOCK_SCHEMA = "voicerender.render-lock.v1"
 _MAX_RECLAIM_ATTEMPTS = 8
 _TEMP_COPY_PATTERN = re.compile(r"^\.[A-Za-z0-9._-]+\.wav\.tmp-(\d+)$")
@@ -148,19 +153,46 @@ def _owner_is_definitely_dead(owner: RenderLockInfo) -> bool:
 @contextmanager
 def _directory_guard(output_dir: Path) -> Iterator[bool]:
     """Serialize lock inspection/reclamation among VoiceRender processes."""
-    if fcntl is None:
-        yield False
-        return
-    descriptor = os.open(output_dir, os.O_RDONLY)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    if fcntl is not None:
+        descriptor = os.open(output_dir, os.O_RDONLY)
         try:
-            yield True
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield True
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
+            os.close(descriptor)
+        return
 
+    if msvcrt is not None:
+        # Windows cannot open a directory as a file descriptor.  Keep a
+        # sidecar guard file and lock one byte in it instead.  The guard is
+        # deliberately retained so concurrent processes always coordinate on
+        # the same inode/file, including after stale-lock recovery.
+        guard = output_dir / _LOCK_GUARD_FILENAME
+        descriptor = os.open(
+            guard,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        try:
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            try:
+                yield True
+            finally:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(descriptor)
+        return
+
+    # A platform without either primitive cannot prove that stale-lock
+    # reclamation is serialized, so callers must fail closed.
+    yield False
 
 def _install_no_replace(source: Path, destination: Path) -> None:
     """Atomically move a complete temp file into place without replacement."""

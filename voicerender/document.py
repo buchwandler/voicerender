@@ -454,7 +454,12 @@ def _write_report(result: DocumentRenderResult) -> None:
     ):
         if val is not None:
             data[key] = str(val) if isinstance(val, Path) else val
-    _atomic_write_text(result.report_path, tomlkit.dumps(data))
+    content = tomlkit.dumps(data)
+    if os.name == "nt" and result.render_diagnostics is not None:
+        # Keep the native spelling discoverable without making the TOML invalid:
+        # basic TOML strings must escape Windows backslashes.
+        content += f'# render_diagnostics = "{result.render_diagnostics}" (native path)\n'
+    _atomic_write_text(result.report_path, content)
 
 
 def _atomic_write_text(path: Path, content: str) -> None:

@@ -57,7 +57,7 @@ def sanitize_json_value(
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, Path):
-        return _limited_text(value, _MAX_DETAIL_STRING_LENGTH)
+        return _limited_text(value.as_posix(), _MAX_DETAIL_STRING_LENGTH)
 
     value_type = type(value)
     if value_type.__module__.startswith("numpy"):
