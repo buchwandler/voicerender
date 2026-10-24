@@ -665,7 +665,11 @@ def managed_reference_source(
                 "Voicefolio returned a managed voice source that is not a table",
                 details={"resolver": "voicefolio", "ref": ref},
             )
-        return dict(result)
+        normalized = dict(result)
+        # Voicefolio 0.1.1 omits source_format from this mapping; recover it
+        # from the catalog so persisted sources have one stable shape.
+        normalized.setdefault("source_format", catalog.get(ref).format)
+        return normalized
     except (voicefolio.VoicefolioError, ValueError) as exc:
         raise _voice_error(
             "managed_voice.invalid_source",
@@ -704,6 +708,8 @@ def managed_reference_context(
             f"Cannot inspect Voicefolio managed reference {ref!r}: {exc}",
             details={"resolver": "voicefolio", "ref": ref},
         ) from exc
+    raw_source = dict(raw_source)
+    raw_source.setdefault("source_format", entry.format)
     source = normalize_voice_source(raw_source)
     raw_language = getattr(entry, "language", None)
     language = raw_language.strip() if isinstance(raw_language, str) else None

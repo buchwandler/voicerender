@@ -107,12 +107,13 @@ def _parse_lock(text: str) -> RenderLockInfo:
     if not isinstance(payload, dict) or payload.get("schema") != _LOCK_SCHEMA:
         raise ValueError("unsupported lock schema")
 
-    pid = payload.get("pid")
+    raw_pid = payload.get("pid")
     hostname = payload.get("hostname")
     created_at = payload.get("created_at")
     process_start = payload.get("process_start")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+    if isinstance(raw_pid, bool) or not isinstance(raw_pid, int) or raw_pid < 1:
         raise ValueError("lock PID must be a positive integer")
+    pid = raw_pid
     if hostname is not None and not isinstance(hostname, str):
         raise ValueError("lock hostname must be a string or null")
     if created_at is not None and not isinstance(created_at, str):

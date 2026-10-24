@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from .bundle import BundleRenderResult, render_bundle
 from .bundle_contract import BundleKind
@@ -235,7 +235,7 @@ def render_bundle_batch(
                 error_code=error_code,
                 error_message=error_message,
                 error_type=type(exc).__name__,
-                **error_summary,
+                **cast(Any, error_summary),
             )
             failed = True
             continue
@@ -355,10 +355,13 @@ def render_bundle_batch(
             if final_listing_error is not None
             else None
         ),
-        **(
-            _exception_summary_fields(final_listing_error)
-            if final_listing_error is not None
-            else diagnostic_summary_fields(None)
+        **cast(
+            Any,
+            (
+                _exception_summary_fields(final_listing_error)
+                if final_listing_error is not None
+                else diagnostic_summary_fields(None)
+            ),
         ),
     )
 
@@ -476,7 +479,15 @@ def _result_error_details(
     )
     diagnostics = fields["render_diagnostics"]
     diagnostics_path = diagnostics if isinstance(diagnostics, Path) else None
-    return (*values, diagnostics_path)
+    return (
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        values[4],
+        values[5],
+        diagnostics_path,
+    )
 
 
 __all__ = [

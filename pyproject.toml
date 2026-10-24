@@ -17,7 +17,7 @@ dependencies = [
   "tomlkit>=0.13",
   "tomli>=2; python_version < '3.11'",
   "renderplan>=0.1.2,<0.2",
-  "voicefolio>=0.1.1,<0.2",
+  "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d",
   "onnxvoice>=0.2.12,<0.3",
 ]
 

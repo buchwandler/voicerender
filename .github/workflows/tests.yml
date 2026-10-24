@@ -104,7 +104,7 @@ jobs:
             "tomlkit==0.13.3" \
             "tomli==2.0.1" \
             "renderplan==0.1.2" \
-            "voicefolio==0.1.1"
+            "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d"
           python -m pip install --no-deps -e .
       - name: Run lower-bound tests
         run: python -m pytest -q

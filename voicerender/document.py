@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import tomlkit
 from renderplan import RenderPlan, load_plan
@@ -371,8 +371,11 @@ def render_document(
                 error_engine=getattr(rendered, "error_engine", None),
                 render_diagnostics=getattr(rendered, "diagnostics_path", None),
                 error_type=getattr(rendered, "error_type", None),
-                **diagnostic_summary_fields(
-                    getattr(rendered, "error_diagnostic", None)
+                **cast(
+                    Any,
+                    diagnostic_summary_fields(
+                        getattr(rendered, "error_diagnostic", None)
+                    ),
                 ),
             )
     except (

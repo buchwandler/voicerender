@@ -986,7 +986,9 @@ def _render_chapter(
         error_engine=getattr(result, "error_engine", None),
         render_diagnostics=getattr(result, "diagnostics_path", None),
         error_type=getattr(result, "error_type", None),
-        **diagnostic_summary_fields(getattr(result, "error_diagnostic", None)),
+        **cast(
+            Any, diagnostic_summary_fields(getattr(result, "error_diagnostic", None))
+        ),
         recheck_report=(
             recheck_report_path if result.fresh_preflight is not None else None
         ),

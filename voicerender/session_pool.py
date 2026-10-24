@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from .engines.base import EngineSelection, EngineSession
 from .engines.registry import open_session
@@ -204,7 +204,9 @@ class EngineSessionPool:
             raise RuntimeError("Cannot re-enter a closed EngineSessionPool")
         return self
 
-    def __exit__(self, exc_type: object, exc: object, _traceback: object) -> bool:
+    def __exit__(
+        self, exc_type: object, exc: object, _traceback: object
+    ) -> Literal[False]:
         status = "failure_cleanup" if exc_type is not None else "render_complete"
         try:
             self.close(status=status)

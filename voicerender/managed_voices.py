@@ -5,13 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast, runtime_checkable
 
 import voicefolio
 from voicefolio import (
     Catalog,
     IntegrityError,
-    MaterializedVoice,
     OfflineError,
     ResolvedVoice,
     VoiceEntry,
@@ -24,6 +23,14 @@ from .errors import (
     InvalidEngineOptionError,
     InvalidEngineVoiceError,
 )
+
+
+@runtime_checkable
+class _MaterializedVoice(Protocol):
+    source: ResolvedVoice
+    path: Path
+    sha256: str
+
 
 VOICEFOLIO_RESOLVER = "voicefolio"
 _MANAGED_PIN_FIELDS = (
@@ -92,11 +99,14 @@ def resolve_managed_voice(
     resolver, ref = _source_identity(source)
     catalog = _load_catalog(catalog_paths, resolver=resolver, ref=ref)
     try:
-        resolved: ResolvedVoice | MaterializedVoice = voicefolio.resolve_voice_source(
-            source,
-            catalog=catalog,
-            cache_dir=cache_dir,
-            offline=offline,
+        resolved = cast(
+            ResolvedVoice | _MaterializedVoice,
+            voicefolio.resolve_voice_source(
+                source,
+                catalog=catalog,
+                cache_dir=cache_dir,
+                offline=offline,
+            ),
         )
     except OfflineError as exc:
         raise EngineBackendError(
@@ -132,7 +142,7 @@ def resolve_managed_voice(
             details={"resolver": resolver, "ref": ref},
         ) from exc
 
-    if isinstance(resolved, MaterializedVoice):
+    if isinstance(resolved, _MaterializedVoice):
         source_voice = resolved.source
         entry = source_voice.entry
         source_sha256 = source_voice.sha256
