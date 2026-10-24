@@ -6,10 +6,11 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Literal
 
 from renderplan import (
@@ -998,14 +999,32 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
     return wav, info
 
 
+def _replace_file(source: Path, target: Path) -> None:
+    """Replace a file, tolerating short-lived Windows sharing violations."""
+    attempts = 5 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            sleep(0.05 * (attempt + 1))
+        else:
+            return
+
+
 def _copy_verified(source: Path, target: Path, info: dict[str, Any]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.tmp-", dir=target.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
     try:
         shutil.copyfile(source, temporary)
         if not verified_wav(temporary, info):
             raise ArtifactError(f"WAV copy failed integrity validation: {source}")
-        os.replace(temporary, target)
+        _replace_file(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
 
