@@ -196,10 +196,16 @@ def _directory_guard(output_dir: Path) -> Iterator[bool]:
 
 def _install_no_replace(source: Path, destination: Path) -> None:
     """Atomically move a complete temp file into place without replacement."""
+    if os.name == "nt":
+        # Windows rename fails when the destination already exists, while
+        # removing the temporary name after creating a hard link can fail
+        # with a still-open handle (WinError 32).
+        os.rename(source, destination)
+        return
+
     renameat2 = None
-    if os.name != "nt":
-        native_library = ctypes.CDLL(None, use_errno=True)
-        renameat2 = getattr(native_library, "renameat2", None)
+    native_library = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(native_library, "renameat2", None)
     if renameat2 is not None:
         renameat2.argtypes = (
             ctypes.c_int,

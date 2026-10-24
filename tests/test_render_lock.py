@@ -47,22 +47,21 @@ def test_lock_is_complete_json_during_render_and_removed_afterward(tmp_path):
     assert not lock_path.exists()
 
 
-def test_lock_install_uses_portable_fallback_on_windows(tmp_path, monkeypatch):
+def test_lock_install_uses_atomic_rename_on_windows(tmp_path, monkeypatch):
     source = tmp_path / "lock.tmp"
     destination = tmp_path / ".voicerender.lock"
     source.write_bytes(b"lock")
 
     monkeypatch.setattr(render_lock.os, "name", "nt")
 
-    def link_without_replacement(source_path: Path, destination_path: Path) -> None:
-        destination_path.write_bytes(source_path.read_bytes())
+    real_rename = os.rename
 
-    monkeypatch.setattr(
-        render_lock.os,
-        "link",
-        link_without_replacement,
-        raising=False,
-    )
+    def rename_without_replacement(source_path: Path, destination_path: Path) -> None:
+        if destination_path.exists():
+            raise FileExistsError(destination_path)
+        real_rename(source_path, destination_path)
+
+    monkeypatch.setattr(render_lock.os, "rename", rename_without_replacement)
     monkeypatch.setattr(
         render_lock.ctypes,
         "CDLL",
@@ -72,7 +71,8 @@ def test_lock_install_uses_portable_fallback_on_windows(tmp_path, monkeypatch):
     render_lock._install_no_replace(source, destination)
 
     assert destination.read_bytes() == b"lock"
-    assert source.exists()
+    assert not source.exists()
+
 
 
 def test_active_legacy_pid_lock_is_preserved(tmp_path):
