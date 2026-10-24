@@ -412,7 +412,11 @@ def _install_lock(path: Path, payload: bytes) -> bool:
     temporary = Path(temporary_name)
     moved_source = False
     try:
-        os.fchmod(descriptor, 0o600)
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(descriptor, 0o600)
+        elif os.name != "nt":
+            os.chmod(temporary, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
