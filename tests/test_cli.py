@@ -47,11 +47,15 @@ def test_primary_help_is_renderplan_centered_and_exposes_bundle_render() -> None
     assert "--preflight" in render_help
     assert "--out-dir" in render_help
     assert "--voice" not in render_help
+    assert "--max-open-sessions" in render_help
+    assert "default: 1" in render_help
     assert "--take" not in render_help
     assert "--profile" not in render_help
     assert "--variant" in bundle_help
     assert "--chapters" in bundle_help
     assert "--speech" in bundle_help
+    assert "--max-open-sessions" in bundle_help
+    assert "default: 1" in bundle_help
     assert "utterplan" not in bundle_help
 
     assert "--renderplan-root" in variants_help
@@ -788,6 +792,50 @@ def test_cli_progress_auto_force_disable_and_json_modes() -> None:
     )
 
 
+def test_max_open_sessions_cli_defaults_and_overrides() -> None:
+    from voicerender.cli import build_parser
+
+    parser = build_parser()
+    direct = parser.parse_args(
+        [
+            "render",
+            "plan.toml",
+            "--preflight",
+            "preflight.toml",
+            "--out-dir",
+            "rendered",
+        ]
+    )
+    bundle = parser.parse_args(["bundle", "render", "story.ssmd-bundle"])
+    configured = parser.parse_args(
+        ["bundle", "render", "story.ssmd-bundle", "--max-open-sessions", "4"]
+    )
+
+    assert direct.max_open_sessions == bundle.max_open_sessions == 1
+    assert configured.max_open_sessions == 4
+
+
+@pytest.mark.parametrize(
+    "args",
+    (
+        ["render", "plan.toml", "--preflight", "preflight.toml", "--out-dir", "out"],
+        ["bundle", "render", "story.ssmd-bundle", "--variant", "narration"],
+    ),
+)
+def test_nonpositive_session_limit_is_json_error(
+    args: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from voicerender.cli import main
+
+    assert main([*args, "--max-open-sessions", "0", "--json"]) in {1, 2}
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "max_open_sessions" in payload.get("error", "")
+    assert captured.err == ""
+
+
 def test_preflight_cli_forced_progress_stays_on_stderr_with_json(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -939,6 +987,7 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
 
     stderr = NonTtyStream()
     monkeypatch.setattr(cli.sys, "stderr", stderr)
+    captured_kwargs: dict[str, object] = {}
 
     def event_callback(on_event, scope: RenderScope) -> None:
         assert on_event is not None
@@ -958,7 +1007,8 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
 
     if command == "render":
 
-        def fake_render(*_args, on_event, **_kwargs):
+        def fake_render(*_args, on_event, **kwargs):
+            captured_kwargs.update(kwargs)
             event_callback(on_event, "render")
             return SimpleNamespace(
                 failed=False,
@@ -977,11 +1027,14 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
             "--out-dir",
             str(tmp_path / "rendered"),
             "--json",
+            "--max-open-sessions",
+            "3",
             "--progress",
         ]
     else:
 
-        def fake_render_bundle(*_args, on_progress, **_kwargs):
+        def fake_render_bundle(*_args, on_progress, **kwargs):
+            captured_kwargs.update(kwargs)
             event_callback(on_progress, "book")
             return SimpleNamespace(to_dict=lambda: {"items": []}, exit_code=0)
 
@@ -993,12 +1046,15 @@ def test_render_command_progress_callbacks_keep_json_stdout_clean(
             "--variant",
             "narration",
             "--json",
+            "--max-open-sessions",
+            "3",
             "--progress",
         ]
 
     assert cli.main(args) == 0
     stdout = capsys.readouterr().out
     assert isinstance(__import__("json").loads(stdout), dict)
+    assert captured_kwargs["max_open_sessions"] == 3
     assert "progress 50.0%" in stderr.getvalue()
     assert "\\r" not in stderr.getvalue() and "\\x1b" not in stderr.getvalue()
 

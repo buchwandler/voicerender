@@ -924,7 +924,7 @@ def test_partial_speech_windows_keep_original_numbers_and_merge_manifest_artifac
     ] + [f"speech {number}" for number in range(50, 61)]
 
 
-def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup(
+def test_partial_output_resumes_after_dead_lock_and_reuses_without_engine_startup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     adapter = _install(monkeypatch)
@@ -944,6 +944,18 @@ def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup
     assert not partial.manifest.complete
     initial_synthesized = list(adapter.synthesized_texts)
 
+    from voicerender import render_lock as render_lock_module
+
+    committed_wavs = {
+        artifact.wav: (output / artifact.wav).read_bytes()
+        for artifact in partial.manifest.speech
+    }
+    lock_path = output / ".voicerender.lock"
+    lock_path.write_text("999999", encoding="ascii")
+    monkeypatch.setattr(
+        render_lock_module, "_owner_is_definitely_dead", lambda _owner: True
+    )
+
     full = render_renderplan(plan, preflight=report, output_dir=output, cache_dir=cache)
     assert not full.failed
     assert full.selection_complete
@@ -951,6 +963,10 @@ def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup
     assert full.planned_count == full.available_count == 5
     assert full.reused_count == 2
     assert full.rendered_count == 3
+    assert not lock_path.exists()
+    assert {
+        name: (output / name).read_bytes() for name in committed_wavs
+    } == committed_wavs
     assert len(adapter.synthesized_texts) == len(initial_synthesized) + 3
 
     open_count = adapter.open_count
@@ -962,6 +978,97 @@ def test_partial_output_resumes_to_full_render_and_reuses_without_engine_startup
     assert reused.rendered_count == 0
     assert reused.reused_count == 5
     assert adapter.open_count == open_count
+
+
+def test_batch_variant_resumes_partial_output_after_dead_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    import voicerender.bundle_batch as batch_module
+    from voicerender.bundle import BundleRenderResult
+    from voicerender.variants import BundleVariant, BundleVariantsResult
+
+    adapter = _install(monkeypatch)
+    plan = _plan("batch one", "batch two", "batch three")
+    report = _report(adapter, plan, tmp_path)
+    output = tmp_path / "batch-chapter"
+    cache = tmp_path / "batch-cache"
+    partial = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=cache,
+        speech_numbers={1},
+    )
+    assert not partial.manifest.complete
+    assert partial.available_count == 1
+    committed_wav = (output / "000001.wav").read_bytes()
+
+    from voicerender import render_lock as render_lock_module
+
+    lock_path = output / ".voicerender.lock"
+    lock_path.write_text("999999", encoding="ascii")
+    monkeypatch.setattr(
+        render_lock_module, "_owner_is_definitely_dead", lambda _owner: True
+    )
+
+    bundle = tmp_path / "batch-story.ssmd-bundle"
+    variant_name = "narration--test"
+
+    def listing(state: str, available: int) -> BundleVariantsResult:
+        return BundleVariantsResult(
+            bundle=bundle,
+            kind="book",
+            renderplan_root=bundle / "renderplan",
+            output_root=bundle / "voicerender",
+            variants=(
+                BundleVariant(
+                    name=variant_name,
+                    profile_id="sha256:profile",
+                    plan_status="valid",
+                    validation_error=None,
+                    render_status=state,
+                    state=state,
+                    unit_kind="chapters",
+                    completed_units=0,
+                    total_units=1,
+                    planned_speech=3,
+                    available_speech=available,
+                    pending_composition=None,
+                    report_path=None,
+                ),
+            ),
+        )
+
+    listings = iter((listing("partial", 1), listing("complete", 3)))
+    monkeypatch.setattr(
+        batch_module, "list_bundle_variants", lambda *_args, **_kwargs: next(listings)
+    )
+    render_results = []
+
+    def render_variant(*_args: Any, **_kwargs: Any) -> BundleRenderResult:
+        result = render_renderplan(
+            plan, preflight=report, output_dir=output, cache_dir=cache
+        )
+        render_results.append(result)
+        return BundleRenderResult(
+            kind="book",
+            value=SimpleNamespace(exit_code=0, error_code=None, error_message=None),
+        )
+
+    monkeypatch.setattr(batch_module, "render_bundle", render_variant)
+    batch_result = batch_module.render_bundle_batch(bundle)
+
+    assert batch_result.exit_code == 0
+    assert batch_result.summary.attempted == batch_result.summary.completed == 1
+    assert batch_result.variants[0].final_state == "complete"
+    assert render_results[0].manifest.complete
+    assert render_results[0].available_count == 3
+    assert render_results[0].reused_count == 1
+    assert render_results[0].rendered_count == 2
+    assert (output / "000001.wav").read_bytes() == committed_wav
+    assert not lock_path.exists()
 
 
 def test_corrupt_manifest_output_wav_is_dropped_and_regenerated_from_cache(
@@ -1499,6 +1606,12 @@ def test_existing_output_reuse_advances_progress_without_opening_engine(
     assert events[1].completed_count == 1
     assert events[1].progress == 1.0
 
+    diagnostics = json.loads(
+        (output / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
+    )
+    assert diagnostics["session_residency"]["opens"] == 0
+    assert diagnostics["session_residency"]["peak_open_sessions"] == 0
+
 
 def test_cache_reuse_is_reported_after_materialization(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1751,3 +1864,77 @@ def test_diagnostic_serializer_failure_does_not_mask_render_failure(
     assert result.error_diagnostic["message"].startswith(
         "[diagnostic serialization failed;"
     )
+
+
+def test_default_session_pool_bounds_clones_and_preserves_plan_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from voicerender import session_pool as pool_module
+
+    adapter = _install(monkeypatch)
+    voices = ("clone-a", "clone-b", "clone-a", "clone-c", "clone-b", "clone-d")
+    plan = _plan(*(f"speech {index}" for index in range(1, len(voices) + 1)))
+    plan = replace(
+        plan,
+        flow=tuple(
+            replace(item, binding={**item.binding, "voice": voice}, segment_id=None)
+            for item, voice in zip(plan.speech, voices, strict=True)
+        ),
+        plan_id=None,
+    ).with_identity()
+    report = _report(adapter, plan, tmp_path)
+    active: set[str | None] = set()
+    open_close_order: list[tuple[str, str | None]] = []
+    peak_open = 0
+
+    @contextmanager
+    def open_tracked(selection: EngineSelection) -> Iterator[EngineSession]:
+        nonlocal peak_open
+        assert not active
+        active.add(selection.voice)
+        peak_open = max(peak_open, len(active))
+        open_close_order.append(("open", selection.voice))
+        try:
+            yield adapter.session
+        finally:
+            active.remove(selection.voice)
+            open_close_order.append(("close", selection.voice))
+
+    monkeypatch.setattr(pool_module, "open_session", open_tracked)
+    events: list[RenderEvent] = []
+    output = tmp_path / "bounded-sessions"
+    result = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=output,
+        cache_dir=tmp_path / "bounded-cache",
+        on_event=events.append,
+    )
+
+    assert peak_open == 1
+    assert active == set()
+    assert adapter.synthesized_texts == [item.text for item in plan.speech]
+    assert [artifact.segment_number for artifact in result.manifest.speech] == list(
+        range(1, len(voices) + 1)
+    )
+    assert open_close_order == [
+        pair for voice in voices for pair in (("open", voice), ("close", voice))
+    ]
+    diagnostics = json.loads(
+        (output / RENDER_DIAGNOSTICS_FILENAME).read_text(encoding="utf-8")
+    )
+    assert diagnostics["session_residency"] == {
+        "max_open_sessions": 1,
+        "peak_open_sessions": 1,
+        "opens": len(voices),
+        "closes": len(voices),
+        "evictions": len(voices) - 1,
+        "hits": 0,
+    }
+    close_events = [
+        event for event in events if event.kind is RenderEventKind.ENGINE_CLOSE_STARTED
+    ]
+    assert [event.status for event in close_events] == [
+        *("evicted" for _ in range(len(voices) - 1)),
+        "render_complete",
+    ]

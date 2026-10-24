@@ -60,6 +60,7 @@ def test_render_bundle_dispatches_book_options_and_wraps_result(
         emphasis_policy="defer-to-compose",
         fail_fast=True,
         on_progress=progress,
+        max_open_sessions=3,
     )
 
     assert result.kind == "book"
@@ -85,6 +86,7 @@ def test_render_bundle_dispatches_book_options_and_wraps_result(
             "fail_fast": True,
             "emphasis_policy": bundle_module.EmphasisPolicy.DEFER_TO_COMPOSE,
             "on_event": progress,
+            "max_open_sessions": 3,
         },
     }
 
@@ -133,6 +135,7 @@ def test_render_bundle_dispatches_document_and_ignores_fail_fast(
             "reset_stale_output": True,
             "emphasis_policy": bundle_module.EmphasisPolicy.REJECT,
             "on_event": progress,
+            "max_open_sessions": 1,
         },
     }
 

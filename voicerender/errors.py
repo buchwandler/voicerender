@@ -5,6 +5,18 @@ class VoiceRenderError(Exception):
     """Base error for VoiceRender."""
 
 
+class RenderLockedError(VoiceRenderError, RuntimeError):
+    """The render output is currently owned by a live/unknown process."""
+
+    code = "render.locked"
+
+
+class RenderLockInvalidError(VoiceRenderError, RuntimeError):
+    """The render lock cannot be interpreted or safely reclaimed."""
+
+    code = "render.lock_invalid"
+
+
 class DocumentRenderError(VoiceRenderError, ValueError):
     """A document bundle or document-render request is invalid."""
 

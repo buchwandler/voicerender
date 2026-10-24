@@ -219,6 +219,7 @@ def test_force_schedules_complete_valid_variants_and_forwards_all_options(
         "emphasis_policy": "defer-to-compose",
         "fail_fast": True,
         "on_progress": progress,
+        "max_open_sessions": 4,
     }
 
     def fake_render(bundle: Path, *, variant: str, **kwargs: Any) -> BundleRenderResult:
@@ -244,6 +245,7 @@ def test_force_schedules_complete_valid_variants_and_forwards_all_options(
             "emphasis_policy": "defer-to-compose",
             "fail_fast": True,
             "on_progress": progress,
+            "max_open_sessions": 4,
         },
     )
     assert discovery_calls == [
@@ -518,6 +520,8 @@ def test_cli_batch_json_routing_and_option_forwarding(
             "output",
             "--cache-dir",
             "cache",
+            "--max-open-sessions",
+            "4",
             "--force",
             "--reset-stale",
             "--emphasis-policy",
@@ -545,6 +549,7 @@ def test_cli_batch_json_routing_and_option_forwarding(
             "emphasis_policy": "defer-to-compose",
             "fail_fast": True,
             "on_progress": None,
+            "max_open_sessions": 4,
         },
     }
 

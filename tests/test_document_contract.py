@@ -185,6 +185,90 @@ def test_missing_document_variant_raises_public_coded_error(tmp_path: Path) -> N
     assert caught.value.code == "variant.not_found"
 
 
+def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from renderplan import Producer, RenderManifest, SpeechArtifact, save_manifest
+
+    import voicerender.document as document_module
+    from voicerender.storage import atomic_wav
+
+    root = _workspace(tmp_path / "story.ssmd-bundle")
+    profile = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+    profile_obj = codec.load_profile(profile)
+    fingerprint = (profile_obj.profile_id or profile_obj.computed_id()).removeprefix(
+        "sha256:"
+    )[:12]
+    variant = f"narration--{fingerprint}"
+    variant_dir = root / "renderplan" / variant
+    variant_dir.mkdir(parents=True)
+    shutil.copy(profile, variant_dir / "renderprofile.toml")
+    shutil.copy(
+        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+        variant_dir / "document.renderplan.toml",
+    )
+    request = document_module._resolve_document_request(root, variant=variant)
+    request.output_dir.mkdir(parents=True)
+    item = request.plan.speech[0]
+    info = atomic_wav(request.output_dir / item.wav, [0.0, 0.1, -0.1], 24000)
+    artifact = SpeechArtifact(
+        segment_number=item.number,
+        segment_id=item.segment_id or item.computed_id(),
+        wav=item.wav,
+        sha256=f"sha256:{info['sha256']}",
+        frames=int(info["frames"]),
+        sample_rate=int(info["sample_rate"]),
+        channels=int(info["channels"]),
+    )
+    manifest = RenderManifest(
+        render_plan_id=request.plan.plan_id or request.plan.computed_id(),
+        speech=(artifact,),
+        complete=False,
+        producer=Producer(name="test", version="1"),
+    ).with_identity()
+    manifest_path = request.output_dir / "render-manifest.toml"
+    save_manifest(manifest, manifest_path)
+
+    monkeypatch.setattr(
+        document_module,
+        "_get_preflight",
+        lambda *_args, **_kwargs: SimpleNamespace(status="reject"),
+    )
+    monkeypatch.setattr(
+        document_module,
+        "render_renderplan",
+        lambda *_args, **_kwargs: pytest.fail(
+            "render started after rejected preflight"
+        ),
+    )
+
+    result = document_module.render_document(root, variant=variant)
+
+    assert result.status == "failed"
+    assert result.available_speech == 1
+    assert result.manifest == manifest_path
+    assert result.rendered == result.reused == 0
+
+    from voicerender.errors import RenderLockedError
+
+    monkeypatch.setattr(
+        document_module,
+        "_get_preflight",
+        lambda *_args, **_kwargs: SimpleNamespace(status="ok"),
+    )
+
+    def locked_render(*_args: object, **_kwargs: object) -> object:
+        raise RenderLockedError("output is locked")
+
+    monkeypatch.setattr(document_module, "render_renderplan", locked_render)
+    locked = document_module.render_document(root, variant=variant)
+    assert locked.error_code == "render.locked"
+    assert locked.available_speech == 1
+    assert locked.manifest == manifest_path
+
+
 def test_document_render_uses_preflight_and_existing_renderplan_executor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -211,10 +295,16 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
         variant_dir / "document.renderplan.toml",
     )
     calls: list[dict[str, object]] = []
+    preflight_calls: list[dict[str, object]] = []
+
+    def fake_preflight(*_args: object, **kwargs: object) -> object:
+        preflight_calls.append(kwargs)
+        return SimpleNamespace(status="ok")
+
     monkeypatch.setattr(
         document_module,
         "_get_preflight",
-        lambda *args, **kwargs: SimpleNamespace(status="ok"),
+        fake_preflight,
     )
 
     def fake_render(plan: object, **kwargs: object) -> object:
@@ -242,11 +332,14 @@ def test_document_render_uses_preflight_and_existing_renderplan_executor(
         force=True,
         reset_stale_output=True,
         emphasis_policy="defer-to-compose",
+        max_open_sessions=3,
     )
     assert result.status == "partial"
     assert result.selected_speech == 1
     assert result.report_path.is_file()
     assert calls[0]["speech_numbers"] == frozenset({1})
+    assert preflight_calls[0]["max_open_sessions"] == 3
+    assert calls[0]["max_open_sessions"] == 3
     assert calls[0]["force"] is True
     assert calls[0]["reset_stale_output"] is True
 

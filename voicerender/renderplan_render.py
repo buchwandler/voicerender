@@ -6,8 +6,7 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Collection, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import monotonic
@@ -29,8 +28,8 @@ from renderplan import (
     save_preflight,
 )
 
-from .engines.base import EngineSelection, EngineSession, SpeechRequest
-from .engines.registry import get_adapter, open_session
+from .engines.base import EngineSelection, SpeechRequest
+from .engines.registry import get_adapter
 from .error_diagnostics import (
     ERROR_DIAGNOSTIC_SCHEMA,
     diagnostic_summary_fields,
@@ -45,6 +44,7 @@ from .errors import (
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .preflight import _session_compatibility_key
 from .progress import ProgressTracker, TerminalOutcome
+from .render_lock import exclusive_render_lock as _exclusive_render
 from .renderplan_input import (
     EMPHASIS_COMPOSITION_CAPABILITY,
     EmphasisPolicy,
@@ -54,6 +54,11 @@ from .renderplan_input import (
     classify_measurement,
     engine_selection_from_binding,
     speech_request_conversion_from_renderplan,
+)
+from .session_pool import (
+    EngineSessionPool,
+    SessionOpenFailure,
+    validate_max_open_sessions,
 )
 from .storage import atomic_json, atomic_wav, digest, verified_wav, wav_info
 
@@ -100,11 +105,6 @@ class _PreparedSpeech:
     cache_key: str
     session_key: str
     execution_fingerprint: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _OpenFailure:
-    error: Exception
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,9 +172,11 @@ def render_renderplan(
     recheck_report_path: str | Path | None = None,
     speech_numbers: Collection[int] | None = None,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> RenderPlanResult:
     """Render selected speech items, retaining verified artifacts from prior runs."""
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
     if not isinstance(parsed_plan, RenderPlan):
         raise PlanError("render input must be a RenderPlan")
@@ -347,8 +349,45 @@ def render_renderplan(
             complete=len(current_artifacts) == len(parsed_plan.speech),
             producer=producer,
         )
-        with ExitStack() as opened:
-            sessions: dict[str, EngineSession | _OpenFailure] = {}
+
+        def session_event_callback(kind: RenderEventKind) -> Callable[..., None]:
+            def emit_event(
+                _key: str,
+                selection: EngineSelection,
+                context: Mapping[str, object],
+                status: str | None = None,
+                error: Exception | None = None,
+                elapsed: float | None = None,
+            ) -> None:
+                event_context = dict(context)
+                event_context["engine"] = selection.engine
+                if status is not None:
+                    event_context["status"] = status
+                if error is not None:
+                    event_context["error_type"] = type(error).__name__
+                    event_context["error_code"] = getattr(error, "code", None)
+                if elapsed is not None:
+                    event_context["phase_elapsed_seconds"] = elapsed
+                emit_render_event(
+                    on_event,
+                    _render_progress_event(kind, progress_tracker, **event_context),
+                )
+
+            return emit_event
+
+        with EngineSessionPool(
+            max_open_sessions=max_open_sessions,
+            on_open_started=session_event_callback(RenderEventKind.ENGINE_OPEN_STARTED),
+            on_open_finished=session_event_callback(
+                RenderEventKind.ENGINE_OPEN_FINISHED
+            ),
+            on_close_started=session_event_callback(
+                RenderEventKind.ENGINE_CLOSE_STARTED
+            ),
+            on_close_finished=session_event_callback(
+                RenderEventKind.ENGINE_CLOSE_FINISHED
+            ),
+        ) as sessions:
             for current in prepared:
                 item = current.item
                 key = (item.number, current.segment_id)
@@ -383,54 +422,12 @@ def render_renderplan(
                         fingerprint["execution_status"] = "cache_reused"
                     else:
                         fingerprint["execution_status"] = "synthesized"
-                        session = sessions.get(current.session_key)
-                        if session is None:
-                            emit_render_event(
-                                on_event,
-                                _render_progress_event(
-                                    RenderEventKind.ENGINE_OPEN_STARTED,
-                                    progress_tracker,
-                                    **item_context,
-                                ),
-                            )
-                            open_started = monotonic()
-                            try:
-                                session = opened.enter_context(
-                                    open_session(current.selection)
-                                )
-                            except RenderEventCallbackError:
-                                raise
-                            except Exception as exc:  # noqa: BLE001 - Renderer setup becomes a partial-render result.
-                                session = _OpenFailure(exc)
-                                emit_render_event(
-                                    on_event,
-                                    _render_progress_event(
-                                        RenderEventKind.ENGINE_OPEN_FINISHED,
-                                        progress_tracker,
-                                        **item_context,
-                                        status="failed",
-                                        error_type=type(exc).__name__,
-                                        error_code=getattr(exc, "code", None),
-                                        phase_elapsed_seconds=max(
-                                            0.0, monotonic() - open_started
-                                        ),
-                                    ),
-                                )
-                            else:
-                                emit_render_event(
-                                    on_event,
-                                    _render_progress_event(
-                                        RenderEventKind.ENGINE_OPEN_FINISHED,
-                                        progress_tracker,
-                                        **item_context,
-                                        status="opened",
-                                        phase_elapsed_seconds=max(
-                                            0.0, monotonic() - open_started
-                                        ),
-                                    ),
-                                )
-                            sessions[current.session_key] = session
-                        if isinstance(session, _OpenFailure):
+                        session = sessions.acquire(
+                            current.session_key,
+                            current.selection,
+                            context=item_context,
+                        )
+                        if isinstance(session, SessionOpenFailure):
                             fingerprint["execution_status"] = "session_open_failed"
                             execution_fingerprints[key] = (
                                 _finalize_execution_fingerprint(fingerprint)
@@ -662,6 +659,13 @@ def render_renderplan(
                     )
                     break
 
+            sessions.close(
+                status="failure_cleanup" if failure is not None else "render_complete"
+            )
+            diagnostics["session_residency"] = {
+                "max_open_sessions": max_open_sessions,
+                **sessions.stats.as_dict(),
+            }
         if (
             failure is not None
             and failure.fresh_preflight is not None
@@ -849,6 +853,22 @@ def _load_existing_artifacts(
             ) from exc
         _reset_owned_artifacts(output_dir)
         return {}, True
+
+
+def _verified_manifest_artifact_count(plan: RenderPlan, output_dir: Path) -> int:
+    """Count existing manifest artifacts whose output WAVs still verify."""
+    try:
+        artifacts, _ = _load_existing_artifacts(
+            plan,
+            output_dir,
+            output_dir / RENDER_MANIFEST_FILENAME,
+            plan.plan_id or plan.computed_id(),
+            force=False,
+            reset_stale_output=False,
+        )
+    except (ArtifactError, OSError, ValueError, TypeError):
+        return 0
+    return len(artifacts)
 
 
 def _reset_owned_artifacts(output_dir: Path) -> None:
@@ -1110,22 +1130,6 @@ def _voicerender_version() -> str:
         return version("voicerender")
     except PackageNotFoundError:
         return "0+unknown"
-
-
-@contextmanager
-def _exclusive_render(output_dir: Path) -> Iterator[None]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    lock = output_dir / ".voicerender.lock"
-    try:
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise ArtifactError(f"Render directory is locked: {output_dir}") from exc
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(str(os.getpid()))
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 __all__ = [

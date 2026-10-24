@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Iterable, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Iterable
+from contextlib import ExitStack
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -23,6 +23,7 @@ from .models import (
     VoiceProfile,
 )
 from .progress import ProgressTracker
+from .render_lock import exclusive_render_lock as _exclusive_run
 from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
 
 RENDER_ALGORITHM = "voicerender.batch.v1"
@@ -96,22 +97,6 @@ def _select(
         if ":" not in name and sum(segment.id == name for segment in segments) > 1:
             raise PlanError(f"Ambiguous segment ID {name!r}; use scope_id:segment_id")
     return result
-
-
-@contextmanager
-def _exclusive_run(output_dir: Path) -> Iterator[None]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    lock = output_dir / ".voicerender.lock"
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise ArtifactError(f"Render directory is locked: {output_dir}") from exc
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(str(os.getpid()))
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None:

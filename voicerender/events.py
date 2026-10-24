@@ -27,6 +27,8 @@ class RenderEventKind(str, Enum):
     CHAPTER_SKIPPED = "chapter_skipped"
     ENGINE_OPEN_STARTED = "engine_open_started"
     ENGINE_OPEN_FINISHED = "engine_open_finished"
+    ENGINE_CLOSE_STARTED = "engine_close_started"
+    ENGINE_CLOSE_FINISHED = "engine_close_finished"
     SEGMENT_STARTED = "segment_started"
     SEGMENT_RENDERED = "segment_rendered"
     SEGMENT_REUSED = "segment_reused"

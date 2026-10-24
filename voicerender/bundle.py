@@ -11,6 +11,7 @@ from .bundle_contract import BundleKind, load_bundle_identity
 from .document import DocumentRenderResult, render_document
 from .events import RenderEventCallback
 from .renderplan_input import EmphasisPolicy
+from .session_pool import validate_max_open_sessions
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +47,11 @@ def render_bundle(
     reset_stale: bool = False,
     emphasis_policy: Literal["reject", "defer-to-compose"] = "reject",
     fail_fast: bool = False,
+    max_open_sessions: int = 1,
     on_progress: RenderEventCallback | None = None,
 ) -> BundleRenderResult:
     """Render one canonical bundle root, dispatching by its manifest identity."""
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
     identity = load_bundle_identity(bundle)
     if identity.kind == "book":
         book_result = render_book(
@@ -64,6 +67,7 @@ def render_bundle(
             fail_fast=fail_fast,
             emphasis_policy=EmphasisPolicy(emphasis_policy),
             on_event=on_progress,
+            max_open_sessions=max_open_sessions,
         )
         return BundleRenderResult(kind=identity.kind, value=book_result)
 
@@ -80,6 +84,7 @@ def render_bundle(
         reset_stale_output=reset_stale,
         emphasis_policy=EmphasisPolicy(emphasis_policy),
         on_event=on_progress,
+        max_open_sessions=max_open_sessions,
     )
     return BundleRenderResult(kind=identity.kind, value=document_result)
 

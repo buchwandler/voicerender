@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Literal
@@ -19,8 +18,8 @@ from renderplan import (
     save_preflight,
 )
 
-from .engines.base import EngineSelection, EngineSession
-from .engines.registry import get_adapter, open_session
+from .engines.base import EngineSelection
+from .engines.registry import get_adapter
 from .errors import PlanError
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .progress import ProgressTracker
@@ -32,12 +31,11 @@ from .renderplan_input import (
     engine_selection_from_binding,
     speech_request_conversion_from_renderplan,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _OpenFailure:
-    source: str
-    detail: str
+from .session_pool import (
+    EngineSessionPool,
+    SessionOpenFailure,
+    validate_max_open_sessions,
+)
 
 
 def _preflight_progress_event(
@@ -80,13 +78,14 @@ def preflight_render_plan(
     output: str | Path,
     *,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> PreflightReport:
     """Measure each required speech occurrence, then validate and persist its report."""
     if not isinstance(plan, RenderPlan):
         raise PlanError("preflight input must be a RenderPlan")
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
     checks: list[PreflightCheck] = []
-    sessions: dict[str, EngineSession | _OpenFailure] = {}
 
     required_count = sum(item.preflight_required for item in plan.speech)
     progress_tracker = ProgressTracker(required_count)
@@ -99,7 +98,7 @@ def preflight_render_plan(
             plan_id=plan_id,
         ),
     )
-    with ExitStack() as stack:
+    with EngineSessionPool(max_open_sessions=max_open_sessions) as sessions:
         for item in plan.speech:
             if not item.preflight_required:
                 continue
@@ -141,23 +140,9 @@ def preflight_render_plan(
                 )
                 continue
 
-            cached = sessions.get(session_key)
-            if cached is None:
-                try:
-                    cached = stack.enter_context(open_session(selection))
-                except Exception as exc:  # noqa: BLE001 - Session startup failures are persisted as reject checks.
-                    cached = _OpenFailure(
-                        source=_error_source(exc),
-                        detail=str(exc) or "Cannot open renderer session",
-                    )
-                sessions[session_key] = cached
-            if isinstance(cached, _OpenFailure):
-                check = _error_check(
-                    item,
-                    segment_id,
-                    RuntimeError(cached.detail),
-                    source=cached.source,
-                )
+            cached = sessions.acquire(session_key, selection)
+            if isinstance(cached, SessionOpenFailure):
+                check = _error_check(item, segment_id, cached.error)
                 checks.append(check)
                 progress_tracker.advance()
                 emit_render_event(

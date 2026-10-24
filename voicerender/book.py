@@ -51,7 +51,7 @@ from .book_layout import (
     resolve_workspace as _resolve_workspace,
 )
 from .error_diagnostics import diagnostic_summary_fields
-from .errors import ArtifactError, PlanError
+from .errors import ArtifactError, PlanError, RenderLockedError, RenderLockInvalidError
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
 from .preflight import preflight_render_plan
 from .progress import EtaConfidence, ProgressTracker, RenderProgress, RollingEta
@@ -59,8 +59,10 @@ from .renderplan_input import EMPHASIS_COMPOSITION_CAPABILITY, EmphasisPolicy
 from .renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
     RENDER_MANIFEST_FILENAME,
+    _verified_manifest_artifact_count,
     render_renderplan,
 )
+from .session_pool import validate_max_open_sessions
 from .storage import verified_wav
 
 BOOK_REPORT_FILENAME = "voicerender-report.toml"
@@ -468,9 +470,11 @@ def render_book(
     reset_stale_output: bool = False,
     fail_fast: bool = False,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> BookRenderResult:
     """Render selected chapters in a RenderPlan variant using shared preflight and render APIs."""
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
     book_started = monotonic()
     try:
         resolved_emphasis_policy = EmphasisPolicy(emphasis_policy)
@@ -544,7 +548,12 @@ def render_book(
             )
         else:
             if on_event is None:
-                outcome = _render_chapter(request, chapter, index)
+                outcome = _render_chapter(
+                    request,
+                    chapter,
+                    index,
+                    max_open_sessions=max_open_sessions,
+                )
             else:
 
                 def forward_child_event(
@@ -566,6 +575,7 @@ def render_book(
                     request,
                     chapter,
                     index,
+                    max_open_sessions=max_open_sessions,
                     on_event=forward_child_event,
                 )
             if outcome.status == "reused":
@@ -829,6 +839,7 @@ def _render_chapter(
     chapter: _LoadedChapter,
     index: int,
     *,
+    max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> ChapterRenderOutcome:
     entry = chapter.entry
@@ -882,6 +893,7 @@ def _render_chapter(
             chapter.plan,
             preflight_path,
             emphasis_policy=request.emphasis_policy,
+            max_open_sessions=max_open_sessions,
             **preflight_options,
         )
     except BookRenderError as exc:
@@ -926,9 +938,18 @@ def _render_chapter(
             recheck_report_path=recheck_report_path,
             speech_numbers=chapter.speech_numbers,
             emphasis_policy=request.emphasis_policy,
+            max_open_sessions=max_open_sessions,
             **render_options,
         )
-    except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
+    except (
+        ArtifactError,
+        PlanError,
+        RenderLockInvalidError,
+        RenderLockedError,
+        OSError,
+        ValueError,
+        TypeError,
+    ) as exc:
         error_code = getattr(exc, "code", None)
         return _failure_outcome(
             chapter,
@@ -986,6 +1007,7 @@ def _get_preflight(
     path: Path,
     *,
     emphasis_policy: EmphasisPolicy,
+    max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> PreflightReport:
     if path.exists() or path.is_symlink():
@@ -1006,12 +1028,18 @@ def _get_preflight(
             except (OSError, ValueError, TypeError):
                 pass
     if on_event is None:
-        return preflight_render_plan(plan, path, emphasis_policy=emphasis_policy)
+        return preflight_render_plan(
+            plan,
+            path,
+            emphasis_policy=emphasis_policy,
+            max_open_sessions=max_open_sessions,
+        )
     return preflight_render_plan(
         plan,
         path,
         emphasis_policy=emphasis_policy,
         on_event=on_event,
+        max_open_sessions=max_open_sessions,
     )
 
 
@@ -1223,6 +1251,11 @@ def _failure_outcome(
     preflight_report: Path | None = None,
     replan_required: bool = False,
 ) -> ChapterRenderOutcome:
+    available_speech = _verified_manifest_artifact_count(
+        chapter.plan, chapter.output_dir
+    )
+    if manifest is None and available_speech:
+        manifest = chapter.output_dir / RENDER_MANIFEST_FILENAME
     return ChapterRenderOutcome(
         index=index,
         id=chapter.entry.id,
@@ -1234,7 +1267,7 @@ def _failure_outcome(
         status="failed",
         planned_speech=planned,
         selected_speech=selected,
-        available_speech=0,
+        available_speech=available_speech,
         rendered=0,
         reused=0,
         error_code=error_code,

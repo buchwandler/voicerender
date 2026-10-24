@@ -230,15 +230,19 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     policy_calls: list[str] = []
 
+    session_limits: list[int] = []
+
     def preflight(
         plan: RenderPlan,
         path: str | Path,
         *,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+        max_open_sessions: int = 1,
         on_event: Any = None,
     ) -> PreflightReport:
         preflight_calls.append(plan.plan_id or plan.computed_id())
         policy_calls.append(f"preflight:{emphasis_policy.value}")
+        session_limits.append(max_open_sessions)
         report = _preflight(plan, Path(path))
         if on_event is not None:
             required = [item for item in plan.speech if item.preflight_required]
@@ -299,10 +303,12 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+        max_open_sessions: int = 1,
         on_event: Any = None,
     ) -> RenderPlanResult:
         del cache_dir, recheck_report_path, reset_stale_output
         policy_calls.append(f"render:{emphasis_policy.value}")
+        session_limits.append(max_open_sessions)
         selected = (
             tuple(plan.speech)
             if speech_numbers is None
@@ -450,6 +456,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return {
         "preflight": preflight_calls,
         "render": render_calls,
+        "session_limits": session_limits,
         "policy": policy_calls,
     }
 
@@ -525,7 +532,7 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
     calls = _install_fake_execution(monkeypatch)
     workspace, variant = _book(tmp_path)
 
-    first = book_module.render_book(workspace, variant=variant)
+    first = book_module.render_book(workspace, variant=variant, max_open_sessions=3)
     assert first.exit_code == 0
     assert first.workspace == workspace.resolve()
     assert first.variant == variant
@@ -551,6 +558,7 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
     assert first.full_chapters == 3
     assert len(calls["preflight"]) == 3
     assert len(calls["render"]) == 3
+    assert calls["session_limits"] == [3] * 6
     for outcome in first.outcomes:
         assert outcome.manifest is not None and outcome.manifest.is_file()
         assert (outcome.output_dir / "000001.wav").is_file()
@@ -568,6 +576,45 @@ def test_book_renders_in_set_order_and_idempotently_reuses_complete_chapters(
     assert second.success is True
     assert len(calls["preflight"]) == 3
     assert len(calls["render"]) == 3
+    assert calls["session_limits"] == [3] * 6
+
+
+def test_book_preflight_failure_preserves_verified_manifest_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path)
+    initial = book_module.render_book(workspace, variant=variant)
+    assert initial.success
+
+    monkeypatch.setattr(
+        book_module,
+        "_get_preflight",
+        lambda *_args, **_kwargs: SimpleNamespace(status="reject"),
+    )
+    failed = book_module.render_book(workspace, variant=variant, force=True)
+
+    assert [outcome.status for outcome in failed.outcomes] == ["failed"] * 3
+    assert [outcome.available_speech for outcome in failed.outcomes] == [2, 3, 1]
+    assert all(outcome.manifest is not None for outcome in failed.outcomes)
+
+    from voicerender.errors import RenderLockedError
+
+    monkeypatch.setattr(
+        book_module,
+        "_get_preflight",
+        lambda *_args, **_kwargs: SimpleNamespace(status="ok"),
+    )
+
+    def locked_render(*_args: Any, **_kwargs: Any) -> Any:
+        raise RenderLockedError("output is locked")
+
+    monkeypatch.setattr(book_module, "render_renderplan", locked_render)
+    locked = book_module.render_book(workspace, variant=variant, force=True)
+    assert [outcome.error_code for outcome in locked.outcomes] == ["render.locked"] * 3
+    assert [outcome.available_speech for outcome in locked.outcomes] == [2, 3, 1]
 
 
 def test_book_chapter_and_speech_selectors_use_source_and_speech_numbers(
@@ -652,8 +699,9 @@ def test_book_preserves_initial_preflight_report_handoff(
         path: str | Path,
         *,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+        max_open_sessions: int = 1,
     ) -> PreflightReport:
-        del emphasis_policy
+        del emphasis_policy, max_open_sessions
         speech = plan.speech[0]
         segment_id = speech.segment_id or speech.computed_id()
         check = PreflightCheck(
@@ -736,6 +784,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
         recheck_report_path: str | Path | None = None,
         speech_numbers: set[int] | frozenset[int] | None = None,
         emphasis_policy: book_module.EmphasisPolicy = book_module.EmphasisPolicy.REJECT,
+        max_open_sessions: int = 1,
     ) -> RenderPlanResult:
         result = original_render(
             plan,
@@ -747,6 +796,7 @@ def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
             recheck_report_path=recheck_report_path,
             speech_numbers=speech_numbers,
             emphasis_policy=emphasis_policy,
+            max_open_sessions=max_open_sessions,
         )
         assert recheck_report_path is not None
         speech = plan.speech[0]

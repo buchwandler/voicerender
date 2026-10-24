@@ -10,6 +10,7 @@ from .bundle import BundleRenderResult, render_bundle
 from .bundle_contract import BundleKind
 from .error_diagnostics import diagnostic_summary_fields, exception_diagnostic
 from .events import RenderEventCallback
+from .session_pool import validate_max_open_sessions
 from .variants import BundleVariant, VariantState, list_bundle_variants
 
 BatchVariantStatus = Literal[
@@ -165,6 +166,7 @@ def render_bundle_batch(
     reset_stale: bool = False,
     emphasis_policy: Literal["reject", "defer-to-compose"] = "reject",
     fail_fast: bool = False,
+    max_open_sessions: int = 1,
     on_progress: RenderEventCallback | None = None,
 ) -> BundleBatchRenderResult:
     """Render valid, incomplete variants in deterministic discovery order.
@@ -173,6 +175,7 @@ def render_bundle_batch(
     single-variant renderer, which performs its normal identity and output
     safety validation before writing.
     """
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
     listing = list_bundle_variants(
         bundle,
         renderplan_root=renderplan_root,
@@ -219,6 +222,7 @@ def render_bundle_batch(
                 emphasis_policy=emphasis_policy,
                 fail_fast=fail_fast,
                 on_progress=on_progress,
+                max_open_sessions=max_open_sessions,
             )
         except Exception as exc:  # noqa: BLE001 - Keep batch failures isolated.
             error_code, error_message = _exception_details(exc)

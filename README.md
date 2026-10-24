@@ -398,6 +398,22 @@ voicerender bundle render story.ssmd-bundle \
 
 For either kind, VoiceRender stores output below `<bundle>/voicerender/<variant>/`. The existing internal book and document layouts remain kind-specific, including their reports and manifest locations. Generic `voicerender preflight` and `voicerender render` remain available for individual RenderPlans.
 
+### Bounded sessions and crash recovery
+
+Rendering and preflight keep engine-session residency bounded. The default `max_open_sessions=1` closes an evicted session before opening another, reducing peak memory even when a plan uses many voices. Because VoiceRender preserves RenderPlan request order, returning to an evicted voice may reopen its session and add startup time. A larger limit can reduce reopen overhead for repeated bindings at the cost of keeping more engine/model memory resident.
+
+Use the positive `--max-open-sessions N` option with direct or bundle rendering; it defaults to `1` and a batch uses the same limit for each selected variant. The Python `render_renderplan()`, `preflight_render_plan()`, and high-level render APIs accept the corresponding `max_open_sessions=N` keyword.
+
+```bash
+voicerender render chapter.renderplan.toml --preflight chapter.preflight.toml \
+  --out-dir renders/narration --max-open-sessions 2
+voicerender bundle render story.ssmd-bundle --max-open-sessions 2
+```
+
+If a renderer dies abruptly, its process lock is recovered automatically only when VoiceRender can prove that the same-host owner is dead (including supported legacy PID-only locks). Live, foreign-host, unknown, or malformed locks fail closed. After safe recovery, verified partial-manifest WAVs and reusable cache entries are retained so rendering continues with missing work; `--force` and output-directory deletion are not required.
+
+`--reset-stale` is independent: it resets VoiceRender output belonging to a different RenderPlan identity. It is not a process-lock recovery option and never authorizes stealing a live lock.
+
 ## Python API
 
 ```python

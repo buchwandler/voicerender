@@ -55,6 +55,12 @@ An `ok` preflight approves the exact plan under capability observed at preflight
 
 The repository includes a Piper RenderProfile snapshot at `examples/voices/narration.renderprofile.toml` and a matching RenderPlan at `examples/plans/chapter.renderplan.toml`. See `examples/README.md`; refresh engine-derived metadata and regenerate the plan if the snapshot becomes stale.
 
+## Bounded sessions and crash recovery
+
+Render and preflight APIs default to `max_open_sessions=1`, closing an evicted engine session before opening another to bound memory. A larger positive limit may reduce session-reopen overhead for repeated voice bindings, but keeps more model memory resident. RenderPlan request order is unchanged. The direct `render` and `bundle render` commands accept `--max-open-sessions N` (default `1`); batch rendering applies one limit to each selected variant. Python rendering and preflight APIs accept `max_open_sessions=N`.
+
+An interrupted renderer's lock is reclaimed automatically only when the same-host owner is proven dead; live, foreign-host, unknown, and malformed locks remain fail-closed. Recovery verifies and reuses committed partial-manifest WAVs and cache entries, then continues missing work. `--reset-stale` is separate: it resets output for a different RenderPlan identity and does not break or override process locks.
+
 ## Engine integration
 
 Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.

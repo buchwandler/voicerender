@@ -17,10 +17,21 @@ from renderplan import codec as renderplan_codec
 from .book import _get_preflight
 from .document_contract import DocumentWorkspaceError, load_document_workspace
 from .error_diagnostics import diagnostic_summary_fields
-from .errors import ArtifactError, DocumentRenderError, PlanError
+from .errors import (
+    ArtifactError,
+    DocumentRenderError,
+    PlanError,
+    RenderLockedError,
+    RenderLockInvalidError,
+)
 from .events import RenderEventCallback
 from .renderplan_input import EmphasisPolicy
-from .renderplan_render import RENDER_MANIFEST_FILENAME, render_renderplan
+from .renderplan_render import (
+    RENDER_MANIFEST_FILENAME,
+    _verified_manifest_artifact_count,
+    render_renderplan,
+)
+from .session_pool import validate_max_open_sessions
 
 DOCUMENT_RENDERPLAN_FILENAME = "document.renderplan.toml"
 
@@ -259,9 +270,11 @@ def render_document(
     force: bool = False,
     reset_stale_output: bool = False,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> DocumentRenderResult:
     start = monotonic()
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
     request = _resolve_document_request(
         workspace,
         variant=variant,
@@ -284,6 +297,7 @@ def render_document(
             preflight_path,
             emphasis_policy=request.emphasis_policy,
             on_event=on_event,
+            max_open_sessions=max_open_sessions,
         )
         if preflight.status != "ok":
             code = (
@@ -291,18 +305,21 @@ def render_document(
                 if preflight.status == "replan"
                 else "preflight.reject"
             )
+            available = _verified_manifest_artifact_count(
+                request.plan, request.output_dir
+            )
             result = DocumentRenderResult(
                 request,
                 report_path,
                 preflight_path,
                 None,
-                None,
+                manifest_path if available else None,
                 "failed",
                 len(request.plan.speech),
                 len(request.plan.speech)
                 if request.speech_numbers is None
                 else len(request.speech_numbers),
-                0,
+                available,
                 0,
                 0,
                 False,
@@ -321,6 +338,7 @@ def render_document(
                 recheck_report_path=recheck_path,
                 speech_numbers=request.speech_numbers,
                 emphasis_policy=request.emphasis_policy,
+                max_open_sessions=max_open_sessions,
                 on_event=on_event,
             )
             result = DocumentRenderResult(
@@ -357,7 +375,15 @@ def render_document(
                     getattr(rendered, "error_diagnostic", None)
                 ),
             )
-    except (ArtifactError, PlanError, OSError, ValueError, TypeError) as exc:
+    except (
+        ArtifactError,
+        PlanError,
+        RenderLockInvalidError,
+        RenderLockedError,
+        OSError,
+        ValueError,
+        TypeError,
+    ) as exc:
         code = getattr(exc, "code", None) or "render.failed"
         result = DocumentRenderResult(
             request,
@@ -370,7 +396,7 @@ def render_document(
             len(request.plan.speech)
             if request.speech_numbers is None
             else len(request.speech_numbers),
-            0,
+            _verified_manifest_artifact_count(request.plan, request.output_dir),
             0,
             0,
             False,

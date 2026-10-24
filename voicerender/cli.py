@@ -499,6 +499,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reset output owned by a different RenderPlan while reusing cache entries",
     )
+    render.add_argument(
+        "--max-open-sessions",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Maximum number of open engine sessions (default: 1)",
+    )
     render.add_argument("--json", action="store_true")
     _add_progress_option(render)
     render.add_argument(
@@ -543,6 +550,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--reset-stale",
         action="store_true",
         help="Reset stale VoiceRender output while reusing cache entries",
+    )
+    bundle_render.add_argument(
+        "--max-open-sessions",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Maximum number of open engine sessions (default: 1)",
     )
     bundle_render.add_argument(
         "--emphasis-policy",
@@ -2501,6 +2515,7 @@ def main(argv: list[str] | None = None) -> int:
                     force=args.force,
                     reset_stale_output=args.reset_stale,
                     emphasis_policy=args.emphasis_policy,
+                    max_open_sessions=args.max_open_sessions,
                     on_event=progress,
                 )
             finally:
@@ -2546,6 +2561,7 @@ def main(argv: list[str] | None = None) -> int:
                             reset_stale=args.reset_stale,
                             emphasis_policy=args.emphasis_policy,
                             fail_fast=args.fail_fast,
+                            max_open_sessions=args.max_open_sessions,
                             on_progress=progress,
                         )
                     else:
@@ -2561,6 +2577,7 @@ def main(argv: list[str] | None = None) -> int:
                             reset_stale=args.reset_stale,
                             emphasis_policy=args.emphasis_policy,
                             fail_fast=args.fail_fast,
+                            max_open_sessions=args.max_open_sessions,
                             on_progress=progress,
                         )
                 finally:
