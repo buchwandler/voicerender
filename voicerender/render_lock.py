@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import sleep
 
 try:
     import fcntl
@@ -234,12 +235,29 @@ def _install_no_replace(source: Path, destination: Path) -> None:
     raise OSError(errno.ENOSYS, "atomic no-replace install is unavailable")
 
 
+def _cleanup_lock_temp(path: Path) -> None:
+    """Best-effort cleanup for temporary lock files on sharing-violation hosts."""
+    attempts = 5 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                return
+            sleep(0.05 * (attempt + 1))
+        else:
+            return
+
+
 def _install_lock(path: Path, payload: bytes) -> bool:
     """Atomically install a complete lock without replacing an existing path."""
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".voicerender-lock-tmp-", dir=path.parent
     )
     temporary = Path(temporary_name)
+    moved_source = False
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
@@ -254,10 +272,16 @@ def _install_lock(path: Path, payload: bytes) -> bool:
             raise RenderLockInvalidError(
                 f"Cannot safely install render lock {path}: {exc}"
             ) from exc
+        # Windows' rename can leave the source name temporarily unavailable to
+        # unlink (for example while the filesystem scanner still has a handle).
+        # A successful rename has already consumed the temporary name, so do
+        # not turn a valid lock acquisition into a sharing-violation failure.
+        moved_source = os.name == "nt"
         _fsync_directory(path.parent)
         return True
     finally:
-        temporary.unlink(missing_ok=True)
+        if not moved_source:
+            _cleanup_lock_temp(temporary)
 
 
 def _fsync_directory(path: Path) -> None:
