@@ -9,6 +9,7 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
@@ -24,7 +25,7 @@ jobs:
           python -m pip install -e ".[dev]"
           python -m compileall -q voicerender tests
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q --full-trace
 
   quality:
     runs-on: ubuntu-latest

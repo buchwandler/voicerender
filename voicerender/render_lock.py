@@ -10,12 +10,13 @@ import re
 import socket
 import stat
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import sleep
+from typing import Any, Literal
 
 try:
     import fcntl
@@ -68,7 +69,38 @@ def _lock_file_identity(path: Path) -> _FileIdentity:
     return _FileIdentity(info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
 
 
-def _process_start_token(pid: int) -> str | None:
+_ProcessState = Literal["alive", "dead", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessProbe:
+    state: _ProcessState
+    start_token: str | None
+
+
+class _FILETIME(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_uint32),
+        ("dwHighDateTime", ctypes.c_uint32),
+    ]
+
+
+_SYNCHRONIZE = 0x00100000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_INVALID_PARAMETER = 87
+_WINDOWS_PROBE_ERRORS = (
+    OSError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    OverflowError,
+    ctypes.ArgumentError,
+)
+
+
+def _linux_process_start_token(pid: int) -> str | None:
     """Return Linux procfs starttime (stat field 22), if available."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
@@ -81,8 +113,137 @@ def _process_start_token(pid: int) -> str | None:
         return None
 
 
+def _probe_process_posix(pid: int) -> _ProcessProbe:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return _ProcessProbe("dead", None)
+    except PermissionError:
+        return _ProcessProbe("unknown", None)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return _ProcessProbe("dead", None)
+        return _ProcessProbe("unknown", None)
+    return _ProcessProbe("alive", _linux_process_start_token(pid))
+
+
+def _configure_windows_api(kernel32: Any) -> None:
+    kernel32.OpenProcess.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    ]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.WaitForSingleObject.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    filetime_pointer = ctypes.POINTER(_FILETIME)
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+
+def _probe_process_windows_api(
+    pid: int,
+    kernel32: Any,
+    get_last_error: Callable[[], int],
+) -> _ProcessProbe:
+    """Probe a process using an injectable Win32 API object."""
+    try:
+        _configure_windows_api(kernel32)
+        handle = kernel32.OpenProcess(
+            _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+    except _WINDOWS_PROBE_ERRORS:
+        return _ProcessProbe("unknown", None)
+
+    if isinstance(handle, ctypes.c_void_p):
+        handle = handle.value
+    if handle is None or handle == 0:
+        try:
+            error = get_last_error()
+        except _WINDOWS_PROBE_ERRORS:
+            return _ProcessProbe("unknown", None)
+        if error == _ERROR_INVALID_PARAMETER:
+            return _ProcessProbe("dead", None)
+        return _ProcessProbe("unknown", None)
+
+    state: _ProcessState = "unknown"
+    start_token: str | None = None
+    try:
+        try:
+            wait_result = kernel32.WaitForSingleObject(handle, 0)
+            if wait_result == _WAIT_OBJECT_0:
+                state = "dead"
+            elif wait_result == _WAIT_TIMEOUT:
+                state = "alive"
+                creation = _FILETIME()
+                exit_time = _FILETIME()
+                kernel_time = _FILETIME()
+                user_time = _FILETIME()
+                try:
+                    has_times = kernel32.GetProcessTimes(
+                        handle,
+                        ctypes.byref(creation),
+                        ctypes.byref(exit_time),
+                        ctypes.byref(kernel_time),
+                        ctypes.byref(user_time),
+                    )
+                    if has_times:
+                        creation_ticks = (
+                            creation.dwHighDateTime << 32
+                        ) | creation.dwLowDateTime
+                        start_token = f"win32-filetime:{creation_ticks:016x}"
+                except Exception:  # noqa: BLE001 - token failures must not imply death
+                    # Liveness is known; a missing identity only disables PID-reuse proof.
+                    start_token = None
+        except Exception:  # noqa: BLE001 - API failures must fail closed
+            state = "unknown"
+            start_token = None
+    finally:
+        try:
+            closed = bool(kernel32.CloseHandle(handle))
+        except Exception:  # noqa: BLE001 - close failures must fail closed
+            closed = False
+    if not closed:
+        return _ProcessProbe("unknown", None)
+    return _ProcessProbe(state, start_token)
+
+
+def _probe_process_windows(pid: int) -> _ProcessProbe:
+    try:
+        win_dll = getattr(ctypes, "WinDLL")  # noqa: B009
+        get_last_error = getattr(ctypes, "get_last_error")  # noqa: B009
+        kernel32 = win_dll("kernel32", use_last_error=True)
+    except _WINDOWS_PROBE_ERRORS:
+        return _ProcessProbe("unknown", None)
+    return _probe_process_windows_api(pid, kernel32, get_last_error)
+
+
+def _probe_process(pid: int) -> _ProcessProbe:
+    if os.name == "nt":
+        return _probe_process_windows(pid)
+    return _probe_process_posix(pid)
+
+
 def _created_at() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _current_process_start_token() -> str | None:
+    probe = _probe_process(os.getpid())
+    return probe.start_token if probe.state == "alive" else None
 
 
 def _make_lock_payload() -> bytes:
@@ -91,7 +252,7 @@ def _make_lock_payload() -> bytes:
         "pid": os.getpid(),
         "hostname": socket.gethostname(),
         "created_at": _created_at(),
-        "process_start": _process_start_token(os.getpid()),
+        "process_start": _current_process_start_token(),
     }
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
         "utf-8"
@@ -130,25 +291,17 @@ def _parse_lock(text: str) -> RenderLockInfo:
 
 
 def _owner_is_definitely_dead(owner: RenderLockInfo) -> bool:
-    hostname = socket.gethostname()
-    if owner.legacy:
-        pass  # Legacy locks were always produced on this host's POSIX process space.
-    elif owner.hostname != hostname:
+    if not owner.legacy and owner.hostname != socket.gethostname():
         return False
 
-    try:
-        os.kill(owner.pid, 0)
-    except ProcessLookupError:
+    probe = _probe_process(owner.pid)
+    if probe.state == "dead":
         return True
-    except PermissionError:
+    if probe.state != "alive":
         return False
-    except OSError as exc:
-        return exc.errno == errno.ESRCH
-
-    if owner.legacy or owner.process_start is None:
+    if owner.legacy or owner.process_start is None or probe.start_token is None:
         return False
-    current_start = _process_start_token(owner.pid)
-    return current_start is not None and current_start != owner.process_start
+    return probe.start_token != owner.process_start
 
 
 @contextmanager
