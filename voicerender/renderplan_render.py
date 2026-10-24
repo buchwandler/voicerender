@@ -14,6 +14,7 @@ from time import monotonic, sleep
 from typing import Any, Literal
 
 from renderplan import (
+    CodecError,
     PreflightCheck,
     PreflightReport,
     Producer,
@@ -1045,8 +1046,21 @@ def _persist_manifest(
         producer=producer,
     ).with_identity()
     manifest.validate_against(plan)
-    save_manifest(manifest, path)
+    _save_manifest(manifest, path)
     return manifest
+
+
+def _save_manifest(manifest: RenderManifest, path: Path) -> Path:
+    """Persist a manifest, tolerating transient Windows sharing violations."""
+    attempts = 5 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            return Path(save_manifest(manifest, path))
+        except CodecError:
+            if attempt + 1 == attempts:
+                raise
+            sleep(0.05 * (attempt + 1))
+    raise AssertionError("manifest save retry loop did not return")
 
 
 def _failure_report(

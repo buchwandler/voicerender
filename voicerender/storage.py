@@ -9,12 +9,28 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
+from time import sleep
 from typing import Any
 
 import numpy as np
 import soundfile as sf
 
 from .errors import ArtifactError
+
+
+def _replace_file(source: str | Path, target: str | Path) -> None:
+    """Replace a file, tolerating transient Windows sharing violations."""
+    attempts = 5 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            sleep(0.05 * (attempt + 1))
+        else:
+            return
+    raise AssertionError("file replacement retry loop did not return")
 
 
 def digest(value: Any) -> str:
@@ -80,7 +96,7 @@ def atomic_json(path: Path, value: Any) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, path)
+        _replace_file(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
 
@@ -103,7 +119,7 @@ def atomic_wav(path: Path, audio: Any, sample_rate: int) -> dict[str, Any]:
     os.close(fd)
     try:
         sf.write(name, signal, sample_rate, format="WAV", subtype="PCM_16")
-        os.replace(name, path)
+        _replace_file(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
     return wav_info(path)
