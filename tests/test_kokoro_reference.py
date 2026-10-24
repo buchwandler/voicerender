@@ -9,7 +9,11 @@ from typing import Any
 
 import numpy as np
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from voicerender.engines.base import (
     PCM_RANGE_POLICY,
