@@ -673,16 +673,55 @@ def test_open_translates_missing_installed_model_with_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter, module, state = _install(monkeypatch)
-    selection = _resolve(adapter, source=_managed_source())
-    state["open_error"] = module.ModelNotInstalledError("not installed")
+    state["bundles"] = (
+        _bundle(
+            "nano-v2",
+            aliases=("nano", "nano-110m"),
+            profiles=("cpu", "fp32"),
+            default_profile="cpu",
+            installed_profiles=("cpu",),
+        ),
+        _bundle(
+            "turbo",
+            aliases=("turbo-350m",),
+            profiles=("fp32", "q4f16"),
+            default_profile="fp32",
+            installed_profiles=("fp32",),
+        ),
+    )
+    selection = _resolve(
+        adapter,
+        target_id="turbo",
+        source=_managed_source(),
+        options={"quality": "q4f16"},
+    )
+    state["open_error"] = module.ModelNotInstalledError("backend path must not leak")
 
     with pytest.raises(EngineUnavailableError) as unavailable:
         adapter.open(selection)
-    assert unavailable.value.code == "chatterbox.model_not_installed"
-    assert unavailable.value.details["engine"] == "chatterbox"
-    assert unavailable.value.details["target_id"] == "nano-v2"
-    assert unavailable.value.details["native_error_type"] == "ModelNotInstalledError"
-    assert unavailable.value.details["operation"] == "open"
+
+    error = unavailable.value
+    assert error.code == "chatterbox.model_not_installed"
+    assert error.details["engine"] == "chatterbox"
+    assert error.details["target_id"] == "turbo"
+    assert error.details["native_error_type"] == "ModelNotInstalledError"
+    assert error.details["operation"] == "open"
+    assert error.details["quality"] == "q4f16"
+    assert error.details["supported_profiles"] == ["fp32", "q4f16"]
+    assert error.details["installed_profiles"] == ["fp32"]
+    assert str(error) == (
+        "Chatterbox target 'turbo' requires quality 'q4f16', but that profile is not installed.\n"
+        "Supported profiles: fp32, q4f16\n"
+        "Install it with:\n"
+        "  chatterboxsynth download turbo --quality q4f16\n"
+        "Or install it through VoiceRender:\n"
+        "  voicerender models install turbo --engine chatterbox --quality q4f16\n"
+        "Installed profiles: fp32\n"
+        "Installed profiles do not satisfy requested quality 'q4f16'."
+    )
+    assert "backend path" not in str(error)
+    assert "/private/" not in str(error)
+    assert "voice_source" not in str(error)
 
 
 def test_canonical_identity_pins_model_profile_voice_and_generation_without_paths(

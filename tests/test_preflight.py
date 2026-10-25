@@ -775,6 +775,33 @@ def test_too_long_preflight_preserves_source_and_planning_level(
     assert adapter.synthesized_texts == []
 
 
+def test_preflight_failure_message_counts_checks_and_uses_one_primary_detail() -> None:
+    from voicerender.cli import _preflight_payload
+    from voicerender.preflight import preflight_failure_message
+
+    detail = "Chatterbox target 'turbo' requires quality 'q4f16'."
+    report = SimpleNamespace(
+        status="reject",
+        render_plan_id="sha256:" + "1" * 64,
+        render_profile_id="sha256:" + "2" * 64,
+        replan=(),
+        checks=(
+            SimpleNamespace(status="error", detail=detail),
+            SimpleNamespace(status="error", detail=detail),
+            SimpleNamespace(status="error", detail="A later distinct failure."),
+        ),
+    )
+
+    summary = preflight_failure_message(report)  # type: ignore[arg-type]
+
+    assert summary == (
+        "RenderPlan preflight rejected this plan (3 error checks).\n"
+        f"Primary cause: {detail}"
+    )
+    assert _preflight_payload(report)["error"] == summary
+    assert len(report.checks) == 3
+
+
 def test_fully_unknown_measurement_rejects(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -883,6 +910,9 @@ def test_invalid_binding_is_a_reported_reject_for_each_occurrence(
     assert [check.status for check in report.checks] == ["error", "error"]
     assert len({check.segment_number for check in report.checks}) == 2
     assert adapter.measured_texts == []
+    persisted = load_preflight(tmp_path / "binding-reject.toml")
+    assert len(persisted.checks) == len(plan.speech) == 2
+    assert [check.status for check in persisted.checks] == ["error", "error"]
     assert adapter.open_count == 0
 
 

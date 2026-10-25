@@ -258,6 +258,34 @@ def preflight_exit_code(report: PreflightReport) -> int:
     return {"ok": 0, "replan": 2, "reject": 1}[report.status]
 
 
+def preflight_failure_message(report: PreflightReport) -> str:
+    """Summarize a non-ok report without repeating per-occurrence failures."""
+    checks = getattr(report, "checks", ())
+    if report.status == "reject":
+        failures = tuple(check for check in checks if check.status == "error")
+        heading = (
+            f"RenderPlan preflight rejected this plan ({len(failures)} error checks)."
+        )
+    elif report.status == "replan":
+        failures = tuple(check for check in checks if check.status != "ok")
+        heading = f"RenderPlan preflight requires replanning ({len(failures)} checks)."
+    else:
+        failures = tuple(check for check in checks if check.status != "ok")
+        heading = f"RenderPlan preflight status is {report.status!r}"
+
+    primary_detail = next(
+        (
+            check.detail.strip()
+            for check in failures
+            if isinstance(check.detail, str) and check.detail.strip()
+        ),
+        None,
+    )
+    if primary_detail is None:
+        return heading
+    return f"{heading}\nPrimary cause: {primary_detail}"
+
+
 def preflight_summary(report: PreflightReport, output: str | Path) -> dict[str, Any]:
     """Build the compact JSON summary printed by the preflight CLI."""
     return {

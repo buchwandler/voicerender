@@ -20,6 +20,7 @@ from voicerender.models_api import (
     list_models,
     model_artifact_to_dict,
     model_result_to_dict,
+    model_status,
     remove_model,
     verify_model,
 )
@@ -65,6 +66,44 @@ def test_model_listing_projects_discovery_without_opening_synthesis_runtime(
     )
 
 
+def test_installed_profiles_project_exactly_for_listing_and_inspection(
+    monkeypatch,
+) -> None:
+    qualities = ("fp32", "q4f16")
+    inventories = ((), ("q4f16",), ("fp32",), ("fp32", "q4f16"))
+    monkeypatch.setattr(
+        "voicerender.models_api.get_asset_manager", lambda _engine: None
+    )
+
+    for installed_profiles in inventories:
+        target = SimpleNamespace(
+            engine="chatterbox",
+            id="turbo",
+            display_name="Chatterbox Turbo",
+            runtime_available=bool(installed_profiles),
+            status="ready",
+            languages=("en",),
+            qualities=qualities,
+            metadata={"installed_profiles": installed_profiles},
+        )
+        monkeypatch.setattr(
+            "voicerender.models_api.discover_targets",
+            lambda *_args, target=target, **_kwargs: (target,),
+        )
+
+        listed = list_models("chatterbox")
+        expected = tuple(
+            quality for quality in qualities if quality in installed_profiles
+        )
+        assert listed[0].qualities == qualities
+        assert listed[0].installed_qualities == expected
+        assert listed[0].installed is bool(expected)
+        for quality in qualities:
+            inspected = model_status("chatterbox", "turbo", quality=quality)
+            assert inspected.installed is (quality in expected)
+            assert inspected.installed_qualities == expected
+
+
 def test_unsupported_install_has_stable_engine_operation_diagnostic(
     monkeypatch,
 ) -> None:
@@ -77,6 +116,138 @@ def test_unsupported_install_has_stable_engine_operation_diagnostic(
     assert result.diagnostics == (
         "Engine 'kokoro' does not support model install for target 'v1.0'",
     )
+
+
+def test_lazy_chatterbox_manager_installs_through_public_download_api(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import sys
+    from types import ModuleType
+
+    from voicerender.engines import registry
+    from voicerender.engines.assets import ModelInstallRequest, ModelRemoveRequest
+    from voicerender.models_api import (
+        install_model,
+        list_models,
+        model_status,
+        remove_model,
+        verify_model,
+    )
+
+    installed_profiles: list[str] = []
+    download_calls: list[tuple[str, str, Path | None, bool]] = []
+
+    def target() -> SimpleNamespace:
+        return SimpleNamespace(
+            engine="chatterbox",
+            id="turbo",
+            display_name="Chatterbox Turbo",
+            languages=("en",),
+            qualities=("fp32", "q4f16"),
+            status="ready",
+            runtime_available=bool(installed_profiles),
+            metadata={
+                "default_profile": "fp32",
+                "profiles": ("fp32", "q4f16"),
+                "installed_profiles": tuple(installed_profiles),
+                "source_revision": "catalog-rev",
+            },
+        )
+
+    def discover(_engine: str, **_kwargs: object) -> tuple[SimpleNamespace, ...]:
+        return (target(),)
+
+    monkeypatch.setattr(registry, "_ASSET_MANAGERS", {})
+    monkeypatch.delitem(sys.modules, "chatterboxsynth", raising=False)
+    registry.list_engines()
+    assert "chatterboxsynth" not in sys.modules
+
+    manager = registry.get_asset_manager("chatterbox")
+    assert manager is not None
+    assert manager.capabilities().can_install
+    assert "chatterboxsynth" not in sys.modules
+
+    from voicerender.engines import chatterbox_assets
+
+    monkeypatch.setattr(chatterbox_assets, "discover_targets", discover)
+
+    class FakeRuntime:
+        @staticmethod
+        def download(
+            target_id: str,
+            *,
+            quality: str,
+            cache_dir: Path | None,
+            force_download: bool,
+        ) -> None:
+            download_calls.append((target_id, quality, cache_dir, force_download))
+            if quality == "fp32":
+                raise RuntimeError("backend download failed")
+            installed_profiles.append(quality)
+
+    backend = ModuleType("chatterboxsynth")
+    backend.ChatterboxRuntime = FakeRuntime  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "chatterboxsynth", backend)
+
+    listed = list_models("chatterbox")
+    assert len(listed) == 1
+    assert listed[0].installed is False
+    assert listed[0].qualities == ("fp32", "q4f16")
+
+    result = install_model(
+        ModelInstallRequest(
+            "chatterbox", "turbo", "q4f16", cache_dir=tmp_path, force=True
+        )
+    )
+    assert result.status == "installed"
+    assert result.changed is True
+    assert result.artifact is not None
+    assert result.artifact.installed_qualities == ("q4f16",)
+    assert download_calls == [("turbo", "q4f16", tmp_path, True)]
+
+    repeated = install_model(
+        ModelInstallRequest("chatterbox", "turbo", "q4f16", cache_dir=tmp_path)
+    )
+    assert repeated.status == "installed"
+    assert repeated.changed is False
+    assert repeated.artifact is not None
+    assert repeated.artifact.installed_qualities == ("q4f16",)
+    assert download_calls == [
+        ("turbo", "q4f16", tmp_path, True),
+        ("turbo", "q4f16", tmp_path, False),
+    ]
+
+    assert model_status("chatterbox", "turbo", quality="fp32").installed is False
+    assert model_status("chatterbox", "turbo", quality="q4f16").installed is True
+    assert model_status("chatterbox", "turbo").installed_qualities == ("q4f16",)
+
+    invalid_target = install_model(
+        ModelInstallRequest("chatterbox", "not-canonical", "q4f16")
+    )
+    invalid_quality = install_model(
+        ModelInstallRequest("chatterbox", "turbo", "unknown")
+    )
+    empty_quality = install_model(ModelInstallRequest("chatterbox", "turbo", ""))
+    assert (
+        invalid_target.status
+        == invalid_quality.status
+        == empty_quality.status
+        == "failed"
+    )
+    assert download_calls == [
+        ("turbo", "q4f16", tmp_path, True),
+        ("turbo", "q4f16", tmp_path, False),
+    ]
+
+    failed = install_model(ModelInstallRequest("chatterbox", "turbo", "fp32"))
+    assert failed.status == "failed"
+    assert "backend download failed" in failed.diagnostics[0]
+    sourced = install_model(
+        ModelInstallRequest("chatterbox", "turbo", source="alternate")
+    )
+    removed = remove_model(ModelRemoveRequest("chatterbox", "turbo"))
+    verified = verify_model("chatterbox", "turbo")
+    assert sourced.status == removed.status == verified.status == "unsupported"
 
 
 def test_install_delegates_to_registered_public_asset_manager(

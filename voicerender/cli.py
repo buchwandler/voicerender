@@ -57,7 +57,7 @@ from .models_api import (
     remove_model,
     verify_model,
 )
-from .preflight import preflight_render_plan
+from .preflight import preflight_failure_message, preflight_render_plan
 from .profile_roles import (
     list_profile_roles,
     remove_profile_role,
@@ -1091,13 +1091,7 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
             if report.status == "reject"
             else None
         ),
-        "error": (
-            "Renderer capability requires replanning."
-            if report.status == "replan"
-            else "Renderer preflight rejected this plan."
-            if report.status == "reject"
-            else None
-        ),
+        "error": (preflight_failure_message(report) if report.status != "ok" else None),
     }
 
 

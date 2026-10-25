@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
@@ -188,6 +189,58 @@ def _engine_language(value: str | None) -> str:
     return "en"
 
 
+_CANONICAL_TARGET_IDS = frozenset({"nano-v2", "turbo"})
+_PROFILE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _profile_names(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            name
+            for name in value
+            if isinstance(name, str) and _PROFILE_IDENTIFIER.fullmatch(name)
+        )
+    )
+
+
+def _missing_model_message(selection: EngineSelection) -> str:
+    target_id = selection.target_id
+    quality = selection.options.get("quality")
+    profiles = _profile_names(selection.metadata.get("profiles"))
+    installed_profiles = _profile_names(selection.metadata.get("installed_profiles"))
+    if (
+        target_id not in _CANONICAL_TARGET_IDS
+        or not isinstance(quality, str)
+        or quality not in profiles
+    ):
+        return f"ChatterboxSynth target {target_id!r} is not installed."
+
+    lines = [
+        (
+            f"Chatterbox target {target_id!r} requires quality {quality!r}, "
+            "but that profile is not installed."
+        )
+    ]
+    if profiles:
+        lines.append(f"Supported profiles: {', '.join(profiles)}")
+    lines.extend(
+        (
+            "Install it with:",
+            f"  chatterboxsynth download {target_id} --quality {quality}",
+            "Or install it through VoiceRender:",
+            f"  voicerender models install {target_id} --engine chatterbox --quality {quality}",
+            f"Installed profiles: {', '.join(installed_profiles) or 'none'}",
+        )
+    )
+    if installed_profiles and quality not in installed_profiles:
+        lines.append(
+            f"Installed profiles do not satisfy requested quality {quality!r}."
+        )
+    return "\n".join(lines)
+
+
 def _error_context(
     selection: EngineSelection,
     error: Exception,
@@ -199,6 +252,19 @@ def _error_context(
     version = getattr(module, "__version__", None) or selection.metadata.get(
         "engine_version"
     )
+    profiles = _profile_names(selection.metadata.get("profiles"))
+    installed_profiles = _profile_names(selection.metadata.get("installed_profiles"))
+    quality = selection.options.get("quality")
+    details: dict[str, Any] = {
+        "operation": stage,
+        "native_error_type": type(error).__name__,
+    }
+    if isinstance(quality, str) and quality in profiles:
+        details["quality"] = quality
+    if profiles:
+        details["supported_profiles"] = list(profiles)
+    if "installed_profiles" in selection.metadata:
+        details["installed_profiles"] = list(installed_profiles)
     return {
         "engine": ENGINE_ID,
         "engine_version": version if isinstance(version, str) else None,
@@ -206,7 +272,7 @@ def _error_context(
         "language": request.language if request is not None else selection.language,
         "request_id": request.id if request is not None else None,
         "native_error_type": type(error).__name__,
-        "details": {"operation": stage, "native_error_type": type(error).__name__},
+        "details": details,
     }
 
 
@@ -234,7 +300,7 @@ def _translate_error(
         )
     if is_native("ModelNotInstalledError"):
         return EngineUnavailableError(
-            f"ChatterboxSynth target {selection.target_id!r} is not installed: {error}",
+            _missing_model_message(selection),
             **context,
             code="chatterbox.model_not_installed",
         )

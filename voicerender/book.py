@@ -53,7 +53,7 @@ from .book_layout import (
 from .error_diagnostics import diagnostic_summary_fields
 from .errors import ArtifactError, PlanError, RenderLockedError, RenderLockInvalidError
 from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
-from .preflight import preflight_render_plan
+from .preflight import preflight_failure_message, preflight_render_plan
 from .progress import EtaConfidence, ProgressTracker, RenderProgress, RollingEta
 from .renderplan_input import EMPHASIS_COMPOSITION_CAPABILITY, EmphasisPolicy
 from .renderplan_render import (
@@ -918,7 +918,7 @@ def _render_chapter(
             planned,
             selected,
             code,
-            f"RenderPlan preflight status is {preflight.status!r}",
+            preflight_failure_message(preflight),
             preflight_report=preflight_path,
             replan_required=preflight.status == "replan",
         )

@@ -25,6 +25,7 @@ from .errors import (
     RenderLockInvalidError,
 )
 from .events import RenderEventCallback
+from .preflight import preflight_failure_message
 from .renderplan_input import EmphasisPolicy
 from .renderplan_render import (
     RENDER_MANIFEST_FILENAME,
@@ -324,7 +325,7 @@ def render_document(
                 0,
                 False,
                 code,
-                f"RenderPlan preflight status is {preflight.status!r}",
+                preflight_failure_message(preflight),
                 preflight.status == "replan",
             )
         else:

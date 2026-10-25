@@ -137,7 +137,17 @@ def register_asset_manager(engine: str, manager: EngineAssetManager) -> None:
 
 def get_asset_manager(engine: str) -> EngineAssetManager | None:
     """Return an engine's optional asset manager without loading its SDK."""
-    return _ASSET_MANAGERS.get(normalize_engine_id(engine))
+    engine_id = normalize_engine_id(engine)
+    manager = _ASSET_MANAGERS.get(engine_id)
+    if manager is not None:
+        return manager
+    if engine_id == "chatterbox":
+        module = importlib.import_module(".chatterbox_assets", __package__)
+        manager_type = cast(Any, module).ChatterboxSynthAssetManager
+        manager = cast(EngineAssetManager, manager_type())
+        register_asset_manager(engine_id, manager)
+        return manager
+    return None
 
 
 def get_adapter(engine: str) -> EngineAdapter:

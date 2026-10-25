@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,22 @@ def _capabilities(
 
 
 def _from_target(target: Any) -> ModelArtifact:
-    installed = bool(target.runtime_available)
     metadata = dict(target.metadata)
+    qualities = tuple(target.qualities)
+    if "installed_profiles" in metadata:
+        raw_installed = metadata["installed_profiles"]
+        profiles = (
+            {profile for profile in raw_installed if isinstance(profile, str)}
+            if isinstance(raw_installed, (list, tuple, set, frozenset))
+            else set()
+        )
+        installed_qualities = tuple(
+            quality for quality in qualities if quality in profiles
+        )
+        installed = bool(installed_qualities)
+    else:
+        installed = bool(target.runtime_available)
+        installed_qualities = qualities if installed else ()
     source = metadata.get("source")
     revision = metadata.get("revision", metadata.get("source_revision"))
     path = metadata.get("path")
@@ -49,8 +64,8 @@ def _from_target(target: Any) -> ModelArtifact:
         installed=installed,
         status=target.status,
         languages=tuple(target.languages),
-        qualities=tuple(target.qualities),
-        installed_qualities=tuple(target.qualities) if installed else (),
+        qualities=qualities,
+        installed_qualities=installed_qualities,
         source=str(source) if source is not None else None,
         revision=str(revision) if revision is not None else None,
         path=Path(path) if isinstance(path, (str, Path)) else None,
@@ -106,6 +121,11 @@ def model_status(
             if quality is not None and quality not in model.qualities:
                 raise ProfileError(
                     f"Engine {engine_id!r} target {target_id!r} does not provide quality {quality!r}"
+                )
+            if quality is not None and "installed_profiles" in model.metadata:
+                return replace(
+                    model,
+                    installed=quality in model.installed_qualities,
                 )
             return model
     raise ProfileError(f"Engine {engine_id!r} has no model target {target_id!r}")

@@ -88,6 +88,42 @@ def test_models_install_json_reports_unsupported_diagnostic(
     ]
 
 
+def test_models_install_chatterbox_passes_requested_quality_to_api(
+    monkeypatch, capsys
+) -> None:
+    from voicerender.engines.assets import ModelInstallRequest, ModelInstallResult
+
+    seen: list[ModelInstallRequest] = []
+
+    def install(request: ModelInstallRequest) -> ModelInstallResult:
+        seen.append(request)
+        return ModelInstallResult(
+            request.engine,
+            request.target_id,
+            "installed",
+            True,
+        )
+
+    monkeypatch.setattr(cli, "install_model", install)
+
+    exit_code = cli.main(
+        [
+            "models",
+            "install",
+            "turbo",
+            "--engine",
+            "chatterbox",
+            "--quality",
+            "fp32",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen == [ModelInstallRequest("chatterbox", "turbo", "fp32")]
+    assert json.loads(capsys.readouterr().out)["status"] == "installed"
+
+
 def _sopro_model() -> ModelArtifact:
     return ModelArtifact(
         "sopro",

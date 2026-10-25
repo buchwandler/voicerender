@@ -234,7 +234,15 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
     monkeypatch.setattr(
         document_module,
         "_get_preflight",
-        lambda *_args, **_kwargs: SimpleNamespace(status="reject"),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="reject",
+            checks=(
+                SimpleNamespace(
+                    status="error",
+                    detail="Chatterbox target 'turbo' requires quality 'q4f16'.",
+                ),
+            ),
+        ),
     )
     monkeypatch.setattr(
         document_module,
@@ -250,6 +258,10 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
     assert result.available_speech == 1
     assert result.manifest == manifest_path
     assert result.rendered == result.reused == 0
+    assert result.error_message == (
+        "RenderPlan preflight rejected this plan (1 error checks).\n"
+        "Primary cause: Chatterbox target 'turbo' requires quality 'q4f16'."
+    )
 
     from voicerender.errors import RenderLockedError
 

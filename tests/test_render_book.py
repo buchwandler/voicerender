@@ -712,6 +712,11 @@ def test_book_preserves_initial_preflight_report_handoff(
             measured=101,
             maximum=100,
             source="test.initial_measurement",
+            detail=(
+                "Chatterbox target 'turbo' requires quality 'q4f16'."
+                if status == "reject"
+                else None
+            ),
         )
         requests = ()
         if status == "replan":
@@ -747,6 +752,11 @@ def test_book_preserves_initial_preflight_report_handoff(
     assert outcome.status == "failed"
     assert outcome.error_code == error_code
     assert outcome.replan_required is replan_required
+    if status == "reject":
+        assert outcome.error_message == (
+            "RenderPlan preflight rejected this plan (1 error checks).\n"
+            "Primary cause: Chatterbox target 'turbo' requires quality 'q4f16'."
+        )
     assert outcome.preflight_report == outcome.output_dir / "preflight.toml"
     assert outcome.preflight_report.is_file()
     assert calls["render"] == []
@@ -756,6 +766,8 @@ def test_book_preserves_initial_preflight_report_handoff(
     assert item["preflight_report"] == "chapter-0005/preflight.toml"
     report = tomllib.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["item"][0]["replan_required"] is replan_required
+    if status == "reject":
+        assert report["item"][0]["error_message"] == outcome.error_message
     assert report["item"][0]["preflight_report"] == "chapter-0005/preflight.toml"
 
     from voicerender.bundle import BundleRenderResult
@@ -763,7 +775,10 @@ def test_book_preserves_initial_preflight_report_handoff(
 
     _print_bundle_result(BundleRenderResult(kind="book", value=result))
     label = "replan report" if replan_required else "preflight report"
-    assert f"{label}: {outcome.preflight_report}" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert f"{label}: {outcome.preflight_report}" in printed
+    if status == "reject":
+        assert "Primary cause: Chatterbox target 'turbo'" in printed
 
 
 def test_book_persists_runtime_replan_report_for_exact_plan_occurrence(
