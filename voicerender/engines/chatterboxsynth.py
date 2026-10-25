@@ -735,9 +735,11 @@ class ChatterboxSynthEngineAdapter:
             "voice_source": source.as_mapping(),
             "quality": quality,
             "provider": provider.strip(),
-            "max_new_tokens": generation.max_new_tokens,
-            "repetition_penalty": generation.repetition_penalty,
         }
+        if generation.max_new_tokens is not None:
+            selected_options["max_new_tokens"] = generation.max_new_tokens
+        if generation.repetition_penalty is not None:
+            selected_options["repetition_penalty"] = generation.repetition_penalty
         for name in (
             "voice_catalog_path",
             "voice_cache_dir",

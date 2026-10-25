@@ -28,6 +28,12 @@ from voicerender.errors import (
 from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_input import PreflightDisposition, classify_measurement
 from voicerender.renderplan_render import render_renderplan
+from voicerender.renderprofile import (
+    create_render_profile,
+    load_render_profile,
+    save_render_profile,
+    validate_render_profile,
+)
 from voicerender.voice_sources import (
     ResolvedReferenceAudio,
     local_reference_source,
@@ -433,6 +439,110 @@ def test_selection_requires_english_reference_and_supported_profile(
             adapter, source=_managed_source(), engine_options={"max_new_tokens": 0}
         )
     assert generation.value.code == "chatterbox.generation_config_invalid"
+
+
+def test_resolve_omits_unset_generation_options_but_keeps_required_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _, _ = _install(monkeypatch)
+    selection = _resolve(adapter, source=_managed_source())
+
+    assert "max_new_tokens" not in selection.options
+    assert "repetition_penalty" not in selection.options
+    assert selection.options["voice_source"]
+    assert selection.options["quality"] == "cpu"
+    assert selection.options["provider"] == "cpu"
+
+
+def test_resolve_preserves_explicit_generation_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _, _ = _install(monkeypatch)
+    selection = _resolve(
+        adapter,
+        source=_managed_source(),
+        engine_options={"max_new_tokens": 128, "repetition_penalty": 1.2},
+    )
+
+    assert selection.options["max_new_tokens"] == 128
+    assert selection.options["repetition_penalty"] == 1.2
+
+
+def test_synthesis_passes_none_for_unset_generation_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _, state = _install(monkeypatch)
+    reference = tmp_path / "speaker.wav"
+    reference.write_bytes(b"pinned local reference")
+    selection = _resolve(adapter, source=local_reference_source(reference))
+
+    with adapter.open(selection) as session:
+        session.synthesize(
+            SpeechRequest(
+                id="unset-options",
+                text="Use bundle defaults.",
+                language="en-US",
+            )
+        )
+
+    config = state["syntheses"][0][2]
+    assert config.max_new_tokens is None
+    assert config.repetition_penalty is None
+    assert state["from_pretrained"] == 0
+
+
+def test_chatterbox_profile_round_trip_omits_unset_and_keeps_explicit_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _, state = _install(monkeypatch)
+    monkeypatch.setitem(_ADAPTERS, "chatterbox", adapter)
+    reference = tmp_path / "speaker.wav"
+    reference.write_bytes(b"pinned local reference")
+    source = local_reference_source(reference)
+
+    default_profile = create_render_profile(
+        engine="chatterbox",
+        target_id="nano-v2",
+        language="en-US",
+        voice_source=source,
+    )
+    default_path = tmp_path / "default.renderprofile.toml"
+    save_render_profile(default_profile, default_path)
+    default_role = load_render_profile(default_path).roles["narrator"]
+    default_options = default_role.binding["options"]
+    assert default_role.binding["target_id"] == "nano-v2"
+    assert default_options["voice_source"]
+    assert default_options["quality"] == "cpu"
+    assert default_options["provider"] == "cpu"
+    assert "max_new_tokens" not in default_options
+    assert "repetition_penalty" not in default_options
+    default_toml = default_path.read_text(encoding="utf-8")
+    assert "max_new_tokens" not in default_toml
+    assert "repetition_penalty" not in default_toml
+    assert (
+        validate_render_profile(default_path).roles["narrator"].binding["options"]
+        == default_options
+    )
+
+    explicit_profile = create_render_profile(
+        engine="chatterbox",
+        target_id="nano-v2",
+        language="en-US",
+        voice_source=source,
+        options={"max_new_tokens": 128, "repetition_penalty": 1.2},
+    )
+    explicit_path = tmp_path / "explicit.renderprofile.toml"
+    save_render_profile(explicit_profile, explicit_path)
+    explicit_options = (
+        load_render_profile(explicit_path).roles["narrator"].binding["options"]
+    )
+    assert explicit_options["max_new_tokens"] == 128
+    assert explicit_options["repetition_penalty"] == 1.2
+    assert (
+        validate_render_profile(explicit_path).roles["narrator"].binding["options"]
+        == explicit_options
+    )
+    assert state["from_pretrained"] == 0
 
 
 def test_measurement_is_exact_and_does_not_resolve_prepare_or_synthesize(
