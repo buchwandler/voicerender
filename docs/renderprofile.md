@@ -45,6 +45,22 @@ Review refreshed bindings and policy before using the proposal. If identity-bear
 profile semantics change, regenerate the associated RenderPlan using the refreshed
 profile. Keep the original profile with its plans for provenance and inspection.
 
+
+
+### Repairing a stale profile identity
+
+Manual edits to identity-bearing content (for example, adding a role or changing an engine option such as `quality`) make the stored `profile_id` stale. Ordinary profile loading remains strict: `inspect`, `show`, `validate`, and `refresh` reject a stale ID rather than silently changing the identity.
+
+Use the explicit recovery command to update only the root `profile_id` while retaining authored settings and TOML formatting:
+
+```bash
+voicerender profile reidentify story-cast6.renderprofile.toml --in-place
+# Or preserve the source and write a repaired copy:
+voicerender profile reidentify story-cast6.renderprofile.toml \\
+  --output story-cast6.reidentified.renderprofile.toml
+```
+
+`profile reidentify` computes identity from the canonical typed profile; it does not refresh engine-derived facts, validate engine bindings, invoke adapters, fetch VoiceFolio data, or download models. `profile refresh` remains the operation for proposing refreshed engine metadata and capacities. Re-identification does not rewrite RenderPlans or rename variants. Afterward inspect and validate the repaired profile, then recompile or re-project the RenderPlan variant for the new profile identity before rendering.
 ## Inspecting and mutating profile roles
 
 One RenderProfile is the complete cast for a render variant. Its logical roles may use different engines and targets while sharing planning and pause policy. `profile show` is the preferred human view; JSON retains each full canonical binding:

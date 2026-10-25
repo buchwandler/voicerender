@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TextIO, cast
 
+import tomlkit
 from renderplan import RoleProfile, load_manifest, load_plan
 
 from . import __version__
@@ -73,6 +74,7 @@ from .renderprofile import (
     create_render_profile,
     load_render_profile,
     refresh_render_profile,
+    reidentify_render_profile,
     save_render_profile,
     validate_render_profile,
 )
@@ -315,6 +317,16 @@ def build_parser() -> argparse.ArgumentParser:
     profile_refresh.add_argument("profile", type=Path)
     profile_refresh.add_argument("-o", "--output", required=True, type=Path)
     profile_refresh.add_argument("--json", action="store_true")
+
+
+    profile_reidentify = profile_commands.add_parser(
+        "reidentify", help="Repair a stale or missing RenderProfile content ID"
+    )
+    profile_reidentify.add_argument("profile", type=Path)
+    reidentify_destination = profile_reidentify.add_mutually_exclusive_group(required=True)
+    reidentify_destination.add_argument("-o", "--output", type=Path)
+    reidentify_destination.add_argument("--in-place", action="store_true")
+    profile_reidentify.add_argument("--json", action="store_true")
 
     profile_inspect = profile_commands.add_parser(
         "inspect", help="Inspect RenderProfile roles and policy"
@@ -2362,6 +2374,38 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 output = save_render_profile(profile, output_path)
                 payload = {"profile_id": profile.profile_id, "path": str(output)}
+            elif args.profile_command == "reidentify":
+
+                if args.output is not None and args.output.resolve() == args.profile.resolve():
+                    raise ValueError("profile output must not overwrite its source; use --in-place")
+
+                document = tomlkit.parse(args.profile.read_text(encoding="utf-8"))
+                previous_id = document.get("profile_id")
+                profile = reidentify_render_profile(args.profile)
+                document["profile_id"] = profile.profile_id
+                destination = args.profile if args.in_place else args.output
+                assert destination is not None
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                fd, temporary_name = tempfile.mkstemp(
+                    prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                        stream.write(tomlkit.dumps(document))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if args.in_place:
+                        os.chmod(temporary_name, args.profile.stat().st_mode)
+                    os.replace(temporary_name, destination)
+                finally:
+                    if os.path.exists(temporary_name):
+                        os.unlink(temporary_name)
+                payload = {
+                    "path": str(destination),
+                    "old_profile_id": str(previous_id) if previous_id is not None else None,
+                    "profile_id": profile.profile_id,
+                    "changed": previous_id != profile.profile_id,
+                }
             elif args.profile_command == "validate":
                 profile = validate_render_profile(load_render_profile(args.profile))
                 payload = {
@@ -2487,6 +2531,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"Pauses: mode={pauses['mode']}; durations={durations or 'none'}"
                     )
+            elif args.profile_command == "reidentify":
+                print(
+                    "RenderProfile reidentified\n"
+                    f"  previous profile-id: {payload['old_profile_id']}\n"
+                    f"  current profile-id:  {payload['profile_id']}\n"
+                    f"  path:                {payload['path']}"
+                )
             elif "path" in payload:
                 print(f"RenderProfile {payload['profile_id']} -> {payload['path']}")
             else:

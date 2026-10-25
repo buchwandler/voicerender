@@ -14,6 +14,7 @@ from renderplan import (
     RoleProfile,
     RoleRequirements,
     load_profile,
+    load_profile_for_reidentification,
     save_profile,
 )
 
@@ -294,6 +295,19 @@ def load_render_profile(profile: str | Path | RenderProfile) -> RenderProfile:
     except Exception as exc:
         raise ProfileError(f"Cannot load RenderProfile {profile}: {exc}") from exc
 
+
+
+def reidentify_render_profile(profile: str | Path | RenderProfile) -> RenderProfile:
+    """Compute the canonical identity without engine or metadata validation."""
+    try:
+        loaded = (
+            load_profile_for_reidentification(profile)
+            if not isinstance(profile, RenderProfile)
+            else profile
+        )
+        return replace(loaded, profile_id=None).with_identity()
+    except Exception as exc:
+        raise ProfileError(f"Cannot re-identify RenderProfile {profile}: {exc}") from exc
 
 def save_render_profile(profile: RenderProfile, path: str | Path) -> Path:
     """Persist a shared RenderProfile using the RenderPlan codec."""

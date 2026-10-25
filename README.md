@@ -123,6 +123,16 @@ voicerender profile refresh narration.renderprofile.toml \
   -o narration.refreshed.renderprofile.toml
 ```
 
+
+For deliberate manual edits that make a stored profile ID stale, use the explicit recovery command; normal profile loading remains strict, and this does not refresh engine metadata:
+
+```bash
+voicerender profile reidentify story-cast6.renderprofile.toml --in-place
+# Then inspect/validate and regenerate the RenderPlan variant for the new identity.
+```
+
+Use `profile refresh` for engine-derived metadata and capacities. Re-identification changes only the identity field and never rewrites existing RenderPlans or variant directories. See the [RenderProfile lifecycle](docs/renderprofile.md#repairing-a-stale-profile-identity).
+
 ## Engine, voice, and profile control surface
 
 VoiceRender exposes engine-facing discovery and lifecycle operations through its public Python API and CLI. Discovery does not open synthesis sessions; model installation/removal is delegated only to an engine's supported public asset API. Unsupported asset operations report the engine and operation rather than falling back to private modules or backend CLIs.
