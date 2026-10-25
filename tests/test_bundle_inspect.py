@@ -19,6 +19,7 @@ from renderplan import (
 from voicerender import cli
 from voicerender.bundle_contract import BundleContractError
 from voicerender.bundle_inspect import inspect_bundle
+from voicerender.bundle_roles import BundleRolesError
 from voicerender.variants import list_bundle_variants
 
 
@@ -83,8 +84,28 @@ def _make_profile(voice: str, *, target: str = "model-a"):
     ).with_identity()
 
 
-def _write_variant(root: Path, voice: str) -> tuple[str, Any]:
-    profile = _make_profile(voice)
+def _make_quality_profile(quality: str) -> Any:
+    from renderplan import RenderProfile
+
+    return RenderProfile(
+        roles={
+            "narrator": RoleProfile(
+                language="en-US",
+                binding={
+                    "renderer": "chatterbox",
+                    "target_id": "turbo",
+                    "options": {"quality": quality},
+                },
+            )
+        },
+        default_role="narrator",
+    ).with_identity()
+
+
+def _write_variant(
+    root: Path, voice: str, *, profile: Any | None = None
+) -> tuple[str, Any]:
+    profile = profile or _make_profile(voice)
     profile_id = profile.profile_id or profile.computed_id()
     variant_name = f"narration--{profile_id.removeprefix('sha256:')[:12]}"
     variant_dir = root / "renderplan" / variant_name
@@ -172,6 +193,153 @@ def test_selected_variant_uses_immutable_profile_snapshot_not_authored_file(
     assert current.roles.profile_source == "profile"
     assert current.roles.roles[0].voice_identity is not None
     assert current.roles.roles[0].voice_identity.voice == "current-voice"
+
+
+def test_compare_profile_reports_matching_identity_and_is_read_only(
+    tmp_path: Path,
+) -> None:
+    root = _write_bundle(tmp_path)
+    variant_name, snapshot = _write_variant(root, "matching-voice")
+    authored_path = tmp_path / "authored.renderprofile.toml"
+    save_profile(snapshot, authored_path)
+    before = authored_path.read_bytes()
+
+    result = inspect_bundle(
+        root,
+        variant=variant_name,
+        compare_profile=authored_path,
+    )
+
+    comparison = result.profile_comparison
+    assert comparison is not None
+    assert comparison.status == "match"
+    assert comparison.identity_match is True
+    assert comparison.authored_profile_id_valid is True
+    assert comparison.differences == ()
+    assert authored_path.read_bytes() == before
+    assert not (root / "voicerender").exists()
+
+
+def test_compare_profile_reports_quality_difference_and_stale_id(
+    tmp_path: Path,
+) -> None:
+    root = _write_bundle(tmp_path)
+    variant_name, _ = _write_variant(
+        root,
+        "snapshot-voice",
+        profile=_make_quality_profile("fp32"),
+    )
+    authored = _make_quality_profile("q4f16")
+    authored_path = tmp_path / "authored.renderprofile.toml"
+    save_profile(authored, authored_path)
+    document = tomlkit.parse(authored_path.read_text(encoding="utf-8"))
+    document["profile_id"] = "sha256:" + "f" * 64
+    authored_path.write_text(tomlkit.dumps(document), encoding="utf-8")
+
+    result = inspect_bundle(
+        root,
+        variant=variant_name,
+        compare_profile=authored_path,
+    )
+
+    comparison = result.profile_comparison
+    assert comparison is not None
+    assert comparison.status == "different"
+    assert comparison.identity_match is False
+    assert comparison.authored_profile_id_valid is False
+    assert comparison.authored_profile_id_stale is True
+    quality = [
+        difference
+        for difference in comparison.differences
+        if difference.field == "binding.options.quality"
+    ]
+    assert len(quality) == 1
+    assert quality[0].authored_value == "q4f16"
+    assert quality[0].variant_value == "fp32"
+    assert comparison.recommended_action is not None
+    assert "utterplan bundle render" in comparison.recommended_action
+
+
+def test_compare_profile_redacts_transcript_and_parse_errors_structurally(
+    tmp_path: Path,
+) -> None:
+    root = _write_bundle(tmp_path)
+    variant_name, _ = _write_variant(root, "redacted")
+    authored_path = tmp_path / "authored.renderprofile.toml"
+    authored = _make_profile("authored")
+    authored.roles["narrator"].binding["options"] = {
+        "transcript": "secret transcript",
+        "voice_source": {"kind": "reference", "sha256": "abc", "transcript": "secret"},
+    }
+    save_profile(authored, authored_path)
+
+    result = inspect_bundle(root, variant=variant_name, compare_profile=authored_path)
+    comparison = result.profile_comparison
+    assert comparison is not None
+    rendered = json.dumps(comparison.to_dict())
+    assert "secret transcript" not in rendered
+    assert "secret" not in rendered
+
+    authored_path.write_text("not = [valid", encoding="utf-8")
+    errored = inspect_bundle(root, variant=variant_name, compare_profile=authored_path)
+    error = errored.profile_comparison
+    assert error is not None
+    assert error.status == "error"
+    assert error.error_code == "profile.compare_invalid"
+    assert error.error_message
+
+
+def test_compare_profile_requires_an_exact_variant(tmp_path: Path) -> None:
+    root = _write_bundle(tmp_path)
+    authored_path = tmp_path / "authored.renderprofile.toml"
+    save_profile(_make_profile("authored"), authored_path)
+
+    with pytest.raises(BundleRolesError) as error:
+        inspect_bundle(root, compare_profile=authored_path)
+    assert error.value.code == "bundle.roles_invalid"
+
+
+def test_bundle_inspect_cli_compare_profile_json_and_human(
+    tmp_path: Path, capsys
+) -> None:
+    root = _write_bundle(tmp_path)
+    variant_name, snapshot = _write_variant(root, "cli-snapshot")
+    authored_path = tmp_path / "authored.renderprofile.toml"
+    save_profile(snapshot, authored_path)
+
+    assert (
+        cli.main(
+            [
+                "bundle",
+                "inspect",
+                str(root),
+                "--variant",
+                variant_name,
+                "--compare-profile",
+                str(authored_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["profile_comparison"]["status"] == "match"
+
+    assert (
+        cli.main(
+            [
+                "bundle",
+                "inspect",
+                str(root),
+                "--variant",
+                variant_name,
+                "--compare-profile",
+                str(authored_path),
+            ]
+        )
+        == 0
+    )
+    assert "Profile comparison" in capsys.readouterr().out
 
 
 def test_inspect_profile_with_no_variants_reports_readiness(tmp_path: Path) -> None:

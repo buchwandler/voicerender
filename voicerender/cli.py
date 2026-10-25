@@ -23,7 +23,11 @@ from .bundle_batch import (
     BundleBatchRenderResult,
     render_bundle_batch,
 )
-from .bundle_inspect import BundleInspectResult, inspect_bundle
+from .bundle_inspect import (
+    BundleInspectResult,
+    _inspection_binding,
+    inspect_bundle,
+)
 from .bundle_roles import BundleRolesError, BundleRolesResult, inspect_bundle_roles
 from .engines.options import engine_option_to_dict, engine_options
 from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
@@ -58,7 +62,12 @@ from .models_api import (
     remove_model,
     verify_model,
 )
-from .preflight import preflight_failure_message, preflight_render_plan
+from .preflight import (
+    preflight_check_details,
+    preflight_failure_groups,
+    preflight_failure_message,
+    preflight_render_plan,
+)
 from .profile_roles import (
     list_profile_roles,
     remove_profile_role,
@@ -318,12 +327,13 @@ def build_parser() -> argparse.ArgumentParser:
     profile_refresh.add_argument("-o", "--output", required=True, type=Path)
     profile_refresh.add_argument("--json", action="store_true")
 
-
     profile_reidentify = profile_commands.add_parser(
         "reidentify", help="Repair a stale or missing RenderProfile content ID"
     )
     profile_reidentify.add_argument("profile", type=Path)
-    reidentify_destination = profile_reidentify.add_mutually_exclusive_group(required=True)
+    reidentify_destination = profile_reidentify.add_mutually_exclusive_group(
+        required=True
+    )
     reidentify_destination.add_argument("-o", "--output", type=Path)
     reidentify_destination.add_argument("--in-place", action="store_true")
     profile_reidentify.add_argument("--json", action="store_true")
@@ -649,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_selection.add_argument(
         "--variant", help="exact variant's immutable RenderProfile snapshot"
     )
+    bundle_inspect.add_argument(
+        "--compare-profile",
+        type=Path,
+        help="read-only authored RenderProfile to compare with --variant",
+    )
     bundle_inspect.add_argument("--utterplan-root", type=Path)
     bundle_inspect.add_argument("--renderplan-root", type=Path)
     bundle_inspect.add_argument("--output-root", type=Path)
@@ -915,73 +930,6 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
-    safe = dict(binding)
-    options = binding.get("options")
-    if isinstance(options, Mapping):
-        safe_options: dict[str, Any] = {}
-        for name, value in options.items():
-            safe_options[name] = (
-                _inspection_voice_source(value)
-                if name == "voice_source"
-                else _redact_transcript_fields(value)
-            )
-        safe["options"] = safe_options
-    if isinstance(binding.get("voice_source"), Mapping):
-        safe["voice_source"] = _inspection_voice_source(binding["voice_source"])
-    return safe
-
-
-def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
-    kind = source.get("kind") or source.get("type")
-    safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
-    if kind == "managed_reference":
-        ref = source.get("value", source.get("ref", source.get("reference")))
-        if isinstance(ref, str):
-            safe["ref"] = ref
-        fields: tuple[str, ...] = (
-            "resolver",
-            "sha256",
-            "source_format",
-            "source_revision",
-            "source_repository",
-            "source_path",
-            "license",
-            "dataset",
-            "variant",
-        )
-    elif kind == "prepared":
-        fields = ("sha256", "format", "model_id", "model_revision", "layout")
-    elif kind == "reference":
-        fields = ("sha256",)
-    else:
-        fields = ()
-    for name in fields:
-        value = source.get(name)
-        if value is not None:
-            safe[name] = value
-    return safe
-
-
-def _redact_transcript_fields(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        safe: dict[str, Any] = {}
-        for name, item in value.items():
-            if name in {"reference_text", "transcript"} and isinstance(item, str):
-                digest_name = (
-                    "reference_text_sha256"
-                    if name == "reference_text"
-                    else "transcript_sha256"
-                )
-                safe[digest_name] = hashlib.sha256(item.encode("utf-8")).hexdigest()
-            else:
-                safe[name] = _redact_transcript_fields(item)
-        return safe
-    if isinstance(value, (list, tuple)):
-        return [_redact_transcript_fields(item) for item in value]
-    return value
-
-
 def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
     print(
         "  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE / ENROLLMENT"
@@ -1090,6 +1038,8 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
         "replan": len(report.replan),
         "reject": counts["error"],
         "checks": counts,
+        "failure_groups": list(preflight_failure_groups(report)),
+        "check_details": preflight_check_details(report),
         "exit_code": 0
         if report.status == "ok"
         else 2
@@ -1338,6 +1288,33 @@ def _print_bundle_inspect(result: BundleInspectResult) -> None:
             _print_diagnostic_summary(variant, prefix="    ")
         if variant.output_error:
             print(f"    output warning: {variant.output_error}")
+
+
+def _print_profile_comparison(comparison: Any) -> None:
+    print()
+    print("Profile comparison")
+    print(f"  status:             {comparison.status}")
+    print(f"  authored profile:   {comparison.authored_profile_path}")
+    print(f"  authored profile-id: {comparison.authored_profile_id}")
+    print(f"  computed profile-id: {comparison.authored_computed_profile_id}")
+    print(f"  authored ID valid:   {comparison.authored_profile_id_valid}")
+    print(f"  variant snapshot:    {comparison.variant_profile_path}")
+    print(f"  variant profile-id:  {comparison.variant_profile_id}")
+    print(f"  identity match:      {comparison.identity_match}")
+    if comparison.error_code or comparison.error_message:
+        error = ": ".join(
+            item for item in (comparison.error_code, comparison.error_message) if item
+        )
+        print(f"  comparison error:    {error}")
+    elif comparison.differences:
+        print("  differences:")
+        for difference in comparison.differences:
+            print(
+                f"    {difference.role}.{difference.field}: "
+                f"{difference.authored_value!r} -> {difference.variant_value!r}"
+            )
+    if comparison.recommended_action:
+        print(f"  recommended action:  {comparison.recommended_action}")
 
 
 def _diagnostic_summary_text(value: Any) -> str | None:
@@ -2375,9 +2352,13 @@ def main(argv: list[str] | None = None) -> int:
                 output = save_render_profile(profile, output_path)
                 payload = {"profile_id": profile.profile_id, "path": str(output)}
             elif args.profile_command == "reidentify":
-
-                if args.output is not None and args.output.resolve() == args.profile.resolve():
-                    raise ValueError("profile output must not overwrite its source; use --in-place")
+                if (
+                    args.output is not None
+                    and args.output.resolve() == args.profile.resolve()
+                ):
+                    raise ValueError(
+                        "profile output must not overwrite its source; use --in-place"
+                    )
 
                 document = tomlkit.parse(args.profile.read_text(encoding="utf-8"))
                 previous_id = document.get("profile_id")
@@ -2387,7 +2368,9 @@ def main(argv: list[str] | None = None) -> int:
                 assert destination is not None
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 fd, temporary_name = tempfile.mkstemp(
-                    prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+                    prefix=f".{destination.name}.",
+                    suffix=".tmp",
+                    dir=destination.parent,
                 )
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
@@ -2402,7 +2385,9 @@ def main(argv: list[str] | None = None) -> int:
                         os.unlink(temporary_name)
                 payload = {
                     "path": str(destination),
-                    "old_profile_id": str(previous_id) if previous_id is not None else None,
+                    "old_profile_id": str(previous_id)
+                    if previous_id is not None
+                    else None,
                     "profile_id": profile.profile_id,
                     "changed": previous_id != profile.profile_id,
                 }
@@ -2755,6 +2740,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.bundle,
                 profile=args.profile,
                 variant=args.variant,
+                compare_profile=args.compare_profile,
                 utterplan_root=args.utterplan_root,
                 renderplan_root=args.renderplan_root,
                 output_root=args.output_root,
@@ -2765,6 +2751,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 _print_bundle_inspect(inspect_result)
+                if inspect_result.profile_comparison is not None:
+                    _print_profile_comparison(inspect_result.profile_comparison)
             return 1 if args.check and inspect_result.roles.ready is not True else 0
 
         if args.command == "bundle" and args.bundle_command == "variants":

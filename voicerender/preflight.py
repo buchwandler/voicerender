@@ -258,9 +258,59 @@ def preflight_exit_code(report: PreflightReport) -> int:
     return {"ok": 0, "replan": 2, "reject": 1}[report.status]
 
 
+def preflight_failure_groups(report: PreflightReport) -> tuple[dict[str, Any], ...]:
+    """Group non-success checks without discarding their individual records."""
+    checks = tuple(getattr(report, "checks", ()))
+    if report.status == "reject":
+        failures = tuple(check for check in checks if check.status == "error")
+    else:
+        failures = tuple(check for check in checks if check.status != "ok")
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for check in failures:
+        key = (
+            str(check.status),
+            str(getattr(check, "source", "voicerender.preflight")),
+            str(getattr(check, "detail", None) or "").strip(),
+        )
+        group = grouped.get(key)
+        if group is None:
+            group = {
+                "status": check.status,
+                "source": getattr(check, "source", "voicerender.preflight"),
+                "detail": getattr(check, "detail", None),
+                "affected_count": 0,
+                "first_segment_number": getattr(check, "segment_number", None),
+                "first_segment_id": getattr(check, "segment_id", None),
+            }
+            grouped[key] = group
+        count = group["affected_count"]
+        assert isinstance(count, int)
+        group["affected_count"] = count + 1
+    return tuple(grouped.values())
+
+
+def preflight_check_details(report: PreflightReport) -> list[dict[str, Any]]:
+    """Return every persisted check in an additive JSON-safe representation."""
+    checks = tuple(getattr(report, "checks", ()))
+    return [
+        {
+            "segment_number": getattr(check, "segment_number", None),
+            "segment_id": getattr(check, "segment_id", None),
+            "status": check.status,
+            "metric": getattr(check, "metric", None),
+            "measured": getattr(check, "measured", None),
+            "maximum": getattr(check, "maximum", None),
+            "source": getattr(check, "source", "voicerender.preflight"),
+            "detail": getattr(check, "detail", None),
+        }
+        for check in checks
+    ]
+
+
 def preflight_failure_message(report: PreflightReport) -> str:
-    """Summarize a non-ok report without repeating per-occurrence failures."""
-    checks = getattr(report, "checks", ())
+    """Summarize repeated failures while retaining actionable cause grouping."""
+    checks = tuple(getattr(report, "checks", ()))
     if report.status == "reject":
         failures = tuple(check for check in checks if check.status == "error")
         heading = (
@@ -273,17 +323,38 @@ def preflight_failure_message(report: PreflightReport) -> str:
         failures = tuple(check for check in checks if check.status != "ok")
         heading = f"RenderPlan preflight status is {report.status!r}"
 
-    primary_detail = next(
-        (
-            check.detail.strip()
-            for check in failures
-            if isinstance(check.detail, str) and check.detail.strip()
-        ),
-        None,
-    )
-    if primary_detail is None:
+    groups = preflight_failure_groups(report)
+    if not groups:
         return heading
-    return f"{heading}\nPrimary cause: {primary_detail}"
+    if len(groups) == 1:
+        group = groups[0]
+        detail = str(group["detail"] or group["source"])
+        if group["affected_count"] == 1:
+            return f"{heading}\nPrimary cause: {detail}"
+        first = group["first_segment_number"]
+        first_id = group["first_segment_id"]
+        first_label = f"{first} ({first_id})" if first_id else str(first)
+        total = len(failures)
+        return (
+            f"{heading}\n"
+            f"Primary cause: {detail}\n"
+            f"Affected speech items: {group['affected_count']}/{total}.\n"
+            f"First affected segment: {first_label}.\n"
+            "Likely action: inspect the selected variant's profile snapshot; "
+            "if an authored profile was changed, project a new variant from that profile."
+        )
+
+    lines = [f"{heading}\nPrimary causes:"]
+    for group in groups:
+        detail = str(group["detail"] or group["source"])
+        first = group["first_segment_number"]
+        first_id = group["first_segment_id"]
+        first_label = f"{first} ({first_id})" if first_id else str(first)
+        lines.append(
+            f"- {detail} (affected speech items: {group['affected_count']}; "
+            f"first affected segment: {first_label})"
+        )
+    return "\n".join(lines)
 
 
 def preflight_summary(report: PreflightReport, output: str | Path) -> dict[str, Any]:
@@ -301,6 +372,8 @@ def preflight_summary(report: PreflightReport, output: str | Path) -> dict[str, 
             for status in ("ok", "too_long", "error")
         },
         "replan_requests": len(report.replan),
+        "failure_groups": list(preflight_failure_groups(report)),
+        "check_details": preflight_check_details(report),
     }
 
 
@@ -406,7 +479,9 @@ def _voicerender_version() -> str:
 
 
 __all__ = [
+    "preflight_check_details",
     "preflight_exit_code",
+    "preflight_failure_groups",
     "preflight_render_plan",
     "preflight_summary",
 ]

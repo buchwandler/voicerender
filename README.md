@@ -123,7 +123,6 @@ voicerender profile refresh narration.renderprofile.toml \
   -o narration.refreshed.renderprofile.toml
 ```
 
-
 For deliberate manual edits that make a stored profile ID stale, use the explicit recovery command; normal profile loading remains strict, and this does not refresh engine metadata:
 
 ```bash

@@ -775,7 +775,9 @@ def test_too_long_preflight_preserves_source_and_planning_level(
     assert adapter.synthesized_texts == []
 
 
-def test_preflight_failure_message_counts_checks_and_uses_one_primary_detail() -> None:
+def test_preflight_failure_message_groups_distinct_causes_and_preserves_details() -> (
+    None
+):
     from voicerender.cli import _preflight_payload
     from voicerender.preflight import preflight_failure_message
 
@@ -786,20 +788,71 @@ def test_preflight_failure_message_counts_checks_and_uses_one_primary_detail() -
         render_profile_id="sha256:" + "2" * 64,
         replan=(),
         checks=(
-            SimpleNamespace(status="error", detail=detail),
-            SimpleNamespace(status="error", detail=detail),
-            SimpleNamespace(status="error", detail="A later distinct failure."),
+            SimpleNamespace(
+                status="error",
+                source="chatterbox.model_not_installed",
+                detail=detail,
+                segment_number=1,
+                segment_id="segment-1",
+            ),
+            SimpleNamespace(
+                status="error",
+                source="chatterbox.model_not_installed",
+                detail=detail,
+                segment_number=2,
+                segment_id="segment-2",
+            ),
+            SimpleNamespace(
+                status="error",
+                source="other.failure",
+                detail="A later distinct failure.",
+                segment_number=3,
+                segment_id="segment-3",
+            ),
         ),
     )
 
     summary = preflight_failure_message(report)  # type: ignore[arg-type]
+    assert "RenderPlan preflight rejected this plan (3 error checks)." in summary
+    assert "Primary causes:" in summary
+    assert "affected speech items: 2" in summary
+    assert "A later distinct failure." in summary
+    payload = _preflight_payload(report)
+    assert payload["error"] == summary
+    assert payload["failure_groups"][0]["affected_count"] == 2
+    assert len(payload["check_details"]) == 3
 
-    assert summary == (
-        "RenderPlan preflight rejected this plan (3 error checks).\n"
-        f"Primary cause: {detail}"
+
+def test_preflight_failure_message_summarizes_165_identical_checks() -> None:
+    from voicerender.cli import _preflight_payload
+    from voicerender.preflight import preflight_failure_message
+
+    detail = "Chatterbox target 'turbo' requested quality 'fp32', but only 'q4f16' is installed."
+    checks = tuple(
+        SimpleNamespace(
+            status="error",
+            source="chatterbox.model_not_installed",
+            detail=detail,
+            segment_number=index,
+            segment_id=f"segment-{index}",
+        )
+        for index in range(1, 166)
     )
-    assert _preflight_payload(report)["error"] == summary
-    assert len(report.checks) == 3
+    report = SimpleNamespace(
+        status="reject",
+        render_plan_id="sha256:" + "1" * 64,
+        render_profile_id="sha256:" + "2" * 64,
+        replan=(),
+        checks=checks,
+    )
+
+    summary = preflight_failure_message(report)  # type: ignore[arg-type]
+    assert "Affected speech items: 165/165." in summary
+    assert "First affected segment: 1 (segment-1)." in summary
+    payload = _preflight_payload(report)
+    assert len(payload["failure_groups"]) == 1
+    assert payload["failure_groups"][0]["affected_count"] == 165
+    assert len(payload["check_details"]) == 165
 
 
 def test_fully_unknown_measurement_rejects(

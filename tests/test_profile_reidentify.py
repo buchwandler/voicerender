@@ -19,6 +19,7 @@ def test_reidentify_helper_uses_typed_identity_without_engine_validation() -> No
     assert result.planning == profile.planning
     assert result.pauses == profile.pauses
 
+
 def _stale_profile(tmp_path: Path) -> tuple[Path, bytes]:
     source = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
     text = source.read_text(encoding="utf-8")
@@ -32,11 +33,16 @@ def _stale_profile(tmp_path: Path) -> tuple[Path, bytes]:
     return path, path.read_bytes()
 
 
-def test_reidentify_output_preserves_source_and_profile_content(tmp_path: Path, capsys) -> None:
+def test_reidentify_output_preserves_source_and_profile_content(
+    tmp_path: Path, capsys
+) -> None:
     source, original = _stale_profile(tmp_path)
     output = tmp_path / "reidentified.renderprofile.toml"
 
-    assert main(["profile", "reidentify", str(source), "--output", str(output), "--json"]) == 0
+    assert (
+        main(["profile", "reidentify", str(source), "--output", str(output), "--json"])
+        == 0
+    )
     result = json.loads(capsys.readouterr().out)
 
     assert set(result) == {"path", "old_profile_id", "profile_id", "changed"}
@@ -48,7 +54,9 @@ def test_reidentify_output_preserves_source_and_profile_content(tmp_path: Path, 
     assert profile.roles[profile.default_role].binding["options"]["quality"] == "high"
 
 
-def test_reidentify_in_place_is_idempotent_and_rejects_same_output(tmp_path: Path, capsys) -> None:
+def test_reidentify_in_place_is_idempotent_and_rejects_same_output(
+    tmp_path: Path, capsys
+) -> None:
     source, _ = _stale_profile(tmp_path)
     assert main(["profile", "reidentify", str(source), "--in-place"]) == 0
     capsys.readouterr()
@@ -58,7 +66,6 @@ def test_reidentify_in_place_is_idempotent_and_rejects_same_output(tmp_path: Pat
     assert result["changed"] is False
     assert source.read_bytes() == repaired
     assert main(["profile", "reidentify", str(source), "--output", str(source)]) != 0
-
 
 
 def test_stale_identity_remains_strict_for_inspect_and_invalid_input_is_untouched(
@@ -85,7 +92,10 @@ def test_reidentify_supports_missing_profile_id(tmp_path: Path, capsys) -> None:
     path.write_text(tomlkit.dumps(document), encoding="utf-8")
     output = tmp_path / "repaired.renderprofile.toml"
 
-    assert main(["profile", "reidentify", str(path), "--output", str(output), "--json"]) == 0
+    assert (
+        main(["profile", "reidentify", str(path), "--output", str(output), "--json"])
+        == 0
+    )
     result = json.loads(capsys.readouterr().out)
     assert result["old_profile_id"] is None
     assert result["changed"] is True
