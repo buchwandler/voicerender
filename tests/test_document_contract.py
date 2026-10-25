@@ -405,6 +405,140 @@ def test_document_preflight_reject_stops_before_render(
     assert result.report_path.is_file()
 
 
+def test_document_model_download_failure_persists_reject_without_speech_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    from dataclasses import replace
+    from types import ModuleType, SimpleNamespace
+    from typing import Any
+
+    from renderplan import load_plan, load_preflight, save_plan
+
+    import voicerender.document as document_module
+    from voicerender.engines.kittensynth import KittenSynthEngineAdapter
+    from voicerender.engines.registry import _ADAPTERS
+
+    root = _workspace(tmp_path / "model-download.ssmd-bundle")
+    profile_path = (
+        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+    )
+    profile = codec.load_profile(profile_path)
+    fingerprint = (profile.profile_id or profile.computed_id()).removeprefix("sha256:")[
+        :12
+    ]
+    variant = f"narration--{fingerprint}"
+    variant_dir = root / "renderplan" / variant
+    variant_dir.mkdir(parents=True)
+    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
+    plan_path = variant_dir / "document.renderplan.toml"
+    shutil.copy(
+        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
+        plan_path,
+    )
+    plan = load_plan(plan_path)
+    speech = replace(
+        plan.speech[0],
+        binding={
+            "renderer": "kitten",
+            "target_id": "kitten-test-model",
+            "voice": "Jasper",
+            "options": {},
+        },
+        segment_id=None,
+    )
+    plan = replace(plan, flow=(speech,), plan_id=None).with_identity()
+    save_plan(plan, plan_path)
+
+    events: list[tuple[str, str]] = []
+    error_type = type("ModelDownloadError", (RuntimeError,), {})
+    native_error = error_type(
+        "Managed Kitten model download failed: The Hub Xet/hf_xet transport failed; "
+        "pinned HTTPS fallback failed: timeout "
+        "https://example.test/model?X-Amz-Signature=secret-query"
+    )
+    model = SimpleNamespace(
+        id="kitten-test-model",
+        language="en-US",
+        quality="medium",
+        voice_ids=("Jasper",),
+        display_name="Kitten test model",
+        version="0.1",
+        metadata={},
+        runtime_available=True,
+        sample_rate=24000,
+        voices=(
+            SimpleNamespace(
+                id="Jasper",
+                gender="unknown",
+                language="en-US",
+                locale="en-US",
+                language_label="English",
+            ),
+        ),
+        default_voice="Jasper",
+        aliases=(),
+    )
+
+    class FakeVoice:
+        @classmethod
+        def from_pretrained(cls, target_id: str, **kwargs: Any) -> Any:
+            events.append(("open", target_id))
+            raise native_error
+
+        @classmethod
+        def from_local(cls, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("preflight must not load a local model")
+
+        def measure_prepared(self, text: str) -> Any:
+            raise AssertionError("preflight must not measure after a failed open")
+
+        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
+            events.append(("synthesize", "called"))
+            raise AssertionError("preflight must never synthesize")
+
+        def close(self) -> None:
+            events.append(("close", "called"))
+
+    module = ModuleType("kittensynth")
+    module.__version__ = "0.1.7"
+    module.__file__ = "/fake/kittensynth/__init__.py"
+    module.REQUEST_API_VERSION = 1
+    module.ModelDownloadError = error_type  # type: ignore[attr-defined]
+    module.KittenVoice = FakeVoice
+    module.SynthesisMeasure = object
+    module.SynthesisConfig = object
+    module.SynthesisResult = object
+    module.discover_models = lambda **kwargs: (model,)
+    module.runtime_identity = lambda: {"engine_version": "0.1.7"}
+    module.request_api_contract = lambda: {
+        "version": 1,
+        "supports_request_measurement": True,
+        "measurement_entrypoint": "KittenVoice.measure_prepared",
+        "measurement_metric": "model_tokens",
+    }
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    monkeypatch.setitem(_ADAPTERS, "kitten", KittenSynthEngineAdapter())
+
+    result = document_module.render_document(root, variant=variant)
+
+    assert result.status == "failed"
+    assert result.error_code == "preflight.reject"
+    assert result.replan_required is False
+    assert result.preflight_report is not None
+    assert result.preflight_report == result.request.output_dir / "preflight.toml"
+    assert result.preflight_report.is_file()
+    assert result.report_path.is_file()
+    report = load_preflight(result.preflight_report)
+    assert report.status == "reject"
+    assert report.checks[0].source == "kitten.model_download_error"
+    assert "pinned HTTPS fallback failed" in report.checks[0].detail
+    assert "secret-query" not in report.checks[0].detail
+    assert result.manifest is None
+    assert not list(result.request.output_dir.rglob("*.wav"))
+    assert events == [("open", "kitten-test-model")]
+
+
 def test_document_render_reports_reused_complete_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

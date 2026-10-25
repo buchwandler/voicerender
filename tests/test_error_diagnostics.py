@@ -122,3 +122,21 @@ def test_root_cause_summary_omits_duplicate_message() -> None:
         "cause": {"type": "RuntimeError", "message": "same"},
     }
     assert root_cause_summary(diagnostic) is None
+
+
+def test_exception_diagnostic_redacts_signed_url_queries_and_inline_credentials() -> (
+    None
+):
+    error = RuntimeError(
+        "download failed at "
+        "https://example.test/model?X-Amz-Signature=signed-secret&token=query-secret;\n"
+        "HF_TOKEN=env-secret"
+    )
+
+    diagnostic = exception_diagnostic(error)
+    payload = json.dumps(diagnostic)
+
+    assert "https://example.test/model?[REDACTED]" in payload
+    assert "signed-secret" not in payload
+    assert "query-secret" not in payload
+    assert "env-secret" not in payload

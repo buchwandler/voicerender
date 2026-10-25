@@ -9,6 +9,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from typing import Any, Literal
 
+from ..error_diagnostics import sanitize_error_message
 from ..errors import (
     EmptySpeechTextError,
     EngineBackendError,
@@ -153,6 +154,56 @@ def _catalog_targets(request: CatalogRequest) -> tuple[SynthesisTarget, ...]:
     return tuple(_target_from_model(model) for model in models)
 
 
+def _kitten_model_download_details(error: Exception) -> dict[str, Any]:
+    """Extract bounded transport diagnostics without copying arbitrary metadata."""
+    details: dict[str, Any] = {"stage": "model_install"}
+    cause = error.__cause__
+    if cause is None and not error.__suppress_context__:
+        cause = error.__context__
+    if cause is None:
+        return details
+
+    details["transport_error_type"] = type(cause).__name__
+    native_stage = getattr(cause, "stage", None)
+    if isinstance(native_stage, str) and native_stage.strip():
+        details["native_stage"] = sanitize_error_message(native_stage, limit=128)
+
+    native_error_type = getattr(cause, "native_error_type", None)
+    if isinstance(native_error_type, str) and native_error_type.strip():
+        details["transport_native_error_type"] = sanitize_error_message(
+            native_error_type, limit=128
+        )
+
+    native_message = getattr(error, "native_error_message", None)
+    if not isinstance(native_message, str):
+        native_message = getattr(cause, "native_error_message", None)
+    if (
+        not isinstance(native_message, str)
+        and type(cause).__name__ == "AssetTransportError"
+    ):
+        native_message = str(cause)
+    if isinstance(native_message, str) and native_message.strip():
+        details["native_error_message"] = sanitize_error_message(
+            native_message, limit=1024
+        )
+
+    for name in (
+        "fallback_attempted",
+        "fallback_failed",
+        "fallback_outcome",
+        "retry_attempted",
+        "retry_failed",
+        "retry_outcome",
+        "runtime_switch_activated",
+    ):
+        value = getattr(cause, name, None)
+        if isinstance(value, bool):
+            details[name] = value
+        elif isinstance(value, str) and value.strip():
+            details[name] = sanitize_error_message(value, limit=64)
+    return details
+
+
 def _translate_kitten_error(
     error: Exception,
     selection: EngineSelection,
@@ -177,6 +228,7 @@ def _translate_kitten_error(
             "kitten.runtime_dependency_error",
         ),
         ("OnnxVoiceContractError", EngineBackendError, "kitten.runtime_contract_error"),
+        ("ModelDownloadError", EngineBackendError, "kitten.model_download_error"),
     )
     error_type: type[EngineError] = EngineBackendError
     code: str | None = "kitten.engine_error"
@@ -208,7 +260,19 @@ def _translate_kitten_error(
             text_length=len(request.text) if request is not None else None,
             source="kittensynth.synthesize_prepared",
         )
-    return error_type(str(error), **context, code=code)
+    details = (
+        _kitten_model_download_details(error)
+        if code == "kitten.model_download_error"
+        else None
+    )
+    message = (
+        sanitize_error_message(str(error), limit=2048)
+        if code == "kitten.model_download_error"
+        else str(error)
+    )
+    if code == "kitten.model_download_error" and not message:
+        message = "Kitten model download failed."
+    return error_type(message, **context, details=details, code=code)
 
 
 def _measurement_field(measured: Any, name: str, default: Any = None) -> Any:

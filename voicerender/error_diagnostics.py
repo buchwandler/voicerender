@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -13,15 +14,29 @@ _MAX_DETAIL_ITEMS = 100
 _MAX_DETAIL_DEPTH = 8
 _OMIT = object()
 
+_SIGNED_URL_QUERY = re.compile(r"(?P<url>https?://[^\s?#]+)\?[^\s#]*", re.IGNORECASE)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(hf[_-]?token|access[_-]?token|api[_-]?key|authorization|"
+    r"x-amz-(?:signature|credential|security-token)|signature|token)(\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+)
 
-def _limited_text(value: object, limit: int) -> str:
+
+def sanitize_error_message(value: object, *, limit: int = _MAX_MESSAGE_LENGTH) -> str:
+    """Bound diagnostic text and redact signed URL queries and inline credentials."""
     try:
         text = str(value)
     except Exception:  # noqa: BLE001 - diagnostics must not mask the original error.
         text = f"<{type(value).__name__} message unavailable>"
+    text = _SIGNED_URL_QUERY.sub(r"\g<url>?[REDACTED]", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
     if len(text) > limit:
         return text[: limit - 1] + "…"
     return text
+
+
+def _limited_text(value: object, limit: int) -> str:
+    return sanitize_error_message(value, limit=limit)
 
 
 def _sensitive_key(key: str) -> bool:

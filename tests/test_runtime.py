@@ -288,7 +288,7 @@ def test_project_requires_lightweight_onnxvoice_without_ort_distribution() -> No
         "dependencies"
     ]
 
-    assert "onnxvoice>=0.2.12,<0.3" in dependencies
+    assert "onnxvoice>=0.2.14,<0.3" in dependencies
     assert not any(
         "onnxruntime" in dependency.casefold() for dependency in dependencies
     )

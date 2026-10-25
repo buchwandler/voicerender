@@ -18,13 +18,13 @@ dependencies = [
   "tomli>=2; python_version < '3.11'",
   "renderplan>=0.1.2,<0.2",
   "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d",
-  "onnxvoice>=0.2.12,<0.3",
+  "onnxvoice>=0.2.14,<0.3",
 ]
 
 [project.optional-dependencies]
 chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
 inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
-kitten = ["kittensynth[cpu]>=0.1.6,<0.2"]
+kitten = ["kittensynth[cpu]>=0.1.7,<0.2"]
 kokoro = ["pykokoro>=0.10.6,<0.11"]
 piper = ["pipersynth>=0.2.5,<0.3"]
 pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]

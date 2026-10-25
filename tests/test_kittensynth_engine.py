@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -15,9 +16,11 @@ from voicerender.engines.kittensynth import (
     KittenSynthEngineSession,
     _target_from_model,
 )
+from voicerender.error_diagnostics import exception_diagnostic
 from voicerender.errors import (
     EmptySpeechTextError,
     EngineBackendError,
+    InvalidEngineOptionError,
     SpeechRequestTooLongError,
 )
 from voicerender.renderplan_input import PreflightDisposition, classify_measurement
@@ -329,6 +332,124 @@ def test_managed_dependency_error_is_a_non_replanable_runtime_reject(
     assert caught.value.code == "kitten.runtime_dependency_error"
     assert caught.value.native_error_type == "ManagedModelDependencyError"
     assert classify_measurement(caught.value).disposition is PreflightDisposition.REJECT
+
+
+def test_model_download_error_preserves_safe_transport_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    download_error_type = type("ModelDownloadError", (RuntimeError,), {})
+    transport_error_type = type("AssetTransportError", (RuntimeError,), {})
+    module.ModelDownloadError = download_error_type  # type: ignore[attr-defined]
+    transport_error = transport_error_type(
+        "The Hub Xet/hf_xet transport failed; pinned HTTPS fallback failed: "
+        "timeout https://example.test/model?X-Amz-Signature=signed-secret"
+    )
+    transport_error.stage = "xet_fallback"
+    transport_error.native_error_type = "TimeoutError"
+    transport_error.fallback_attempted = True
+    transport_error.fallback_failed = True
+    transport_error.fallback_outcome = "failed"
+    transport_error.retry_attempted = True
+    transport_error.retry_failed = True
+    transport_error.retry_outcome = "failed"
+    native_error = download_error_type(
+        f"Managed Kitten model download failed: {transport_error}"
+    )
+    native_error.__cause__ = transport_error
+
+    class FailingKittenVoice:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            raise native_error
+
+    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    selection = EngineSelection(
+        engine="kitten",
+        target_id="nano-0.8-int8",
+        language="en-US",
+        voice="Jasper",
+    )
+
+    with pytest.raises(EngineBackendError) as caught:
+        KittenSynthEngineAdapter().open(selection)
+
+    error = caught.value
+    assert error.code == "kitten.model_download_error"
+    assert error.details["native_error_type"] == "ModelDownloadError"
+    assert error.details["engine"] == "kitten"
+    assert error.details["target_id"] == "nano-0.8-int8"
+    assert error.details["language"] == "en-US"
+    assert error.details["voice"] == "Jasper"
+    assert error.details["stage"] == "model_install"
+    assert error.details["native_stage"] == "xet_fallback"
+    assert error.details["transport_error_type"] == "AssetTransportError"
+    native_error_message = error.details["native_error_message"]
+    assert isinstance(native_error_message, str)
+    assert "Xet/hf_xet transport failed" in native_error_message
+    assert "signed-secret" not in native_error_message
+    assert error.details["transport_native_error_type"] == "TimeoutError"
+    assert error.details["fallback_attempted"] is True
+    assert error.details["fallback_failed"] is True
+    assert error.details["retry_outcome"] == "failed"
+    assert "Xet/hf_xet transport failed" in str(error)
+    assert "pinned HTTPS fallback failed" in str(error)
+    diagnostic = json.dumps(exception_diagnostic(error))
+    assert "signed-secret" not in diagnostic
+    assert "X-Amz-Signature" not in diagnostic
+    assert "?[REDACTED]" in diagnostic
+
+
+def test_open_error_fallbacks_do_not_claim_model_download_or_xet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
+    native_error = ValueError("generic options failure")
+
+    class FailingKittenVoice:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            raise native_error
+
+    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    selection = EngineSelection(
+        engine="kitten", target_id="nano-0.8-int8", language="en-US", voice="Jasper"
+    )
+
+    with pytest.raises(InvalidEngineOptionError) as caught:
+        KittenSynthEngineAdapter().open(selection)
+
+    assert caught.value.code == "kitten.invalid_options"
+    assert "Xet" not in str(caught.value)
+
+
+def test_arbitrary_asset_download_error_keeps_generic_backend_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
+    asset_error_type = type("AssetDownloadError", (RuntimeError,), {})
+    native_error = asset_error_type("unrelated asset failure")
+
+    class FailingKittenVoice:
+        @classmethod
+        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            raise native_error
+
+    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+    selection = EngineSelection(
+        engine="kitten", target_id="nano-0.8-int8", language="en-US", voice="Jasper"
+    )
+
+    with pytest.raises(EngineBackendError) as caught:
+        KittenSynthEngineAdapter().open(selection)
+
+    assert caught.value.code == "kitten.engine_error"
+    assert "Xet" not in str(caught.value)
 
 
 def _synthesis_result(audio: Any) -> SimpleNamespace:

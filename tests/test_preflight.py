@@ -346,7 +346,7 @@ def _install_fake_kittensynth(
     }
     module.KittenVoice = FakeVoice
     if open_error is not None:
-        module.ManagedModelDependencyError = type(open_error)  # type: ignore[attr-defined]
+        setattr(module, type(open_error).__name__, type(open_error))
     module.SynthesisMeasure = object
     module.SynthesisConfig = object
     module.SynthesisResult = object
@@ -556,6 +556,69 @@ def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(
     assert check.source == "kitten.runtime_dependency_error"
     assert report.replan == ()
     assert [event[0] for event in events] == ["open"]
+
+
+def test_kitten_model_download_failure_is_memoized_and_rejects_every_occurrence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    transport_error_type = type("AssetTransportError", (RuntimeError,), {})
+    transport_error = transport_error_type(
+        "The Hub Xet/hf_xet transport failed; pinned HTTPS fallback failed: "
+        "timeout https://example.test/model?X-Amz-Signature=secret-query"
+    )
+    transport_error.stage = "xet_fallback"
+    transport_error.native_error_type = "TimeoutError"
+    transport_error.fallback_attempted = True
+    transport_error.fallback_failed = True
+    transport_error.fallback_outcome = "failed"
+    download_error_type = type("ModelDownloadError", (RuntimeError,), {})
+    download_error = download_error_type(
+        f"Managed Kitten model download failed: {transport_error}"
+    )
+    download_error.__cause__ = transport_error
+    binding = {
+        "renderer": "kitten",
+        "target_id": "kitten-test-model",
+        "voice": "Jasper",
+    }
+    events = _install_fake_kittensynth(
+        monkeypatch,
+        amount=180,
+        maximum=256,
+        fits=True,
+        open_error=download_error,
+    )
+    plan = _plan(
+        ("First shared Kitten occurrence", True, "sentence"),
+        ("Second shared Kitten occurrence", True, "sentence"),
+        binding=binding,
+    )
+    output = tmp_path / "kitten-model-download-error.toml"
+
+    report = preflight_render_plan(plan, output)
+
+    assert report.status == "reject"
+    assert [check.status for check in report.checks] == ["error", "error"]
+    assert [check.source for check in report.checks] == [
+        "kitten.model_download_error",
+        "kitten.model_download_error",
+    ]
+    assert [check.metric for check in report.checks] == ["unknown", "unknown"]
+    assert [check.measured for check in report.checks] == [None, None]
+    assert [check.maximum for check in report.checks] == [None, None]
+    assert report.replan == ()
+    assert report.checks[0].detail == report.checks[1].detail
+    assert "Xet/hf_xet transport failed" in report.checks[0].detail
+    assert "pinned HTTPS fallback failed" in report.checks[0].detail
+    assert "secret-query" not in report.checks[0].detail
+    assert events == [("open", "kitten-test-model")]
+
+    persisted = load_preflight(output)
+    assert persisted.status == "reject"
+    assert [check.source for check in persisted.checks] == [
+        "kitten.model_download_error",
+        "kitten.model_download_error",
+    ]
 
 
 def test_kitten_preflight_defers_emphasis_to_composition(
