@@ -44,6 +44,12 @@ PiperSynth owns the authoritative phoneme-capacity decision, and the `.[piper]` 
 
 `maximum=None` is not itself an error. `fits=None` is the fail-closed state: VoiceRender rejects preflight without attempting synthesis. Native PiperSynth measurement metadata, including capacity kind/source when provided, is retained in `RequestMeasure.details.native_metadata`; VoiceRender does not infer fit from that metadata.
 
+### Sopro request measurement
+
+SoproSynth owns request tokenization and internal text segmentation. VoiceRender forwards its exact measurement and authoritative `fits` result; a finite `max_input_tokens` is optional. `fits=True` with `maximum=None` is accepted, `fits=False` requests replanning, and `fits=None` remains fail-closed in the engine-neutral preflight classifier.
+
+The `.[sopro]` extra allows SoproSynth `>=0.1.0,<0.2`. For the known legacy releases 0.1.0 and 0.1.1 only, VoiceRender may infer `fits=True` from a valid exact token count when the maximum and producer fit are absent and the API-v1 contract confirms `supports_request_measurement=True` and `caller_owns_text_boundaries=False`. Other versions must provide fit authority themselves; unknown fit continues to reject preflight. The bridge does not estimate token limits from `max_segment_chars` or convert characters to tokens. Repeated identical unknown-fit failures also receive a concise CLI summary while every per-request check remains in the report.
+
 ## CLI workflow
 
 A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create the first/default role of a complete cast through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):

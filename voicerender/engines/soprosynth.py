@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from numbers import Real
 from typing import Any
 
 from ..errors import (
     EmptySpeechTextError,
+    EngineApiIncompatibleError,
     EngineBackendError,
     EngineError,
     EngineSelectionError,
@@ -48,6 +50,7 @@ from .profiles import make_renderprofile_fragment
 
 ENGINE_ID = "sopro"
 PACKAGE_NAME = "soprosynth"
+SUPPORTED_LEGACY_SOPRO_VERSIONS = frozenset({"0.1.0", "0.1.1"})
 SUPPORTED_LANGUAGES = frozenset({"en", "pt", "fr", "de"})
 SOPRO_OPTION_NAMES = frozenset(
     {
@@ -73,6 +76,15 @@ SOPRO_OPTION_NAMES = frozenset(
         "voice_level_gain_db",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _SoproRequestContract:
+    package_version: str | None
+    api_version: int | None
+    contract_version: int | None
+    supports_request_measurement: bool | None
+    caller_owns_text_boundaries: bool | None
 
 
 def _module() -> Any:
@@ -286,10 +298,16 @@ def _positive_maximum(value: Any) -> int | None:
 class SoproSynthEngineSession:
     """One loaded Sopro runtime with lazily prepared reference voices."""
 
-    def __init__(self, runtime: Any, selection: EngineSelection) -> None:
+    def __init__(
+        self,
+        runtime: Any,
+        selection: EngineSelection,
+        request_contract: _SoproRequestContract | None = None,
+    ) -> None:
         self._runtime = runtime
         self._selection = selection
         self._prepared_voices: dict[str, Any] = {}
+        self._request_contract = request_contract
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
         if request.voice is not None:
@@ -332,27 +350,67 @@ class SoproSynthEngineSession:
             raise _translate_error(
                 exc, self._selection, request, stage="measure"
             ) from exc
-        amount = getattr(measured, "amount", None)
-        maximum = _positive_maximum(getattr(measured, "maximum", None))
-        if type(amount) is not int or amount < 0:
+        raw_amount = getattr(measured, "amount", None)
+        raw_maximum = getattr(measured, "maximum", None)
+        raw_fits = getattr(measured, "fits", None)
+        raw_unit = getattr(measured, "unit", None)
+
+        amount = raw_amount if type(raw_amount) is int and raw_amount >= 0 else None
+        maximum = raw_maximum if type(raw_maximum) is int and raw_maximum > 0 else None
+        fits = raw_fits if type(raw_fits) is bool else None
+        valid_unit = raw_unit is None or (
+            isinstance(raw_unit, str) and raw_unit in {"tokens", "model_tokens"}
+        )
+        if (
+            amount is None
+            or (raw_maximum is not None and maximum is None)
+            or (raw_fits is not None and fits is None)
+            or not valid_unit
+        ):
             raise EngineBackendError(
                 "SoproSynth returned an invalid request measurement.",
                 engine=ENGINE_ID,
                 target_id=self._selection.target_id,
                 request_id=request.id,
                 code="sopro.measurement_invalid",
-                details={"amount": amount, "maximum": maximum},
+                details={
+                    "amount": raw_amount,
+                    "maximum": raw_maximum,
+                    "fits": raw_fits,
+                    "unit": raw_unit,
+                },
             )
-        fits = getattr(measured, "fits", None)
-        if not isinstance(fits, bool):
-            fits = None if maximum is None else amount <= maximum
+
+        fit_source = "producer" if fits is not None else "unknown"
+        if fits is None and maximum is not None:
+            fits = amount <= maximum
+            fit_source = "finite_maximum"
+        elif fits is None and self._supports_legacy_contract_fit():
+            fits = True
+            fit_source = "legacy_contract_auto_boundaries"
         return RequestMeasure(
             fits=fits,
             amount=amount,
             maximum=maximum,
             unit="model_tokens",
             source="soprosynth.measure_request",
-            details={"language": _engine_language(request.language)},
+            details={
+                "language": _engine_language(request.language),
+                "producer_unit": raw_unit,
+                "fit_source": fit_source,
+                "producer_maximum": raw_maximum,
+            },
+        )
+
+    def _supports_legacy_contract_fit(self) -> bool:
+        contract = self._request_contract
+        return (
+            contract is not None
+            and contract.package_version in SUPPORTED_LEGACY_SOPRO_VERSIONS
+            and contract.api_version == SUPPORTED_REQUEST_API_VERSION
+            and contract.contract_version == SUPPORTED_REQUEST_API_VERSION
+            and contract.supports_request_measurement is True
+            and contract.caller_owns_text_boundaries is False
         )
 
     def _voice_source(self) -> Mapping[str, Any]:
@@ -504,7 +562,26 @@ class SoproSynthEngineAdapter:
     def version(self) -> str | None:
         return distribution_version(self.package_name)
 
+    def __init__(self) -> None:
+        self._probe_cache_module: Any | None = None
+        self._probe_cache: EngineApiProbe | None = None
+
     def probe_api(self) -> EngineApiProbe:
+        module = sys.modules.get(self.package_name)
+        if (
+            module is not None
+            and module is self._probe_cache_module
+            and self._probe_cache is not None
+        ):
+            return self._probe_cache
+        probe = self._probe_api_uncached()
+        module = sys.modules.get(self.package_name)
+        if module is not None:
+            self._probe_cache_module = module
+            self._probe_cache = probe
+        return probe
+
+    def _probe_api_uncached(self) -> EngineApiProbe:
         probe = probe_public_api(
             engine=self.id,
             package=self.package_name,
@@ -540,32 +617,31 @@ class SoproSynthEngineAdapter:
             },
             expected_api_version=SUPPORTED_REQUEST_API_VERSION,
             require_explicit_contract=True,
+            contract_fields=(
+                "version",
+                "supports_reference_voice",
+                "supports_request_measurement",
+                "supports_named_voices",
+                "caller_owns_text_boundaries",
+            ),
         )
         if not probe.compatible:
             return probe
-        module = _module()
-        try:
-            contract = module.request_api_contract()
-            required = {
-                "supports_reference_voice": True,
-                "supports_request_measurement": True,
-                "supports_named_voices": False,
-            }
-            mismatches = {
-                name: {"expected": value, "actual": getattr(contract, name, None)}
-                for name, value in required.items()
-                if getattr(contract, name, None) is not value
-            }
-        except Exception as exc:  # noqa: BLE001 - Public contract failures are probe results.
-            return replace(
-                probe,
-                compatible=False,
-                status="api_probe_failed",
-                failed_stage="contract_capabilities",
-                failed_symbol="request_api_contract",
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-            )
+        contract = probe.details.get("request_api_contract", {})
+        if not isinstance(contract, Mapping):
+            contract = {}
+        required = {
+            "version": SUPPORTED_REQUEST_API_VERSION,
+            "supports_reference_voice": True,
+            "supports_request_measurement": True,
+            "supports_named_voices": False,
+            "caller_owns_text_boundaries": False,
+        }
+        mismatches = {
+            name: {"expected": value, "actual": contract.get(name)}
+            for name, value in required.items()
+            if contract.get(name) is not value
+        }
         if mismatches:
             return replace(
                 probe,
@@ -958,6 +1034,34 @@ class SoproSynthEngineAdapter:
         self, selection: EngineSelection
     ) -> AbstractContextManager[SoproSynthEngineSession]:
         module = _module()
+        probe = self.probe_api()
+        if not probe.compatible:
+            raise EngineApiIncompatibleError(
+                "SoproSynth public synthesis API is incompatible",
+                engine=self.id,
+                engine_version=probe.distribution_version,
+                details={"probe": dict(probe.details)},
+            )
+        raw_contract = probe.details.get("request_api_contract", {})
+        contract = raw_contract if isinstance(raw_contract, Mapping) else {}
+        raw_contract_version = contract.get("version")
+        raw_measurement_support = contract.get("supports_request_measurement")
+        raw_boundary_ownership = contract.get("caller_owns_text_boundaries")
+        request_contract = _SoproRequestContract(
+            package_version=probe.module_version or probe.distribution_version,
+            api_version=probe.api_version,
+            contract_version=(
+                raw_contract_version if type(raw_contract_version) is int else None
+            ),
+            supports_request_measurement=(
+                raw_measurement_support
+                if type(raw_measurement_support) is bool
+                else None
+            ),
+            caller_owns_text_boundaries=(
+                raw_boundary_ownership if type(raw_boundary_ownership) is bool else None
+            ),
+        )
         options = selection.options
         bundle_ref = selection.metadata.get("bundle_ref") or selection.target_id
         try:
@@ -976,7 +1080,7 @@ class SoproSynthEngineAdapter:
         @contextmanager
         def session() -> Any:
             try:
-                yield SoproSynthEngineSession(runtime, selection)
+                yield SoproSynthEngineSession(runtime, selection, request_contract)
             finally:
                 try:
                     runtime.close()

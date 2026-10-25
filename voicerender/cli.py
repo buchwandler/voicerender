@@ -1101,6 +1101,32 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
     }
 
 
+def _sopro_unknown_fit_summary(report: Any) -> tuple[str, ...]:
+    detail = (
+        "Engine measured the exact request size but did not provide an "
+        "authoritative maximum/fit result"
+    )
+    checks = tuple(
+        check
+        for check in report.checks
+        if check.source == "soprosynth.measure_request"
+        and check.status == "error"
+        and check.metric == "model_tokens"
+        and check.measured is not None
+        and check.maximum is None
+        and check.detail == detail
+    )
+    if len(checks) < 2:
+        return ()
+    count = len(checks)
+    return (
+        f"  sopro measurement: {count}/{count} requests have exact model-token counts",
+        "  fit authority: missing; maximum: not reported",
+        "  source: soprosynth.measure_request",
+        "  action: update SoproSynth or verify its request-measurement contract",
+    )
+
+
 def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
     return {
         "render_plan_id": result.manifest.render_plan_id,
@@ -2498,6 +2524,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"{payload['replan']} replan, {payload['reject']} reject; "
                     f"{payload['checked']} speech items"
                 )
+                for line in _sopro_unknown_fit_summary(report):
+                    print(line)
             return 0 if report.status == "ok" else 2 if report.status == "replan" else 1
 
         if args.command == "render":

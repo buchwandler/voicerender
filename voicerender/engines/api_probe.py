@@ -58,6 +58,7 @@ def _probe_public_api(
     contract_required_symbols: tuple[str, ...] = (),
     contract_required_methods: Mapping[str, tuple[str, ...]] | None = None,
     legacy_required_methods: Mapping[str, tuple[str, ...]] | None = None,
+    contract_fields: tuple[str, ...] = (),
 ) -> EngineApiProbe:
     """Probe a package root and concrete public entry points without opening a runtime."""
     metadata_warning: str | None = None
@@ -207,6 +208,7 @@ def _probe_public_api(
     contract_source: ContractSource | None = None
     contract_names = ("REQUEST_API_VERSION", "request_api_contract")
     contract_values: dict[str, Any] = {}
+    contract_snapshot: dict[str, Any] = {}
     for name in contract_names:
         try:
             contract_values[name] = getattr(module, name)
@@ -261,7 +263,13 @@ def _probe_public_api(
                 missing_methods=tuple(missing_methods),
             )
         try:
-            contract_function()
+            contract_result = contract_function()
+            for field_name in contract_fields:
+                contract_snapshot[field_name] = (
+                    contract_result.get(field_name)
+                    if isinstance(contract_result, Mapping)
+                    else getattr(contract_result, field_name, None)
+                )
         except Exception as exc:
             logger.debug(
                 "Engine %s request API contract inspection failed",
@@ -407,6 +415,7 @@ def _probe_public_api(
         compatible=True,
         status="ready",
         warnings=tuple(warnings),
+        details={"request_api_contract": contract_snapshot} if contract_fields else {},
     )
 
 
@@ -421,6 +430,7 @@ def probe_public_api(
     contract_required_symbols: tuple[str, ...] = (),
     contract_required_methods: Mapping[str, tuple[str, ...]] | None = None,
     legacy_required_methods: Mapping[str, tuple[str, ...]] | None = None,
+    contract_fields: tuple[str, ...] = (),
 ) -> EngineApiProbe:
     """Probe a public package API and emit one compact structured debug event."""
     probe = _probe_public_api(
@@ -433,6 +443,7 @@ def probe_public_api(
         contract_required_symbols=contract_required_symbols,
         contract_required_methods=contract_required_methods,
         legacy_required_methods=legacy_required_methods,
+        contract_fields=contract_fields,
     )
     event = {
         "engine": probe.engine,

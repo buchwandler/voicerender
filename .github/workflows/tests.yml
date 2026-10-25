@@ -105,7 +105,7 @@ jobs:
             "supertonicsynth[cpu]==0.1.2" \
             "inflectsynth[cpu]==0.1.1"
       - name: Run released-set compatibility contracts
-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_sopro_release_compatibility.py
+        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
 
   lower-bounds:
     runs-on: ubuntu-latest

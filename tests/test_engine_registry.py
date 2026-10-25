@@ -284,6 +284,8 @@ def test_all_engine_probes_use_public_api_without_loading_models(
             supports_reference_voice=True,
             supports_request_measurement=True,
             supports_named_voices=False,
+            version=1,
+            caller_owns_text_boundaries=False,
         )
     elif engine == "kokoro":
         fake.request_api_contract = lambda: SimpleNamespace(
@@ -698,6 +700,8 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
             supports_reference_voice=True,
             supports_request_measurement=True,
             supports_named_voices=False,
+            version=1,
+            caller_owns_text_boundaries=False,
         )
         fake.discover_bundles = lambda **kwargs: (
             SimpleNamespace(

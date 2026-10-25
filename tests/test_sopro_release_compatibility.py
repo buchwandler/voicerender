@@ -5,7 +5,10 @@ from collections.abc import Mapping
 
 import pytest
 
-from voicerender.engines.soprosynth import _target_from_bundle
+from voicerender.engines.soprosynth import (
+    SoproSynthEngineAdapter,
+    _target_from_bundle,
+)
 from voicerender.models_api import _from_target, model_artifact_to_dict
 
 
@@ -41,3 +44,14 @@ def test_released_discovered_bundle_metadata_crosses_model_json_boundary() -> No
     assert isinstance(payload["metadata"]["catalog"], dict)
     assert isinstance(payload["metadata"]["catalog"]["profile"]["providers"], list)
     assert json.loads(encoded) == payload
+
+
+def test_released_sopro_measurement_contract_is_compatible() -> None:
+    soprosynth = pytest.importorskip("soprosynth")
+    contract = soprosynth.request_api_contract()
+
+    assert contract.version == soprosynth.REQUEST_API_VERSION == 1
+    assert contract.supports_request_measurement is True
+    assert contract.caller_owns_text_boundaries is False
+    probe = SoproSynthEngineAdapter().probe_api()
+    assert probe.compatible, probe
