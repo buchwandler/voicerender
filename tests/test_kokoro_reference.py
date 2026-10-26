@@ -722,6 +722,214 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
     assert rendered.metadata["voice_level"]["mode"] == "off"
 
 
+def test_kokoro_forwards_persisted_g2lex_tables_as_public_file_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, state = _install(monkeypatch, _model())
+    module = sys.modules["pykokoro"]
+
+    class FakeG2LexFileRef:
+        def __init__(self, **values: Any) -> None:
+            self.__dict__.update(values)
+
+    module.G2LexFileRef = FakeG2LexFileRef
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={
+            "lexicons": ["lexhint"],
+            "g2lex_files": [
+                {
+                    "path": "/tmp/custom.g2lex",
+                    "sha256": "sha256:" + "a" * 64,
+                    "logical_sha256": "sha256:" + "b" * 64,
+                    "language": "en-us",
+                    "phoneme_encoding": "ipa",
+                }
+            ],
+        },
+    )
+
+    with adapter.open(selection):
+        pass
+
+    refs = state["config"].tokenizer_config.g2lex_files
+    assert len(refs) == 1
+    assert refs[0].path == "/tmp/custom.g2lex"
+    assert refs[0].sha256 == "sha256:" + "a" * 64
+    assert refs[0].logical_sha256 == "sha256:" + "b" * 64
+
+
+def test_validate_selection_rejects_unusable_local_g2lex_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _ = _install(monkeypatch, _model())
+    valid_path = tmp_path / "valid.g2lex"
+    valid_path.write_bytes(b"valid source")
+    malformed_path = tmp_path / "malformed.g2lex"
+    malformed_path.write_bytes(b"broken source")
+    missing_path = tmp_path / "missing.g2lex"
+    actual_sha = "sha256:" + hashlib.sha256(valid_path.read_bytes()).hexdigest()
+
+    def inspect(path: str) -> Any:
+        if Path(path) == malformed_path.resolve():
+            raise ValueError("invalid G2Lex manifest")
+        return SimpleNamespace(
+            path=path,
+            sha256=actual_sha,
+            logical_sha256="sha256:" + "b" * 64,
+            metadata={"language": "en-us", "phoneme_encoding": "ipa"},
+        )
+
+    monkeypatch.setattr(adapter, "inspect_g2lex_file", inspect)
+
+    def diagnostics_for(sources: list[dict[str, Any]]) -> set[str]:
+        selection = EngineSelection(
+            engine="kokoro",
+            target_id="kokoro-test",
+            language="en-US",
+            options={"g2lex_files": sources},
+        )
+        return {item.code for item in adapter.validate_selection(selection)}
+
+    assert diagnostics_for([{"path": str(missing_path)}]) == {
+        "pykokoro.g2lex_file_missing"
+    }
+    assert diagnostics_for([{"path": str(malformed_path)}]) == {
+        "pykokoro.g2lex_file_invalid"
+    }
+    assert diagnostics_for(
+        [{"path": str(valid_path), "sha256": "sha256:" + "a" * 64}]
+    ) == {"pykokoro.g2lex_sha256_mismatch"}
+    assert "pykokoro.g2lex_file_duplicate" in diagnostics_for(
+        [{"path": str(valid_path)}, {"path": str(valid_path)}]
+    )
+
+    def incompatible_inspection(path: str) -> Any:
+        return SimpleNamespace(
+            path=path,
+            sha256=actual_sha,
+            logical_sha256=None,
+            metadata={"language": "fr", "phoneme_encoding": "x-unknown"},
+        )
+
+    monkeypatch.setattr(adapter, "inspect_g2lex_file", incompatible_inspection)
+    incompatible = diagnostics_for([{"path": str(valid_path)}])
+    assert "pykokoro.g2lex_language_mismatch" in incompatible
+    assert "pykokoro.g2lex_encoding_unsupported" in incompatible
+
+
+def test_validate_selection_checks_named_sources_and_installed_only_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _ = _install(monkeypatch, _model())
+    entry = SimpleNamespace(
+        selector="gold",
+        default=True,
+        installed=False,
+        model_support="unsupported",
+        phoneme_encoding="x-unknown",
+    )
+    monkeypatch.setattr(
+        adapter, "discover_lexicons", lambda **_kwargs: ((entry,), None)
+    )
+
+    def codes(options: dict[str, Any]) -> set[str]:
+        selection = EngineSelection(
+            engine="kokoro",
+            target_id="kokoro-test",
+            language="en-US",
+            options=options,
+        )
+        return {item.code for item in adapter.validate_selection(selection)}
+
+    unavailable = codes({"lexicons": ["missing"]})
+    assert "pykokoro.lexicon_unavailable" in unavailable
+    unsupported = codes({"lexicons": ["gold"]})
+    assert "pykokoro.lexicon_model_unsupported" in unsupported
+    assert "pykokoro.lexicon_encoding_unsupported" in unsupported
+    assert "pykokoro.lexicon_not_installed" in codes(
+        {"lexicons": ["gold"], "lexicon_data_policy": "installed-only"}
+    )
+    assert "pykokoro.lexicon_duplicate" in codes({"lexicons": ["gold", "gold"]})
+
+
+def test_local_g2lex_content_hash_changes_synthesis_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _ = _install(monkeypatch, _model())
+    path = tmp_path / "mutable.g2lex"
+    path.write_bytes(b"first")
+
+    def inspect(source_path: str) -> Any:
+        resolved = Path(source_path).resolve()
+        return SimpleNamespace(
+            path=str(resolved),
+            sha256="sha256:" + hashlib.sha256(resolved.read_bytes()).hexdigest(),
+            logical_sha256=None,
+            metadata={"language": "en-us", "phoneme_encoding": "ipa"},
+        )
+
+    monkeypatch.setattr(adapter, "inspect_g2lex_file", inspect)
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={"g2lex_files": [{"path": str(path)}]},
+    )
+    first = adapter.canonical_synthesis_identity(selection)
+    path.write_bytes(b"second")
+    second = adapter.canonical_synthesis_identity(selection)
+
+    assert first["local_pronunciation_sources"] != second["local_pronunciation_sources"]
+
+
+def test_pronunciation_stack_reports_effective_sources_and_local_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = PyKokoroEngineAdapter()
+    path = tmp_path / "editorial.g2lex"
+    path.write_bytes(b"editorial source")
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    inspection = SimpleNamespace(
+        path=str(path.resolve()),
+        sha256=digest,
+        logical_sha256="sha256:" + "b" * 64,
+        metadata={"language": "en-us", "phoneme_encoding": "ipa"},
+    )
+    entry = SimpleNamespace(
+        selector="gold",
+        default=True,
+        installed=True,
+        model_support="supported",
+        phoneme_encoding="ipa",
+    )
+    monkeypatch.setattr(adapter, "inspect_g2lex_file", lambda _path: inspection)
+    monkeypatch.setattr(
+        adapter, "discover_lexicons", lambda **_kwargs: ((entry,), None)
+    )
+
+    stack = adapter.pronunciation_stack(
+        language="en-US",
+        target_id="kokoro-test",
+        options={
+            "lexicons": ["gold"],
+            "g2lex_files": [{"path": str(path), "sha256": digest}],
+        },
+    )
+
+    assert stack["lexicon_catalog_available"] is True
+    assert stack["local_g2lex"][0]["status"] == "valid"
+    assert stack["named_lexicons"][0]["available"] is True
+    assert stack["precedence"] == [
+        "local G2Lex file 1",
+        "contextual heteronym rules",
+        "gold",
+        "espeak",
+    ]
+
+
 @pytest.mark.parametrize(
     ("seed_options", "expected_seed"),
     [({}, None), ({"random_seed": 17}, 17)],

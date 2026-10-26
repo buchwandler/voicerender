@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from ..errors import (
@@ -512,6 +513,93 @@ def _normalize_kokoro_options(options: Mapping[str, Any]) -> dict[str, Any]:
         normalized["short_sentence"] = short_sentence
     normalized["voice_level"] = _normalize_voice_level(normalized.get("voice_level"))
     return normalized
+
+
+def _normalize_g2lex_file_refs(pykokoro: Any, value: Any) -> tuple[Any, ...] | None:
+    if value is None:
+        return None
+    ref_type = getattr(pykokoro, "G2LexFileRef", None)
+    if ref_type is None:
+        raise _invalid_kokoro_option(
+            "This PyKokoro version does not support local G2Lex files"
+        )
+    if isinstance(value, (Mapping, ref_type)):
+        values = (value,)
+    else:
+        try:
+            values = tuple(value)
+        except TypeError as exc:
+            raise _invalid_kokoro_option(
+                "g2lex_files must be a sequence of file references"
+            ) from exc
+    refs: list[Any] = []
+    for item in values:
+        if isinstance(item, ref_type):
+            refs.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            raise _invalid_kokoro_option(
+                "g2lex_files entries must be tables or G2LexFileRef values"
+            )
+        path = item.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise _invalid_kokoro_option("g2lex_files entries require a non-empty path")
+        refs.append(
+            ref_type(
+                path=path,
+                sha256=item.get("sha256"),
+                logical_sha256=item.get("logical_sha256"),
+            )
+        )
+    return tuple(refs)
+
+
+def _g2lex_file_entries(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if (
+        isinstance(value, (Mapping, str, Path))
+        or getattr(value, "path", None) is not None
+    ):
+        return (value,)
+    try:
+        return tuple(value)
+    except TypeError:
+        return (value,)
+
+
+def _g2lex_file_field(source: Any, name: str) -> Any:
+    return (
+        source.get(name) if isinstance(source, Mapping) else getattr(source, name, None)
+    )
+
+
+def _sha256_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.removeprefix("sha256:").strip().casefold()
+    if len(normalized) != 64 or any(
+        char not in "0123456789abcdef" for char in normalized
+    ):
+        return None
+    return normalized
+
+
+def _selector_names(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return ()
+    if isinstance(value, str):
+        values = (value,)
+    else:
+        try:
+            values = tuple(value)
+        except TypeError:
+            return ()
+    if not all(isinstance(item, str) for item in values):
+        return ()
+    return tuple(item.strip() for item in values)
 
 
 def _reference_text_digest(enrollment: Mapping[str, Any]) -> str | None:
@@ -1063,6 +1151,25 @@ class PyKokoroEngineAdapter:
                     "leave unset to use the backend default."
                 ),
             ),
+            "lexicons": EngineOption(
+                name="lexicons",
+                value_type="string|array[string]",
+                default=None,
+                description="Ordered named pronunciation sources; local G2Lex files precede these sources.",
+            ),
+            "lexicon_data_policy": EngineOption(
+                name="lexicon_data_policy",
+                value_type="string",
+                default="auto",
+                choices=("auto", "installed-only"),
+                description="Provisioning policy for named Lexphon lexicons; local files are never installed.",
+            ),
+            "g2lex_files": EngineOption(
+                name="g2lex_files",
+                value_type="array[table]",
+                default=None,
+                description="Ordered, content-pinned local G2Lex files applied before named lexicons.",
+            ),
         }
 
     def capabilities(self) -> EngineCapabilities:
@@ -1072,6 +1179,7 @@ class PyKokoroEngineAdapter:
             option_names=frozenset(
                 {
                     "lexicons",
+                    "g2lex_files",
                     "model_source",
                     "quality",
                     "speed",
@@ -1164,6 +1272,18 @@ class PyKokoroEngineAdapter:
             for item in result.lexicons
         )
         return entries, result
+
+    def inspect_g2lex_file(self, path: str) -> Any:
+        """Inspect a local G2Lex file through PyKokoro's public metadata API."""
+        import pykokoro
+
+        inspector = getattr(pykokoro, "inspect_g2lex_file", None)
+        if not callable(inspector):
+            raise InvalidEngineOptionError(
+                "Installed PyKokoro does not expose local G2Lex inspection",
+                code="pykokoro.g2lex_inspection_unavailable",
+            )
+        return inspector(path)
 
     def bind_reference_voice(
         self,
@@ -1296,6 +1416,7 @@ class PyKokoroEngineAdapter:
                     field="render.options",
                 )
             )
+        diagnostics.extend(self._pronunciation_diagnostics(selection))
         if not language_matches(selection.language, model.languages):
             diagnostics.append(
                 EngineDiagnostic(
@@ -1401,6 +1522,421 @@ class PyKokoroEngineAdapter:
             )
         return tuple(diagnostics)
 
+    def _pronunciation_diagnostics(self, selection: EngineSelection) -> list[Any]:
+        from .base import EngineDiagnostic
+
+        options = selection.options
+        diagnostics: list[Any] = []
+
+        def add(code: str, message: str, field: str) -> None:
+            diagnostics.append(
+                EngineDiagnostic(
+                    code=code,
+                    severity="error",
+                    message=message,
+                    field=field,
+                )
+            )
+
+        seen_paths: set[Path] = set()
+        for index, source in enumerate(_g2lex_file_entries(options.get("g2lex_files"))):
+            field = f"render.options.g2lex_files[{index}]"
+            if isinstance(source, (str, Path)):
+                add(
+                    "pykokoro.g2lex_reference_invalid",
+                    "Local G2Lex sources must be G2LexFileRef values or reference tables.",
+                    field,
+                )
+                continue
+            path_value = _g2lex_file_field(source, "path")
+            if not isinstance(path_value, (str, Path)) or not str(path_value).strip():
+                add(
+                    "pykokoro.g2lex_reference_invalid",
+                    f"Local G2Lex source {index + 1} must include a file path.",
+                    field,
+                )
+                continue
+            try:
+                path = Path(path_value).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                add(
+                    "pykokoro.g2lex_file_missing",
+                    f"Local G2Lex file {path_value!s} could not be resolved: {exc}",
+                    field,
+                )
+                continue
+            if path in seen_paths:
+                add(
+                    "pykokoro.g2lex_file_duplicate",
+                    f"Local G2Lex file {str(path)!r} is configured more than once.",
+                    field,
+                )
+                continue
+            seen_paths.add(path)
+            if not path.is_file():
+                add(
+                    "pykokoro.g2lex_file_missing",
+                    f"Local G2Lex path is not a file: {path}",
+                    field,
+                )
+                continue
+            try:
+                inspection = self.inspect_g2lex_file(str(path))
+            except (OSError, TypeError, ValueError, InvalidEngineOptionError) as exc:
+                add(
+                    "pykokoro.g2lex_file_invalid",
+                    f"Local G2Lex file {str(path)!r} is not usable: {exc}",
+                    field,
+                )
+                continue
+            metadata = getattr(inspection, "metadata", {})
+            if not isinstance(metadata, Mapping):
+                metadata = {}
+            source_language = metadata.get("language") or metadata.get("locale")
+            language_matches_file = False
+            if isinstance(source_language, str):
+                try:
+                    language_matches_file = normalize_language_key(
+                        source_language
+                    ) == normalize_language_key(selection.language)
+                except ValueError:
+                    language_matches_file = False
+            if not language_matches_file:
+                add(
+                    "pykokoro.g2lex_language_mismatch",
+                    f"Local G2Lex file {str(path)!r} is for {source_language!r}, "
+                    f"not {selection.language!r}.",
+                    field,
+                )
+            encoding = metadata.get("phoneme_encoding")
+            if not isinstance(encoding, str) or encoding.casefold() not in {
+                "ipa",
+                "kokoro-v1",
+            }:
+                add(
+                    "pykokoro.g2lex_encoding_unsupported",
+                    f"Local G2Lex file {str(path)!r} uses unsupported phoneme encoding "
+                    f"{encoding!r}.",
+                    field,
+                )
+            expected_sha = _g2lex_file_field(source, "sha256")
+            if expected_sha is not None:
+                normalized_expected = _sha256_value(expected_sha)
+                actual_sha = _sha256_value(getattr(inspection, "sha256", None))
+                if normalized_expected is None:
+                    add(
+                        "pykokoro.g2lex_sha256_invalid",
+                        f"Local G2Lex source {str(path)!r} has an invalid SHA-256 pin.",
+                        field,
+                    )
+                elif actual_sha != normalized_expected:
+                    add(
+                        "pykokoro.g2lex_sha256_mismatch",
+                        f"Local G2Lex file {str(path)!r} no longer matches its pinned SHA-256.",
+                        field,
+                    )
+            expected_logical = _g2lex_file_field(source, "logical_sha256")
+            if expected_logical is not None:
+                normalized_expected = _sha256_value(expected_logical)
+                actual_logical = _sha256_value(
+                    getattr(inspection, "logical_sha256", None)
+                )
+                if normalized_expected is None:
+                    add(
+                        "pykokoro.g2lex_logical_sha256_invalid",
+                        f"Local G2Lex source {str(path)!r} has an invalid logical SHA-256 pin.",
+                        field,
+                    )
+                elif actual_logical != normalized_expected:
+                    add(
+                        "pykokoro.g2lex_logical_sha256_mismatch",
+                        f"Local G2Lex file {str(path)!r} no longer matches its pinned "
+                        "logical SHA-256.",
+                        field,
+                    )
+
+        policy = options.get("lexicon_data_policy", "auto")
+        selected = _selector_names(options.get("lexicons"))
+        if selected == () and options.get("lexicons") not in ((), []):
+            add(
+                "pykokoro.lexicon_selection_invalid",
+                "Named lexicons must be a string or an ordered sequence of strings.",
+                "render.options.lexicons",
+            )
+            return diagnostics
+        needs_inventory = bool(selected) or (
+            selected is None and policy == "installed-only"
+        )
+        if not needs_inventory:
+            return diagnostics
+
+        try:
+            entries, _ = self.discover_lexicons(
+                language=selection.language,
+                model=selection.target_id,
+                offline=selection.offline,
+                refresh=selection.refresh,
+                preference=options.get("model_source", "auto"),
+            )
+        except (
+            EngineError,
+            ImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as first_error:
+            try:
+                entries, _ = self.discover_lexicons(
+                    language=selection.language,
+                    offline=selection.offline,
+                    refresh=selection.refresh,
+                    preference=options.get("model_source", "auto"),
+                )
+            except (
+                EngineError,
+                ImportError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                add(
+                    "pykokoro.lexicon_catalog_unavailable",
+                    f"Cannot validate the selected pronunciation stack: {exc} "
+                    f"(model-specific discovery also failed: {first_error}).",
+                    "render.options.lexicons",
+                )
+                return diagnostics
+        by_selector = {
+            entry.selector.casefold(): entry
+            for entry in entries
+            if isinstance(getattr(entry, "selector", None), str)
+        }
+        if selected is None:
+            selected = tuple(entry.selector for entry in entries if entry.default)
+            if not selected:
+                add(
+                    "pykokoro.lexicon_default_unavailable",
+                    f"No default named lexicon is available for {selection.language!r}.",
+                    "render.options.lexicons",
+                )
+        seen_selectors: set[str] = set()
+        for selector in selected:
+            key = selector.casefold()
+            field = "render.options.lexicons"
+            if not selector:
+                add(
+                    "pykokoro.lexicon_selection_invalid",
+                    "Named lexicon selectors must not be empty.",
+                    field,
+                )
+                continue
+            if key in seen_selectors:
+                add(
+                    "pykokoro.lexicon_duplicate",
+                    f"Named lexicon {selector!r} is selected more than once.",
+                    field,
+                )
+                continue
+            seen_selectors.add(key)
+            entry = by_selector.get(key)
+            if entry is None:
+                add(
+                    "pykokoro.lexicon_unavailable",
+                    f"Named lexicon {selector!r} is unavailable for {selection.language!r} "
+                    f"and target {selection.target_id!r}.",
+                    field,
+                )
+                continue
+            if getattr(entry, "model_support", "unknown") == "unsupported":
+                add(
+                    "pykokoro.lexicon_model_unsupported",
+                    f"Named lexicon {selector!r} does not support target "
+                    f"{selection.target_id!r}.",
+                    field,
+                )
+            encoding = getattr(entry, "phoneme_encoding", None)
+            if isinstance(encoding, str) and encoding.casefold() not in {
+                "ipa",
+                "kokoro-v1",
+            }:
+                add(
+                    "pykokoro.lexicon_encoding_unsupported",
+                    f"Named lexicon {selector!r} uses unsupported phoneme encoding "
+                    f"{encoding!r}.",
+                    field,
+                )
+            if (
+                policy == "installed-only"
+                and getattr(entry, "installed", None) is not True
+            ):
+                add(
+                    "pykokoro.lexicon_not_installed",
+                    f"Named lexicon {selector!r} is not installed, but "
+                    "lexicon_data_policy is 'installed-only'.",
+                    field,
+                )
+        return diagnostics
+
+    def pronunciation_stack(
+        self,
+        *,
+        language: str,
+        target_id: str,
+        options: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """Describe the ordered, effective pronunciation sources for inspection."""
+        selected_options = _normalize_kokoro_options(options or {})
+        catalog_available = True
+        catalog_error: str | None = None
+        try:
+            entries, _ = self.discover_lexicons(
+                language=language,
+                model=target_id,
+                offline=True,
+                refresh=False,
+                preference=selected_options.get("model_source", "auto"),
+            )
+        except (EngineError, ImportError, OSError, RuntimeError, TypeError, ValueError):
+            try:
+                entries, _ = self.discover_lexicons(
+                    language=language,
+                    offline=True,
+                    refresh=False,
+                    preference=selected_options.get("model_source", "auto"),
+                )
+            except (
+                EngineError,
+                ImportError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                entries = ()
+                catalog_available = False
+                catalog_error = f"{exc}; model-specific discovery also failed"
+        by_selector = {entry.selector.casefold(): entry for entry in entries}
+        requested = _selector_names(selected_options.get("lexicons"))
+        names = (
+            requested
+            if requested is not None
+            else tuple(entry.selector for entry in entries if entry.default)
+        )
+        named: list[dict[str, Any]] = []
+        for selector in names:
+            entry = by_selector.get(selector.casefold())
+            named.append(
+                {
+                    "selector": selector,
+                    "available": entry is not None,
+                    "installed": None if entry is None else entry.installed,
+                    "model_support": "unknown"
+                    if entry is None
+                    else entry.model_support,
+                    "phoneme_encoding": None
+                    if entry is None
+                    else entry.phoneme_encoding,
+                }
+            )
+        local: list[dict[str, Any]] = []
+        for source in _g2lex_file_entries(selected_options.get("g2lex_files")):
+            raw_path = (
+                source
+                if isinstance(source, (str, Path))
+                else _g2lex_file_field(source, "path")
+            )
+            record: dict[str, Any] = {
+                "path": str(raw_path) if raw_path is not None else None,
+                "sha256": _g2lex_file_field(source, "sha256"),
+                "logical_sha256": _g2lex_file_field(source, "logical_sha256"),
+                "status": "invalid",
+            }
+            if isinstance(raw_path, (str, Path)):
+                try:
+                    inspection = self.inspect_g2lex_file(str(raw_path))
+                except FileNotFoundError:
+                    record["status"] = "missing"
+                except (
+                    EngineError,
+                    ImportError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    record["status"] = "invalid"
+                    record["error"] = str(exc)
+                else:
+                    record["path"] = inspection.path
+                    record["current_sha256"] = inspection.sha256
+                    record["current_logical_sha256"] = inspection.logical_sha256
+                    metadata = getattr(inspection, "metadata", {})
+                    if not isinstance(metadata, Mapping):
+                        metadata = {}
+                    record["language"] = metadata.get("language") or metadata.get(
+                        "locale"
+                    )
+                    record["phoneme_encoding"] = metadata.get("phoneme_encoding")
+                    expected = _sha256_value(record["sha256"])
+                    actual = _sha256_value(inspection.sha256)
+                    expected_logical = _sha256_value(record["logical_sha256"])
+                    actual_logical = _sha256_value(inspection.logical_sha256)
+                    invalid_pin = (
+                        record["sha256"] is not None and expected is None
+                    ) or (
+                        record["logical_sha256"] is not None
+                        and expected_logical is None
+                    )
+                    changed = (expected is not None and expected != actual) or (
+                        expected_logical is not None
+                        and expected_logical != actual_logical
+                    )
+                    source_language = record["language"]
+                    language_compatible = False
+                    if isinstance(source_language, str):
+                        try:
+                            language_compatible = normalize_language_key(
+                                source_language
+                            ) == normalize_language_key(language)
+                        except ValueError:
+                            language_compatible = False
+                    encoding = record["phoneme_encoding"]
+                    encoding_compatible = isinstance(
+                        encoding, str
+                    ) and encoding.casefold() in {
+                        "ipa",
+                        "kokoro-v1",
+                    }
+                    record["status"] = (
+                        "invalid-pin"
+                        if invalid_pin
+                        else "changed"
+                        if changed
+                        else "incompatible"
+                        if not language_compatible or not encoding_compatible
+                        else "valid"
+                    )
+            local.append(record)
+        precedence = [f"local G2Lex file {index + 1}" for index in range(len(local))]
+        if selected_options.get("resolve_heteronyms", True):
+            precedence.append("contextual heteronym rules")
+        precedence.extend(item["selector"] for item in named)
+        precedence.append(selected_options.get("g2p_fallback", "espeak"))
+        return {
+            "engine": self.id,
+            "language": language,
+            "target_id": target_id,
+            "lexicon_catalog_available": catalog_available,
+            "lexicon_catalog_error": catalog_error,
+            "local_g2lex": local,
+            "named_lexicons": named,
+            "lexicon_data_policy": selected_options.get("lexicon_data_policy", "auto"),
+            "g2p_fallback": selected_options.get("g2p_fallback", "espeak"),
+            "resolve_heteronyms": selected_options.get("resolve_heteronyms", True),
+            "precedence": precedence,
+        }
+
     def target_metadata(self, selection: EngineSelection) -> Mapping[str, Any]:
         from ..models import ModelDiscoveryError, get_model_info
 
@@ -1425,6 +1961,32 @@ class PyKokoroEngineAdapter:
             "model_identity": model.distribution_id or model.id,
             "distribution_id": model.distribution_id,
         }
+
+    def _local_pronunciation_identity(
+        self, options: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], ...]:
+        identities: list[dict[str, Any]] = []
+        for source in _g2lex_file_entries(options.get("g2lex_files")):
+            if isinstance(source, (str, Path)):
+                raise InvalidEngineOptionError(
+                    "Local G2Lex sources must be G2LexFileRef values or reference tables",
+                    code="pykokoro.g2lex_reference_invalid",
+                )
+            raw_path = _g2lex_file_field(source, "path")
+            if not isinstance(raw_path, (str, Path)):
+                raise InvalidEngineOptionError(
+                    "Each local G2Lex source must include a file path",
+                    code="pykokoro.g2lex_reference_invalid",
+                )
+            inspection = self.inspect_g2lex_file(str(raw_path))
+            identities.append(
+                {
+                    "path": inspection.path,
+                    "sha256": inspection.sha256,
+                    "logical_sha256": inspection.logical_sha256,
+                }
+            )
+        return tuple(identities)
 
     def canonical_synthesis_identity(
         self, selection: EngineSelection
@@ -1452,6 +2014,7 @@ class PyKokoroEngineAdapter:
             transcript_digest = _reference_text_digest(enrollment)
             if transcript_digest is not None:
                 enrollment_identity["reference_text_sha256"] = transcript_digest
+        local_pronunciation_sources = self._local_pronunciation_identity(options)
         identity: dict[str, Any] = {
             "engine": self.id,
             "pcm_range_policy": PCM_RANGE_POLICY,
@@ -1461,6 +2024,7 @@ class PyKokoroEngineAdapter:
             "speaker": selection.speaker,
             "options": safe_options,
             "metadata": dict(selection.metadata),
+            "local_pronunciation_sources": local_pronunciation_sources,
         }
         if source_identity is not None:
             identity["voice_source"] = dict(source_identity)
@@ -1481,6 +2045,9 @@ class PyKokoroEngineAdapter:
             )
             tokenizer = pykokoro.TokenizerConfig(
                 lexicons=options.get("lexicons"),
+                g2lex_files=_normalize_g2lex_file_refs(
+                    pykokoro, options.get("g2lex_files")
+                ),
                 fallback=options.get("g2p_fallback", "espeak"),
                 lexicon_data_policy=options.get("lexicon_data_policy", "auto"),
             )

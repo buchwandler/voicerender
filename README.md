@@ -259,6 +259,27 @@ voicerender profile bind kokoro.renderprofile.toml narrator \
 
 `short_sentence` tables accept `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length` (default 30), `phoneme_pretext` (default `—`), and `phrase_fallback_tries` (default 1). Omitting the option leaves this PyKokoro quality fix unset; the `off` shorthand disables it. `voice_level` tables accept `mode` (`off` or `calibrated`) and finite numeric `gain_db`; an explicit gain takes precedence over the static calibration catalog. Automatic calibration is catalog-based for known model/quality/voice combinations and is unavailable for custom Inno/AkinVox enrolled voices, where an explicit gain may be used instead. These settings are PyKokoro's deterministic voice-level controls, not VoiceRender loudness normalization or mastering. VoiceRender separately adapts finite PCM overshoots at its artifact boundary; calibration does not guarantee a waveform will never need that adaptation.
 
+### Kokoro pronunciation lexicons
+
+Discover named lexicons and inspect a local G2Lex file before selecting it:
+
+```bash
+voicerender lexicons list --engine kokoro --lang en-US --target v1.0
+voicerender lexicons inspect lexhint --engine kokoro --lang en-US --target v1.0
+voicerender lexicons inspect-file ./custom-pronunciations.g2lex
+```
+
+Select a repeatable ordered named stack with `--lexicon`, and local G2Lex overrides with `--g2lex`:
+
+```bash
+voicerender profile create \
+  --role narrator --engine kokoro --target v1.0 --voice af_heart \
+  --language en-US --lexicon lexhint \
+  --g2lex ./custom-pronunciations.g2lex \
+  --lexicon-data-policy auto -o story.renderprofile.toml
+```
+
+VoiceRender pins each local file's content when creating or binding the profile. Local files take precedence over named lexicons, whose order is preserved; profile inspection and preflight show the effective stack and reject missing, changed, invalid, or incompatible sources before synthesis. The generic `--option 'lexicons=[...]'` form remains supported for existing profiles and scripts.
 The enrollment paths remain distinct: **Inno** is a reference-audio voice tuner, does not require a transcript, and may accept `fmax`. **AkinVox** is transcript-conditioned cloning: it requires the exact non-empty spoken transcript, is English-only, and currently requires synthesis speed `1.0`. `voicerender voice clone --engine kokoro --target en-akinvox-cloning-v1 --reference-wav speaker.wav --transcript "Exact words spoken." --language en-US -o clone.renderprofile.toml` binds the generic transcript into AkinVox's enrollment options. Conflicting transcript sources and transcripts for Inno are rejected.
 
 ### ChatterboxSynth

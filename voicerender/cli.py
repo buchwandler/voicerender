@@ -44,6 +44,7 @@ from .errors import (
     EngineUnavailableError,
     InvalidEngineOptionError,
     InvalidEngineVoiceError,
+    ProfileError,
     UnsupportedSynthesisFeatureError,
     VoiceRenderError,
 )
@@ -152,6 +153,7 @@ def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None
         metavar="KEY=VALUE",
         help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
     )
+    _add_pronunciation_flags(parser)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--make-default", action="store_true")
@@ -159,6 +161,29 @@ def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None
     destination.add_argument("-o", "--output", type=Path)
     destination.add_argument("--in-place", action="store_true")
     parser.add_argument("--json", action="store_true")
+
+
+def _add_pronunciation_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--lexicon",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Select a named pronunciation lexicon in precedence order (repeatable)",
+    )
+    parser.add_argument(
+        "--g2lex",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="Use a local G2Lex file before named lexicons (repeatable)",
+    )
+    parser.add_argument(
+        "--lexicon-data-policy",
+        choices=("auto", "installed-only"),
+        help="Provisioning policy for named Lexphon lexicons",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -265,6 +290,38 @@ def build_parser() -> argparse.ArgumentParser:
     voice_inspect.add_argument("--lang")
     voice_inspect.add_argument("--json", action="store_true")
 
+    lexicons = commands.add_parser(
+        "lexicons", help="Discover and inspect pronunciation sources"
+    )
+    lexicon_commands = lexicons.add_subparsers(dest="lexicons_command", required=True)
+    lexicon_list = lexicon_commands.add_parser(
+        "list", help="List named pronunciation lexicons"
+    )
+    lexicon_inspect = lexicon_commands.add_parser(
+        "inspect", help="Inspect a named pronunciation lexicon"
+    )
+    lexicon_inspect.add_argument("selector")
+    for lexicon_command in (lexicon_list, lexicon_inspect):
+        lexicon_command.add_argument("--engine", default="kokoro")
+        lexicon_command.add_argument("--lang")
+        lexicon_command.add_argument(
+            "--target", help="Limit discovery to an engine model/target"
+        )
+        lexicon_command.add_argument("--offline", action="store_true")
+        lexicon_command.add_argument("--refresh", action="store_true")
+        lexicon_command.add_argument(
+            "--preference",
+            choices=("auto", "github", "huggingface", "upstream"),
+            default="auto",
+        )
+        lexicon_command.add_argument("--json", action="store_true")
+    lexicon_file = lexicon_commands.add_parser(
+        "inspect-file",
+        help="Inspect a local G2Lex manifest without loading its entries",
+    )
+    lexicon_file.add_argument("path", type=Path)
+    lexicon_file.add_argument("--engine", default="kokoro")
+    lexicon_file.add_argument("--json", action="store_true")
     profiles = commands.add_parser(
         "profile", help="Create, bind, and inspect RenderProfiles"
     )
@@ -303,6 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE",
         help="Engine option; VALUE is parsed as JSON when possible (repeatable)",
     )
+    _add_pronunciation_flags(profile_create)
     profile_create.add_argument("--offline", action="store_true")
     profile_create.add_argument("--refresh", action="store_true")
     profile_create.add_argument(
@@ -918,6 +976,240 @@ def _json_options(entries: list[str], *, label: str = "--option") -> dict[str, A
     return result
 
 
+def _inspection_to_dict(inspection: Any) -> dict[str, Any]:
+    to_dict = getattr(inspection, "to_dict", None)
+    if callable(to_dict):
+        value = to_dict()
+    elif isinstance(inspection, Mapping):
+        value = dict(inspection)
+    else:
+        raise TypeError("Engine returned an invalid G2Lex inspection result")
+    if not isinstance(value, Mapping):
+        raise TypeError("Engine returned an invalid G2Lex inspection result")
+    return dict(value)
+
+
+def _pin_g2lex_files(adapter: Any, files: Any, language: str) -> list[dict[str, str]]:
+    if isinstance(files, (str, Path, Mapping)):
+        entries = (files,)
+    else:
+        try:
+            entries = tuple(files)
+        except TypeError as exc:
+            raise ValueError(
+                "g2lex_files must be a sequence of file paths or tables"
+            ) from exc
+    pinned: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    requested_language = language.strip().casefold().replace("_", "-")
+    inspector = getattr(adapter, "inspect_g2lex_file", None)
+    if not callable(inspector):
+        raise TypeError(
+            f"Engine {adapter.id!r} does not support local G2Lex inspection"
+        )
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            raw_path = entry.get("path")
+            expected_sha256 = entry.get("sha256")
+            expected_logical_sha256 = entry.get("logical_sha256")
+        else:
+            raw_path = entry
+            expected_sha256 = None
+            expected_logical_sha256 = None
+        if not isinstance(raw_path, (str, Path)) or not str(raw_path).strip():
+            raise ValueError("Each G2Lex file reference requires a non-empty path")
+        path = Path(raw_path).expanduser().resolve(strict=True)
+        path_key = str(path)
+        if path_key in seen_paths:
+            raise ValueError(f"Duplicate G2Lex file path: {path}")
+        seen_paths.add(path_key)
+        details = _inspection_to_dict(inspector(str(path)))
+        metadata = details.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise TypeError(f"G2Lex inspection for {path} has no metadata table")
+        actual_sha256 = details.get("sha256")
+        actual_logical_sha256 = details.get("logical_sha256")
+        if not isinstance(actual_sha256, str) or not actual_sha256:
+            raise ValueError(f"G2Lex inspection for {path} has no content SHA-256")
+        if expected_sha256 is not None and _hash_key(expected_sha256) != _hash_key(
+            actual_sha256
+        ):
+            raise ValueError(f"G2Lex file changed since it was pinned: {path}")
+        if expected_logical_sha256 is not None and _hash_key(
+            expected_logical_sha256
+        ) != _hash_key(actual_logical_sha256 or ""):
+            raise ValueError(
+                f"G2Lex logical content changed since it was pinned: {path}"
+            )
+        file_language = metadata.get("language") or metadata.get("locale")
+        if not isinstance(file_language, str) or not file_language.strip():
+            raise ValueError(f"G2Lex file {path} has no language metadata")
+        normalized_file_language = file_language.strip().casefold().replace("_", "-")
+        if normalized_file_language != requested_language:
+            raise ValueError(
+                f"G2Lex file {path} is for {normalized_file_language!r}, "
+                f"not profile language {requested_language!r}"
+            )
+        encoding = metadata.get("phoneme_encoding")
+        if not isinstance(encoding, str) or not encoding.strip():
+            raise ValueError(f"G2Lex file {path} has no phoneme_encoding metadata")
+        ref = {"path": str(path), "sha256": actual_sha256}
+        if actual_logical_sha256 is not None:
+            ref["logical_sha256"] = str(actual_logical_sha256)
+        ref["language"] = normalized_file_language
+        ref["phoneme_encoding"] = encoding.strip().casefold()
+        pinned.append(ref)
+    return pinned
+
+
+def _hash_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().casefold().removeprefix("sha256:")
+
+
+def _profile_pronunciation_options(
+    engine: str,
+    language: str,
+    options: Mapping[str, Any],
+    *,
+    lexicon_names: list[str],
+    g2lex_paths: list[Path],
+    lexicon_data_policy: str | None,
+) -> dict[str, Any]:
+    result = dict(options)
+    if lexicon_names and "lexicons" in result:
+        raise ValueError("--lexicon conflicts with generic --option lexicons=...")
+    if g2lex_paths and "g2lex_files" in result:
+        raise ValueError("--g2lex conflicts with generic --option g2lex_files=...")
+    if lexicon_data_policy is not None and "lexicon_data_policy" in result:
+        raise ValueError(
+            "--lexicon-data-policy conflicts with generic --option lexicon_data_policy=..."
+        )
+    normalized_names = [name.strip() for name in lexicon_names]
+    if any(not name for name in normalized_names):
+        raise ValueError("--lexicon values must not be empty")
+    seen_names: set[str] = set()
+    for name in normalized_names:
+        key = name.casefold()
+        if key in seen_names:
+            raise ValueError(f"Duplicate --lexicon selector: {name}")
+        seen_names.add(key)
+    if normalized_names:
+        result["lexicons"] = normalized_names
+    if lexicon_data_policy is not None:
+        result["lexicon_data_policy"] = lexicon_data_policy
+
+    raw_files: Any = g2lex_paths if g2lex_paths else result.get("g2lex_files")
+    if raw_files is not None:
+        adapter = get_adapter(engine)
+        if not adapter.capabilities().supports_lexicons:
+            raise ValueError(
+                f"Engine {engine!r} does not support pronunciation lexicons"
+            )
+        result["g2lex_files"] = _pin_g2lex_files(adapter, raw_files, language)
+    elif normalized_names or lexicon_data_policy is not None:
+        adapter = get_adapter(engine)
+        if not adapter.capabilities().supports_lexicons:
+            raise ValueError(
+                f"Engine {engine!r} does not support pronunciation lexicons"
+            )
+    return result
+
+
+def _pronunciation_stack_for_binding(
+    binding: Mapping[str, Any], language: str
+) -> dict[str, Any] | None:
+    renderer = binding.get("renderer")
+    if not isinstance(renderer, str):
+        return None
+    try:
+        adapter = get_adapter(renderer)
+    except (ImportError, ProfileError):
+        return None
+    reader = getattr(adapter, "pronunciation_stack", None)
+    if not callable(reader):
+        return None
+    options = binding.get("options", {})
+    if not isinstance(options, Mapping):
+        return {
+            "engine": renderer,
+            "language": language,
+            "error": "invalid options table",
+        }
+    try:
+        return dict(
+            reader(
+                language=language,
+                target_id=str(binding.get("target_id", "unknown")),
+                options=options,
+            )
+        )
+    except (
+        AttributeError,
+        EngineError,
+        ImportError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        return {"engine": renderer, "language": language, "error": str(exc)}
+
+
+def _pronunciation_stacks_for_plan(plan: Any) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in getattr(plan, "speech", ()) or ():
+        stack = _pronunciation_stack_for_binding(item.binding, item.language)
+        if stack is None:
+            continue
+        key = json.dumps(
+            {"binding": item.binding, "language": item.language},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        record = grouped.setdefault(
+            key,
+            {
+                "language": item.language,
+                "stack": stack,
+                "segments": [],
+            },
+        )
+        record["segments"].append(
+            {
+                "number": item.number,
+                "segment_id": item.segment_id or item.computed_id(),
+            }
+        )
+    return list(grouped.values())
+
+
+def _print_pronunciation_stacks(records: list[dict[str, Any]]) -> None:
+    for record in records:
+        stack = record.get("stack", {})
+        if not isinstance(stack, Mapping):
+            continue
+        segment_numbers = ", ".join(
+            str(item.get("number")) for item in record.get("segments", ())
+        )
+        precedence = stack.get("precedence", ())
+        label = " > ".join(str(item) for item in precedence) or "unresolved"
+        print(
+            f"Pronunciation stack (segments {segment_numbers or 'unknown'}, "
+            f"{stack.get('engine', 'unknown')} {record.get('language', 'unknown')}): {label}"
+        )
+        for source in stack.get("local_g2lex", ()):
+            if isinstance(source, Mapping):
+                print(
+                    f"  G2Lex: {source.get('path', 'unknown')} "
+                    f"[{source.get('status', 'unknown')}] "
+                    f"sha256={source.get('sha256') or source.get('current_sha256') or 'unpinned'}"
+                )
+        if stack.get("error"):
+            print(f"  Pronunciation inspection error: {stack['error']}")
+
+
 def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
     return [
         {
@@ -925,6 +1217,9 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
             "default": role_name == profile.default_role,
             "language": role.language,
             "binding": _inspection_binding(role.binding),
+            "pronunciation_stack": _pronunciation_stack_for_binding(
+                role.binding, role.language
+            ),
         }
         for role_name, role in sorted(list_profile_roles(profile).items())
     ]
@@ -960,6 +1255,22 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
             f"{target:<18} {selector}"
         )
+        pronunciation_stack = item.get("pronunciation_stack")
+        if isinstance(pronunciation_stack, Mapping):
+            precedence = pronunciation_stack.get("precedence", ())
+            print(
+                "    Pronunciation stack: "
+                + (" > ".join(str(value) for value in precedence) or "unresolved")
+            )
+            for source in pronunciation_stack.get("local_g2lex", ()):
+                if isinstance(source, Mapping):
+                    print(
+                        f"      G2Lex: {source.get('path', 'unknown')} "
+                        f"[{source.get('status', 'unknown')}] "
+                        f"sha256={source.get('sha256') or source.get('current_sha256') or 'unpinned'}"
+                    )
+            if pronunciation_stack.get("error"):
+                print(f"      Inspection error: {pronunciation_stack['error']}")
 
 
 def _display_cli_value(value: Any) -> str:
@@ -1024,12 +1335,14 @@ def _target_payload(target: Any) -> dict[str, Any]:
     }
 
 
-def _preflight_payload(report: Any) -> dict[str, Any]:
+def _preflight_payload(
+    report: Any, *, pronunciation_stacks: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     counts = {
         status: sum(check.status == status for check in report.checks)
         for status in ("ok", "too_long", "error")
     }
-    return {
+    payload = {
         "render_plan_id": report.render_plan_id,
         "render_profile_id": report.render_profile_id,
         "status": report.status,
@@ -1055,6 +1368,9 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
         ),
         "error": (preflight_failure_message(report) if report.status != "ok" else None),
     }
+    if pronunciation_stacks is not None:
+        payload["pronunciation_stacks"] = pronunciation_stacks
+    return payload
 
 
 def _sopro_unknown_fit_summary(report: Any) -> tuple[str, ...]:
@@ -2070,6 +2386,85 @@ def main(argv: list[str] | None = None) -> int:
                         )
                 return 0
 
+        if args.command == "lexicons":
+            adapter = get_adapter(args.engine)
+            if args.lexicons_command == "inspect-file":
+                inspector = getattr(adapter, "inspect_g2lex_file", None)
+                if not callable(inspector):
+                    raise ValueError(
+                        f"Engine {adapter.id!r} does not support local G2Lex inspection"
+                    )
+                payload = _inspection_to_dict(inspector(str(args.path)))
+                payload["valid"] = True
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    metadata = payload.get("metadata", {})
+                    print(f"G2Lex file: {payload.get('path', args.path)}")
+                    print(f"  sha256:         {payload.get('sha256', '-')}")
+                    print(f"  logical sha256: {payload.get('logical_sha256') or '-'}")
+                    if isinstance(metadata, Mapping):
+                        for key in sorted(metadata):
+                            print(f"  {key}: {metadata[key]}")
+                return 0
+
+            discover = getattr(adapter, "discover_lexicons", None)
+            if not callable(discover):
+                raise ValueError(
+                    f"Engine {adapter.id!r} does not support named lexicon discovery"
+                )
+            entries, _ = discover(
+                language=args.lang,
+                model=args.target,
+                offline=args.offline,
+                refresh=args.refresh,
+                preference=args.preference,
+            )
+            rows = [_inspection_to_dict(entry) for entry in entries]
+            if args.lexicons_command == "inspect":
+                entry = next(
+                    (item for item in entries if item.selector == args.selector), None
+                )
+                if entry is None:
+                    available = ", ".join(item.selector for item in entries) or "none"
+                    raise ValueError(
+                        f"Lexicon selector {args.selector!r} is not available for {args.lang or 'all languages'}. "
+                        f"Available selectors: {available}"
+                    )
+                payload = _inspection_to_dict(entry)
+                if args.json:
+                    print(
+                        json.dumps(
+                            payload, ensure_ascii=False, indent=2, sort_keys=True
+                        )
+                    )
+                else:
+                    for key, value in payload.items():
+                        print(f"{key}: {_display_cli_value(value)}")
+                return 0
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(
+                    "SELECTOR\tLANGUAGE\tDEFAULT\tINSTALLED\tENCODING\tBACKEND\tASSET ID\tMODEL SUPPORT"
+                )
+                for item in entries:
+                    installed = (
+                        "unknown"
+                        if item.installed is None
+                        else str(item.installed).lower()
+                    )
+                    print(
+                        f"{item.selector}\t{item.locale}\t{str(item.default).lower()}\t{installed}\t"
+                        f"{item.phoneme_encoding or '-'}\t{item.data_backend or '-'}\t"
+                        f"{item.asset_id or '-'}\t{item.model_support}"
+                    )
+            return 0
+
         if args.command == "models":
             if args.models_command == "list":
                 models = list_models(
@@ -2309,7 +2704,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "profile":
             if args.profile_command == "create":
                 output_path = normalize_renderprofile_output_path(args.output)
-                profile_options = _json_options(args.option)
+                profile_options = _profile_pronunciation_options(
+                    args.engine,
+                    args.language,
+                    _json_options(args.option),
+                    lexicon_names=args.lexicon,
+                    g2lex_paths=args.g2lex,
+                    lexicon_data_policy=args.lexicon_data_policy,
+                )
                 input_paths = (
                     args.reference_wav,
                     args.prepared_voice,
@@ -2446,6 +2848,14 @@ def main(argv: list[str] | None = None) -> int:
                                 "profile output must not overwrite a voice-source input"
                             )
                         voice_source = _profile_role_voice_source(args)
+                        binding_options = _profile_pronunciation_options(
+                            args.engine,
+                            args.language,
+                            _json_options(args.option),
+                            lexicon_names=args.lexicon,
+                            g2lex_paths=args.g2lex,
+                            lexicon_data_policy=args.lexicon_data_policy,
+                        )
                         profile = set_profile_role(
                             args.profile,
                             args.role,
@@ -2455,7 +2865,7 @@ def main(argv: list[str] | None = None) -> int:
                             voice=args.voice,
                             speaker=args.speaker,
                             voice_source=voice_source,
-                            options=_json_options(args.option),
+                            options=binding_options,
                             transcript=args.transcript,
                             offline=args.offline,
                             refresh=args.refresh,
@@ -2535,8 +2945,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
             progress = _progress_callback(args)
             try:
+                plan = load_plan(args.plan)
                 report = preflight_render_plan(
-                    load_plan(args.plan),
+                    plan,
                     args.output,
                     emphasis_policy=args.emphasis_policy,
                     on_event=progress,
@@ -2544,7 +2955,10 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 if progress is not None:
                     progress.finish()
-            payload = _preflight_payload(report)
+            payload = _preflight_payload(
+                report,
+                pronunciation_stacks=_pronunciation_stacks_for_plan(plan),
+            )
             payload["output"] = str(args.output)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -2554,6 +2968,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"{payload['replan']} replan, {payload['reject']} reject; "
                     f"{payload['checked']} speech items"
                 )
+                _print_pronunciation_stacks(payload.get("pronunciation_stacks", []))
                 for line in _sopro_unknown_fit_summary(report):
                     print(line)
             return 0 if report.status == "ok" else 2 if report.status == "replan" else 1
@@ -2837,12 +3252,12 @@ def main(argv: list[str] | None = None) -> int:
             }
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         elif getattr(args, "json", False) and (
-            args.command in {"engines", "models", "voices"}
+            args.command in {"engines", "lexicons", "models", "voices"}
             or args.command == "runtime"
             or (
                 args.command == "profile"
                 and args.profile_command
-                in {"inspect", "show", "role", "bind", "default-role"}
+                in {"create", "inspect", "show", "role", "bind", "default-role"}
             )
             or (args.command == "voice" and args.voice_command in {"source", "clone"})
         ):

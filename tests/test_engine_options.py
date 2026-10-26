@@ -55,6 +55,10 @@ def test_kokoro_options_expose_shorthand_and_structured_capabilities() -> None:
     assert "random_seed" in adapter.capabilities().option_names
     assert options["random_seed"].value_type == "integer"
     assert options["random_seed"].default is None
+    assert options["lexicons"].value_type == "string|array[string]"
+    assert options["lexicon_data_policy"].choices == ("auto", "installed-only")
+    assert options["g2lex_files"].value_type == "array[table]"
+    assert "g2lex_files" in adapter.capabilities().option_names
 
 
 def test_engine_options_command_emits_deterministic_json(monkeypatch, capsys) -> None:

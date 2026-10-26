@@ -181,6 +181,76 @@ def test_default_role_in_place_and_inspect_json(tmp_path: Path, capsys) -> None:
     ]
 
 
+def test_profile_inspection_exposes_effective_pronunciation_stack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "kokoro.renderprofile.toml"
+    profile = _write_profile(source)
+    roles = dict(profile.roles)
+    binding = {
+        "renderer": "kokoro",
+        "target_id": "kokoro-test",
+        "options": {
+            "lexicons": ["lexhint"],
+            "g2lex_files": [
+                {
+                    "path": str(tmp_path / "editorial.g2lex"),
+                    "sha256": "sha256:" + "a" * 64,
+                }
+            ],
+        },
+    }
+    roles["narrator"] = replace(roles["narrator"], binding=binding)
+
+    save_render_profile(
+        replace(profile, roles=roles, profile_id=None).with_identity(), source
+    )
+
+    class FakeAdapter:
+        def pronunciation_stack(self, *, language, target_id, options):
+            files = options.get("g2lex_files", [])
+            named = options.get("lexicons", [])
+            local = (
+                [
+                    {
+                        "path": files[0]["path"],
+                        "sha256": files[0]["sha256"],
+                        "status": "valid",
+                    }
+                ]
+                if files
+                else []
+            )
+            precedence = [
+                f"local G2Lex file {index + 1}" for index in range(len(local))
+            ]
+            precedence.extend(["contextual heteronym rules", *named, "espeak"])
+            return {
+                "engine": "kokoro",
+                "language": language,
+                "target_id": target_id,
+                "local_g2lex": local,
+                "named_lexicons": [{"selector": item} for item in named],
+                "precedence": precedence,
+            }
+
+    monkeypatch.setattr(cli, "get_adapter", lambda _renderer: FakeAdapter())
+    assert cli.main(["profile", "inspect", str(source), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    narrator = next(item for item in payload["roles"] if item["role"] == "narrator")
+    assert narrator["pronunciation_stack"]["precedence"][0] == "local G2Lex file 1"
+    assert (
+        narrator["pronunciation_stack"]["local_g2lex"][0]["sha256"]
+        == "sha256:" + "a" * 64
+    )
+
+    assert cli.main(["profile", "inspect", str(source)]) == 0
+    assert (
+        "Pronunciation stack: local G2Lex file 1 > contextual heteronym rules"
+        in capsys.readouterr().out
+    )
+
+
 def test_role_remove_default_requires_replacement_without_writing(
     tmp_path: Path, capsys
 ) -> None:

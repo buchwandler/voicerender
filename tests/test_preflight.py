@@ -1016,6 +1016,17 @@ def test_preflight_cli_writes_report_and_emits_json_exit_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     adapter = _install(monkeypatch)
+    adapter.pronunciation_stack = lambda **_kwargs: {
+        "engine": adapter.id,
+        "precedence": ["local G2Lex file 1", "named lexicon gold"],
+        "local_g2lex": [
+            {
+                "path": "fixture.g2lex",
+                "sha256": "sha256:" + "a" * 64,
+                "status": "valid",
+            }
+        ],
+    }
     plan = _plan(("too long", True, "sentence"))
     adapter.measurements["too long"] = RequestMeasure(
         fits=False,
@@ -1035,6 +1046,10 @@ def test_preflight_cli_writes_report_and_emits_json_exit_summary(
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
     assert payload["status"] == "replan"
+    assert payload["pronunciation_stacks"][0]["stack"]["precedence"] == [
+        "local G2Lex file 1",
+        "named lexicon gold",
+    ]
     assert payload["exit_code"] == 2
     assert payload["checks"] == {"ok": 0, "too_long": 1, "error": 0}
     assert payload["output"] == str(report_path)
