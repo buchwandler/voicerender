@@ -29,7 +29,28 @@ Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `sup
 
 ### Kitten request measurement
 
-KittenSynth owns Kitten text tokenization. VoiceRender delegates to `KittenVoice.measure_prepared()` and does not re-tokenize Kitten text. Kitten provides exact `model_tokens` measurement for preflight; a hard maximum is only available when the engine/model declares one. An unknown maximum means capacity is unknown, not infinite. The `.[kitten]` extra requires KittenSynth 0.1.4 or newer, which provides this measurement API.
+KittenSynth owns Kitten text tokenization. VoiceRender delegates to `KittenVoice.measure_prepared()` and does not re-tokenize Kitten text. Kitten provides exact `model_tokens` measurement for preflight; a hard maximum is only available when the engine/model declares one. An unknown maximum means capacity is unknown, not infinite. The `.[kitten]` extra requires KittenSynth `>=0.1.8,<0.2` and Kitteng2p `>=0.1.2,<0.2`; the Kitten request API probe rejects older contracts instead of silently dropping pronunciation inputs.
+
+### Kitten G2Lex selection and heteronyms
+
+Kitten remains eSpeak-only when no pronunciation sources are configured. To inspect the available named sources and a local G2Lex file:
+
+```bash
+voicerender lexicons list --engine kitten --lang en-US
+voicerender lexicons inspect-file ./custom-pronunciations.g2lex
+```
+
+Select sources in order when creating or binding a profile:
+
+```bash
+voicerender profile create \
+  --role narrator --engine kitten --target nano-0.8-int8 --voice Jasper \
+  --language en-US --lexicon public-en \
+  --g2lex ./custom-pronunciations.g2lex \
+  --lexicon-data-policy auto -o kitten.renderprofile.toml
+```
+
+Request-local IPA overrides take precedence over ordered local G2Lex files, then ordered named lexicons, contextual heteronym rules, and finally eSpeak. Local files are pinned by content and logical SHA-256; profile inspection and preflight report the effective stack and reject changed, invalid, or incompatible sources. `lexicon_data_policy` accepts `auto` or `installed-only` (offline rendering requires installed data), and `heteronym_policy` accepts `auto` or `off`. With `auto`, context-aware heteronym handling remains enabled without changing the default eSpeak fallback.
 
 ### Piper request measurement
 

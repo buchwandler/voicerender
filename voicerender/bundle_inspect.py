@@ -291,6 +291,7 @@ def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
 def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
     kind = source.get("kind") or source.get("type")
     safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
+    fields: tuple[str, ...]
     if kind == "managed_reference":
         ref = source.get("value", source.get("ref", source.get("reference")))
         if isinstance(ref, str):

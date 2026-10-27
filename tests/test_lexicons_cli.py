@@ -296,3 +296,155 @@ def test_bind_and_role_set_parsers_expose_dedicated_flags(tmp_path: Path) -> Non
         assert parsed.lexicon == ["gold"]
         assert parsed.g2lex == [Path("local.g2lex")]
         assert parsed.lexicon_data_policy == "auto"
+
+
+def test_kitten_profile_create_pins_local_g2lex_and_preserves_policy(
+    monkeypatch, capsys, tmp_path
+):
+    adapter = _Adapter()
+    monkeypatch.setattr(cli, "get_adapter", lambda engine: adapter)
+    source = tmp_path / "kitten.g2lex"
+    source.write_bytes(b"kitten pronunciation fixture")
+    captured = {}
+
+    def fake_create_render_profile(**kwargs):
+        captured.update(kwargs)
+        role = RoleProfile(
+            language=kwargs["language"],
+            binding={
+                "renderer": kwargs["engine"],
+                "target_id": kwargs["target_id"],
+                "options": dict(kwargs["options"] or {}),
+            },
+        )
+        return RenderProfile(roles={kwargs["role"]: role}, default_role=kwargs["role"])
+
+    monkeypatch.setattr(cli, "create_render_profile", fake_create_render_profile)
+    assert (
+        cli.main(
+            [
+                "profile",
+                "create",
+                "--engine",
+                "kitten",
+                "--target",
+                "nano-0.8-int8",
+                "--language",
+                "en-US",
+                "--voice",
+                "Jasper",
+                "--g2lex",
+                str(source),
+                "--lexicon-data-policy",
+                "installed-only",
+                "--option",
+                'heteronym_policy="off"',
+                "--output",
+                str(tmp_path / "kitten-profile"),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    options = captured["options"]
+    assert options["heteronym_policy"] == "off"
+    assert options["lexicon_data_policy"] == "installed-only"
+    assert options["g2lex_files"][0]["path"] == str(source.resolve())
+    assert options["g2lex_files"][0]["sha256"] == adapter.inspection["sha256"]
+
+
+def test_kitten_profile_inspection_includes_effective_pronunciation_stack(
+    monkeypatch, capsys, tmp_path
+):
+    class KittenAdapter(_Adapter):
+        id = "kitten"
+
+        def pronunciation_stack(self, **kwargs):
+            return {
+                "engine": "kitten",
+                "language": kwargs["language"],
+                "precedence": ["local G2Lex", "contextual heteronyms", "eSpeak"],
+                "local_g2lex": [{"path": "local.g2lex", "status": "valid"}],
+            }
+
+    monkeypatch.setattr(cli, "get_adapter", lambda engine: KittenAdapter())
+    role = RoleProfile(
+        language="en-US",
+        binding={
+            "renderer": "kitten",
+            "target_id": "nano-0.8-int8",
+            "voice": "Jasper",
+            "options": {"g2lex_files": [{"path": "local.g2lex"}]},
+        },
+    )
+    profile = RenderProfile(
+        roles={"narrator": role}, default_role="narrator"
+    ).with_identity()
+    path = tmp_path / "kitten.renderprofile.toml"
+    cli.save_render_profile(profile, path)
+
+    assert cli.main(["profile", "inspect", str(path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    stack = payload["roles"][0]["pronunciation_stack"]
+    assert stack["precedence"] == ["local G2Lex", "contextual heteronyms", "eSpeak"]
+    assert stack["local_g2lex"][0]["status"] == "valid"
+
+
+def test_inspect_file_preserves_adapter_invalidity(monkeypatch, capsys, tmp_path):
+    adapter = _Adapter()
+    adapter.inspection["valid"] = False
+    adapter.inspection["compatible"] = False
+    adapter.inspection["reason"] = "invalid G2Lex"
+    monkeypatch.setattr(cli, "get_adapter", lambda engine: adapter)
+    source = tmp_path / "invalid.g2lex"
+    source.write_bytes(b"invalid")
+
+    assert cli.main(["lexicons", "inspect-file", str(source), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert payload["compatible"] is False
+    assert payload["reason"] == "invalid G2Lex"
+
+
+def test_profile_create_rejects_invalid_local_g2lex_before_pinning(
+    monkeypatch, capsys, tmp_path
+):
+    adapter = _Adapter()
+    adapter.inspection["valid"] = False
+    adapter.inspection["reason"] = "invalid G2Lex"
+    monkeypatch.setattr(cli, "get_adapter", lambda engine: adapter)
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid G2Lex must stop profile creation")
+        ),
+    )
+    source = tmp_path / "invalid.g2lex"
+    source.write_bytes(b"invalid")
+
+    assert (
+        cli.main(
+            [
+                "profile",
+                "create",
+                "--engine",
+                "kitten",
+                "--target",
+                "nano-0.8-int8",
+                "--language",
+                "en-US",
+                "--g2lex",
+                str(source),
+                "--output",
+                str(tmp_path / "invalid-profile"),
+                "--json",
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert "invalid G2Lex" in payload["error"]

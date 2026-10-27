@@ -1024,6 +1024,14 @@ def _pin_g2lex_files(adapter: Any, files: Any, language: str) -> list[dict[str, 
             raise ValueError(f"Duplicate G2Lex file path: {path}")
         seen_paths.add(path_key)
         details = _inspection_to_dict(inspector(str(path)))
+        if details.get("valid") is False:
+            raise ValueError(
+                str(details.get("reason") or f"G2Lex file {path} is invalid")
+            )
+        if details.get("compatible") is False:
+            raise ValueError(
+                str(details.get("reason") or f"G2Lex file {path} is incompatible")
+            )
         metadata = details.get("metadata")
         if not isinstance(metadata, Mapping):
             raise TypeError(f"G2Lex inspection for {path} has no metadata table")
@@ -2395,7 +2403,8 @@ def main(argv: list[str] | None = None) -> int:
                         f"Engine {adapter.id!r} does not support local G2Lex inspection"
                     )
                 payload = _inspection_to_dict(inspector(str(args.path)))
-                payload["valid"] = True
+                if "valid" not in payload:
+                    payload["valid"] = True
                 if args.json:
                     print(
                         json.dumps(

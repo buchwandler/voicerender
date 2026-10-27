@@ -16,6 +16,7 @@ from renderplan import (
     SourceSpan,
     SpeechControl,
     SpeechItem,
+    TokenBundle,
     load_manifest,
     load_preflight,
     save_plan,
@@ -316,7 +317,7 @@ def _install_fake_kittensynth(
                 raise open_error
             return cls()
 
-        def measure_prepared(self, text: str) -> Any:
+        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
             events.append(("measure", text))
             return SimpleNamespace(
                 token_count=amount,
@@ -337,12 +338,15 @@ def _install_fake_kittensynth(
     module = ModuleType("kittensynth")
     module.__version__ = "0.1.4"
     module.__file__ = "/fake/kittensynth/__init__.py"
-    module.REQUEST_API_VERSION = 1
+    module.REQUEST_API_VERSION = 2
     module.request_api_contract = lambda: {
-        "version": 1,
+        "version": 2,
         "supports_request_measurement": True,
         "measurement_entrypoint": "KittenVoice.measure_prepared",
         "measurement_metric": "model_tokens",
+        "supports_linguistic_tokens": True,
+        "supports_pronunciation_overrides": True,
+        "supports_lexicons": True,
     }
     module.KittenVoice = FakeVoice
     if open_error is not None:
@@ -350,6 +354,13 @@ def _install_fake_kittensynth(
     module.SynthesisMeasure = object
     module.SynthesisConfig = object
     module.SynthesisResult = object
+    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.G2LexFileRef = object
+    module.PronunciationTrace = object
+    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.discover_lexicons = lambda **kwargs: ()
+    module.inspect_g2lex_file = lambda path: {}
     module.discover_models = lambda **kwargs: (model,)
     module.runtime_identity = lambda: {"engine_version": "0.1.4"}
     monkeypatch.setitem(sys.modules, "kittensynth", module)
@@ -372,16 +383,27 @@ def _plan(
             )
             for index in range(source_count)
         )
+        item_binding = dict(binding or _BINDING)
+        token_bundle = None
+        if item_binding.get("renderer") == "kitten" and text:
+            token_bundle = TokenBundle(
+                span=((0, len(text)),),
+                pos=("NOUN",),
+                tag=("NN",),
+                lemma=((0, text),),
+                morph=((0, "Number=Sing"),),
+            )
         flow.append(
             SpeechItem(
                 number=number,
                 text=text,
                 language="en-US",
                 role="narrator",
-                binding=dict(binding or _BINDING),
+                binding=item_binding,
                 source=source,
                 planning_level=level,
                 preflight_required=required,
+                tokens=token_bundle,
             )
         )
     return RenderPlan(

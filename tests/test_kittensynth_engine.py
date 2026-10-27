@@ -308,6 +308,7 @@ def test_managed_dependency_error_is_a_non_replanable_runtime_reject(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = ModuleType("kittensynth")
+    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
     native_error_type = type("ManagedModelDependencyError", (Exception,), {})
     module.ManagedModelDependencyError = native_error_type  # type: ignore[attr-defined]
     native_error = native_error_type("managed download transport unavailable")
@@ -338,6 +339,7 @@ def test_model_download_error_preserves_safe_transport_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = ModuleType("kittensynth")
+    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
     download_error_type = type("ModelDownloadError", (RuntimeError,), {})
     transport_error_type = type("AssetTransportError", (RuntimeError,), {})
     module.ModelDownloadError = download_error_type  # type: ignore[attr-defined]
@@ -405,6 +407,7 @@ def test_open_error_fallbacks_do_not_claim_model_download_or_xet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = ModuleType("kittensynth")
+    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
     module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
     native_error = ValueError("generic options failure")
 
@@ -430,6 +433,7 @@ def test_arbitrary_asset_download_error_keeps_generic_backend_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = ModuleType("kittensynth")
+    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
     module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
     asset_error_type = type("AssetDownloadError", (RuntimeError,), {})
     native_error = asset_error_type("unrelated asset failure")

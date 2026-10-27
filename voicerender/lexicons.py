@@ -23,6 +23,9 @@ class LexiconCatalogEntry:
     display_name: str | None = None
     phoneme_encoding: str | None = None
     data_version: str | None = None
+    content_sha256: str | None = None
+    logical_sha256: str | None = None
+    compatibility_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,4 +42,7 @@ class LexiconCatalogEntry:
             "display_name": self.display_name,
             "phoneme_encoding": self.phoneme_encoding,
             "data_version": self.data_version,
+            "content_sha256": self.content_sha256,
+            "logical_sha256": self.logical_sha256,
+            "compatibility_reason": self.compatibility_reason,
         }

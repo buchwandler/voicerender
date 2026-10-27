@@ -45,7 +45,7 @@ Review refreshed bindings and policy before using the proposal. If identity-bear
 profile semantics change, regenerate the associated RenderPlan using the refreshed
 profile. Keep the original profile with its plans for provenance and inspection.
 
-### Repairing a stale profile identity
+## Repairing a stale profile identity
 
 Manual edits to identity-bearing content (for example, adding a role or changing an engine option such as `quality`) make the stored `profile_id` stale. Ordinary profile loading remains strict: `inspect`, `show`, `validate`, and `refresh` reject a stale ID rather than silently changing the identity.
 
@@ -125,6 +125,20 @@ voicerender profile role remove printer-cast.proposed.renderprofile.toml narrato
 ```
 
 The RenderPlan schema is unchanged: plans continue to carry the same profile identity and resolved per-role bindings.
+
+### Kitten G2Lex sources and pronunciation identity
+
+Kitten profiles may bind ordered named lexicons and local G2Lex files. The CLI inspects and pins local files when creating or binding a profile:
+
+```bash
+voicerender lexicons list --engine kitten --lang en-US
+voicerender lexicons inspect-file ./custom-pronunciations.g2lex
+voicerender profile bind printer-cast.renderprofile.toml guest \
+  --engine kitten --target nano-0.8-int8 --voice Jasper --language en-US \
+  --lexicon public-en --g2lex ./custom-pronunciations.g2lex --in-place
+```
+
+Kitten remains on its historical eSpeak-only path when no lexicon sources are configured. Request-local IPA spans, local files, named sources, contextual heteronym rules, and eSpeak fallback are reported in effective precedence by `profile show`/`inspect` and preflight. Local source identity uses content and logical SHA-256 values rather than filesystem paths; the ordered named asset IDs, versions, and digests are also part of the synthesis identity. Moving an unchanged local file does not change that source identity, while changing its content does. Offline profiles require their selected named lexicons to be installed.
 
 ## UtterPlan bundle projection
 

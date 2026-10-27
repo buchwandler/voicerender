@@ -179,6 +179,11 @@ def _fake_package(package: str) -> ModuleType:
         "RequestMeasure",
         "discover_bundles",
         "KittenVoice",
+        "KittenG2PConfig",
+        "G2LexFileRef",
+        "PronunciationTrace",
+        "discover_lexicons",
+        "inspect_g2lex_file",
         "SynthesisMeasure",
         "discover_models",
         "runtime_identity",
@@ -232,6 +237,20 @@ def _fake_package(package: str) -> ModuleType:
     return module
 
 
+def _kitten_contract(**overrides: object) -> dict[str, object]:
+    contract: dict[str, object] = {
+        "version": 2,
+        "supports_request_measurement": True,
+        "measurement_entrypoint": "KittenVoice.measure_prepared",
+        "measurement_metric": "model_tokens",
+        "supports_linguistic_tokens": True,
+        "supports_pronunciation_overrides": True,
+        "supports_lexicons": True,
+    }
+    contract.update(overrides)
+    return contract
+
+
 def test_registry_lists_ten_engines_without_probing() -> None:
     listed = list_engines()
     assert {item["id"] for item in listed} == ENGINE_IDS
@@ -267,12 +286,8 @@ def test_all_engine_probes_use_public_api_without_loading_models(
             "measurement_metric": "model_tokens",
         }
     elif engine == "kitten":
-        fake.request_api_contract = lambda: {
-            "version": 1,
-            "supports_request_measurement": True,
-            "measurement_entrypoint": "KittenVoice.measure_prepared",
-            "measurement_metric": "model_tokens",
-        }
+        fake.REQUEST_API_VERSION = 2
+        fake.request_api_contract = _kitten_contract
     if engine == "qwen3":
         fake.request_api_contract = lambda: SimpleNamespace(
             supports_reference_voice=True,
@@ -431,6 +446,8 @@ def test_kitten_probe_requires_measure_prepared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _fake_package("kittensynth")
+    fake.REQUEST_API_VERSION = 2
+    fake.request_api_contract = _kitten_contract
     delattr(fake.KittenVoice, "measure_prepared")
     monkeypatch.setitem(sys.modules, "kittensynth", fake)
 
@@ -444,10 +461,10 @@ def test_kitten_probe_rejects_measurement_disabled_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _fake_package("kittensynth")
-    fake.request_api_contract = lambda: {
-        "version": 1,
-        "supports_request_measurement": False,
-    }
+    fake.REQUEST_API_VERSION = 2
+    fake.request_api_contract = lambda: _kitten_contract(
+        supports_request_measurement=False
+    )
     monkeypatch.setitem(sys.modules, "kittensynth", fake)
 
     probe = get_adapter("kitten").probe_api()
@@ -466,12 +483,13 @@ def test_kitten_probe_fails_closed_when_measurement_contract_raises(
 ) -> None:
     fake = _fake_package("kittensynth")
     calls = 0
+    fake.REQUEST_API_VERSION = 2
 
     def request_api_contract() -> dict[str, object]:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return {"version": 1, "supports_request_measurement": True}
+            return _kitten_contract()
         raise RuntimeError("contract unavailable")
 
     fake.request_api_contract = request_api_contract
@@ -481,7 +499,7 @@ def test_kitten_probe_fails_closed_when_measurement_contract_raises(
 
     assert not probe.compatible
     assert probe.status == "api_probe_failed"
-    assert probe.failed_stage == "request_measurement_contract"
+    assert probe.failed_stage == "pronunciation_capability_contract"
     assert probe.error_type == "RuntimeError"
 
 
@@ -489,6 +507,7 @@ def test_kitten_probe_reports_measurement_stage_for_contract_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _fake_package("kittensynth")
+    fake.REQUEST_API_VERSION = 2
 
     def request_api_contract() -> dict[str, object]:
         raise RuntimeError("contract unavailable")
@@ -500,7 +519,7 @@ def test_kitten_probe_reports_measurement_stage_for_contract_error(
 
     assert not probe.compatible
     assert probe.status == "api_probe_failed"
-    assert probe.failed_stage == "request_measurement_contract"
+    assert probe.failed_stage == "pronunciation_capability_contract"
     assert probe.error_type == "RuntimeError"
 
 
@@ -512,6 +531,8 @@ def test_kitten_probe_requires_synthesis_measure_symbol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _fake_package("kittensynth")
+    fake.REQUEST_API_VERSION = 2
+    fake.request_api_contract = _kitten_contract
     delattr(fake, "SynthesisMeasure")
     monkeypatch.setitem(sys.modules, "kittensynth", fake)
 
@@ -521,13 +542,26 @@ def test_kitten_probe_requires_synthesis_measure_symbol(
     assert "SynthesisMeasure" in probe.missing_symbols
 
 
+def test_kitten_probe_rejects_old_request_api_with_pronunciation_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _fake_package("kittensynth")
+    monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+    probe = get_adapter("kitten").probe_api()
+
+    assert not probe.compatible
+    assert probe.api_version == 1
+    assert probe.expected_api_version == 2
+    assert any("lexicon-aware G2P requires" in warning for warning in probe.warnings)
+
+
 def test_kitten_probe_accepts_attribute_measurement_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _fake_package("kittensynth")
-    fake.request_api_contract = lambda: SimpleNamespace(
-        supports_request_measurement=True
-    )
+    fake.REQUEST_API_VERSION = 2
+    fake.request_api_contract = lambda: SimpleNamespace(**_kitten_contract())
     monkeypatch.setitem(sys.modules, "kittensynth", fake)
 
     probe = get_adapter("kitten").probe_api()

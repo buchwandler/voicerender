@@ -425,7 +425,7 @@ def test_document_model_download_failure_persists_reject_without_speech_artifact
     from types import ModuleType, SimpleNamespace
     from typing import Any
 
-    from renderplan import load_plan, load_preflight, save_plan
+    from renderplan import TokenBundle, load_plan, load_preflight, save_plan
 
     import voicerender.document as document_module
     from voicerender.engines.kittensynth import KittenSynthEngineAdapter
@@ -458,6 +458,13 @@ def test_document_model_download_failure_persists_reject_without_speech_artifact
             "options": {},
         },
         segment_id=None,
+        tokens=TokenBundle(
+            span=((0, len(plan.speech[0].text)),),
+            pos=("NOUN",),
+            tag=("NN",),
+            lemma=((0, plan.speech[0].text),),
+            morph=((0, "Number=Sing"),),
+        ),
     )
     plan = replace(plan, flow=(speech,), plan_id=None).with_identity()
     save_plan(plan, plan_path)
@@ -515,19 +522,29 @@ def test_document_model_download_failure_persists_reject_without_speech_artifact
     module = ModuleType("kittensynth")
     module.__version__ = "0.1.7"
     module.__file__ = "/fake/kittensynth/__init__.py"
-    module.REQUEST_API_VERSION = 1
+    module.REQUEST_API_VERSION = 2
     module.ModelDownloadError = error_type  # type: ignore[attr-defined]
     module.KittenVoice = FakeVoice
     module.SynthesisMeasure = object
     module.SynthesisConfig = object
     module.SynthesisResult = object
+    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.G2LexFileRef = object
+    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)
+    module.PronunciationTrace = object
     module.discover_models = lambda **kwargs: (model,)
-    module.runtime_identity = lambda: {"engine_version": "0.1.7"}
+    module.discover_lexicons = lambda **kwargs: ()
+    module.inspect_g2lex_file = lambda path: {}
+    module.runtime_identity = lambda: {"engine_version": "0.1.8"}
     module.request_api_contract = lambda: {
-        "version": 1,
+        "version": 2,
         "supports_request_measurement": True,
         "measurement_entrypoint": "KittenVoice.measure_prepared",
         "measurement_metric": "model_tokens",
+        "supports_linguistic_tokens": True,
+        "supports_pronunciation_overrides": True,
+        "supports_lexicons": True,
     }
     monkeypatch.setitem(sys.modules, "kittensynth", module)
     monkeypatch.setitem(_ADAPTERS, "kitten", KittenSynthEngineAdapter())
