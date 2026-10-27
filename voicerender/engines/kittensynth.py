@@ -304,6 +304,7 @@ def _translate_kitten_error(
     request: SpeechRequest | None = None,
     *,
     opening: bool = False,
+    stage: Literal["opening", "measure", "synthesize"] = "synthesize",
 ) -> EngineError:
     try:
         import kittensynth
@@ -337,6 +338,7 @@ def _translate_kitten_error(
             if opening and isinstance(error, (TypeError, ValueError)):
                 error_type = InvalidEngineOptionError
                 code = "kitten.invalid_options"
+
     context: dict[str, Any] = {
         "engine": "kitten",
         "engine_version": distribution_version("kittensynth"),
@@ -357,7 +359,7 @@ def _translate_kitten_error(
     details = (
         _kitten_model_download_details(error)
         if code == "kitten.model_download_error"
-        else None
+        else {}
     )
     message = (
         sanitize_error_message(str(error), limit=2048)
@@ -366,6 +368,30 @@ def _translate_kitten_error(
     )
     if code == "kitten.model_download_error" and not message:
         message = "Kitten model download failed."
+
+    if stage == "measure":
+        source = "kittensynth.measure_prepared"
+        stable_code = code or error_type.code
+        request_id = request.id if request is not None else "unknown"
+        target_id = selection.target_id or "unknown"
+        context["source"] = source
+        details.update(
+            {
+                "stage": stage,
+                "adapter_code": stable_code,
+                "engine": "kitten",
+                "target_id": selection.target_id,
+                "request_id": request.id if request is not None else None,
+                "native_error_type": type(error).__name__,
+                "source": source,
+            }
+        )
+        message = (
+            f"{stable_code} during measure: engine=kitten; target={target_id}; "
+            f"request/segment={request_id}; native_exception={type(error).__name__}; "
+            f"source={source}: {message}"
+        )
+
     return error_type(message, **context, details=details, code=code)
 
 
@@ -413,7 +439,9 @@ class KittenSynthEngineSession:
         except EngineSynthesisError:
             raise
         except Exception as exc:
-            raise _translate_kitten_error(exc, self._selection, request) from exc
+            raise _translate_kitten_error(
+                exc, self._selection, request, stage="measure"
+            ) from exc
 
         amount_value = _measurement_field(measured, "token_count")
         maximum_value = _measurement_field(measured, "max_tokens")
@@ -580,11 +608,11 @@ class KittenSynthEngineAdapter:
         if not probe.compatible:
             diagnostic = (
                 "KittenSynth does not support request measurement. "
-                "Kitten lexicon-aware G2P requires kittensynth>=0.1.8 and "
-                "kitteng2p>=0.1.2."
+                "Kitten lexicon-aware G2P requires kittensynth>=0.1.9 and "
+                "kitteng2p>=0.1.3."
                 if probe.failed_stage == "request_measurement_contract"
-                else "Kitten lexicon-aware G2P requires kittensynth>=0.1.8 and "
-                "kitteng2p>=0.1.2."
+                else "Kitten lexicon-aware G2P requires kittensynth>=0.1.9 and "
+                "kitteng2p>=0.1.3."
             )
             if (
                 probe.failed_stage == "contract_inspection"
@@ -615,8 +643,8 @@ class KittenSynthEngineAdapter:
                 warnings=probe.warnings
                 + (
                     (
-                        "Kitten lexicon-aware G2P requires kittensynth>=0.1.8 and "
-                        "kitteng2p>=0.1.2."
+                        "Kitten lexicon-aware G2P requires kittensynth>=0.1.9 and "
+                        "kitteng2p>=0.1.3."
                     ),
                 ),
             )
@@ -638,10 +666,10 @@ class KittenSynthEngineAdapter:
             shown_value = "missing" if value is None else value
             diagnostic = (
                 "KittenSynth does not support request measurement. Install "
-                "kittensynth>=0.1.8 with kitteng2p>=0.1.2."
+                "kittensynth>=0.1.9 with kitteng2p>=0.1.3."
                 if name == "supports_request_measurement"
                 else "KittenSynth does not advertise the required pronunciation "
-                "capabilities. Install kittensynth>=0.1.8 with kitteng2p>=0.1.2."
+                "capabilities. Install kittensynth>=0.1.9 with kitteng2p>=0.1.3."
             )
             return replace(
                 probe,

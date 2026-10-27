@@ -422,6 +422,9 @@ def _error_check(
     *,
     source: str | None = None,
 ) -> PreflightCheck:
+    error_source = getattr(error, "source", None)
+    if not isinstance(error_source, str) or not error_source.strip():
+        error_source = _error_source(error)
     return PreflightCheck(
         segment_number=item.number,
         segment_id=segment_id,
@@ -429,7 +432,7 @@ def _error_check(
         metric="unknown",
         measured=None,
         maximum=None,
-        source=source or _error_source(error),
+        source=source or error_source,
         detail=str(error) or "RenderPlan preflight rejected this speech occurrence",
     )
 

@@ -283,6 +283,7 @@ def _install_fake_kittensynth(
     maximum: int | None,
     fits: bool | None,
     open_error: Exception | None = None,
+    measure_error: Exception | None = None,
 ) -> list[tuple[str, Any]]:
     events: list[tuple[str, Any]] = []
     model = SimpleNamespace(
@@ -330,6 +331,8 @@ def _install_fake_kittensynth(
                     ),
                 )
             )
+            if measure_error is not None:
+                raise measure_error
             return SimpleNamespace(
                 token_count=amount,
                 max_tokens=maximum,
@@ -536,6 +539,102 @@ def test_piper_preflight_defers_emphasis_with_declared_compose_policy(
     assert report.render_plan_id == plan.plan_id
 
 
+def test_kitten_preflight_accepts_real_g2p_with_punctuation_tokens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    kittensynth = pytest.importorskip("kittensynth")
+    import numpy as np
+
+    from voicerender.engines.catalog import SynthesisTarget
+
+    class TextBackend:
+        def phonemize(self, text: str, *, language: str) -> str:
+            assert language == "en-us"
+            return "həloʊ"
+
+        def close(self) -> None:
+            pass
+
+    class NoInferenceRuntime:
+        def __init__(self) -> None:
+            self.infer_calls = 0
+
+        def infer(self, *args: Any, **kwargs: Any) -> Any:
+            self.infer_calls += 1
+            raise AssertionError(
+                "preflight measurement must not run acoustic inference"
+            )
+
+        def close(self) -> None:
+            pass
+
+    voices_path = tmp_path / "kitten-voices.npz"
+    np.savez(
+        voices_path,
+        **{"expr-voice-2-m": np.arange(40, dtype=np.float32).reshape(10, 4)},
+    )
+    runtime = NoInferenceRuntime()
+    g2p = kittensynth.KittenG2P(backend=TextBackend())
+    voice = kittensynth.KittenVoice(
+        runtime=runtime,
+        voices_path=voices_path,
+        metadata={"voice_aliases": {"Jasper": "expr-voice-2-m"}},
+        model_ref=None,
+        g2p=g2p,
+        model_id="nano-0.8-int8",
+    )
+    monkeypatch.setattr(
+        kittensynth.KittenVoice,
+        "from_pretrained",
+        classmethod(lambda cls, target_id, **kwargs: voice),
+    )
+
+    target = SynthesisTarget(
+        engine="kitten",
+        id="nano-0.8-int8",
+        display_name="Kitten integration test model",
+        languages=("en-US",),
+        sample_rate=24000,
+        voices=("Jasper",),
+        default_voice="Jasper",
+    )
+    adapter = KittenSynthEngineAdapter()
+    monkeypatch.setattr(adapter, "discover", lambda request: (target,))
+    monkeypatch.setitem(_ADAPTERS, "kitten", adapter)
+
+    text = "Hello, bow!"
+    binding = {"renderer": "kitten", "target_id": target.id, "voice": "Jasper"}
+    plan = _plan((text, True, "sentence"), binding=binding)
+    item = replace(
+        plan.flow[0],
+        segment_id=None,
+        tokens=TokenBundle(
+            span=((0, 5), (5, 6), (7, 10), (10, 11)),
+            pos=("INTJ", "PUNCT", "NOUN", "PUNCT"),
+            tag=("UH", "PUNCT", "NN", "PUNCT"),
+            lemma=((0, "hello"), (2, "bow")),
+            morph=((2, "Number=Sing"),),
+        ),
+    )
+    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
+
+    try:
+        report = preflight_render_plan(
+            plan, tmp_path / "kitten-real-g2p-preflight.toml"
+        )
+    finally:
+        g2p.close()
+
+    check = report.checks[0]
+    assert report.status == "ok"
+    assert check.status == "ok"
+    assert check.source == "kittensynth.measure_prepared"
+    assert check.metric == "model_tokens"
+    assert check.measured is not None and check.measured > 0
+    assert runtime.infer_calls == 0
+    assert "must align to one source word" not in (check.detail or "")
+
+
 def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -571,6 +670,38 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     assert [
         (token.text, token.lemma, token.morph) for token in events[0][1].tokens
     ] == [("Kitten", "kitten", None), ("preflight", "preflight", None)]
+
+
+def test_kitten_measurement_failure_reports_native_provenance_in_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native_error = ValueError("linguistic token span [7, 8) cannot be projected")
+    events = _install_fake_kittensynth(
+        monkeypatch,
+        amount=180,
+        maximum=256,
+        fits=True,
+        measure_error=native_error,
+    )
+    binding = {
+        "renderer": "kitten",
+        "target_id": "kitten-test-model",
+        "voice": "Jasper",
+    }
+    plan = _plan(("Kitten alignment failure", True, "sentence"), binding=binding)
+
+    report = preflight_render_plan(plan, tmp_path / "kitten-measurement-error.toml")
+
+    check = report.checks[0]
+    assert report.status == "reject"
+    assert check.status == "error"
+    assert check.source == "kittensynth.measure_prepared"
+    assert "target=kitten-test-model" in (check.detail or "")
+    assert f"request/segment={check.segment_id}" in (check.detail or "")
+    assert "native_exception=ValueError" in (check.detail or "")
+    assert "kitten.engine_error during measure" in (check.detail or "")
+    assert "linguistic token span [7, 8) cannot be projected" in (check.detail or "")
+    assert [event[0] for event in events] == ["measure", "close"]
 
 
 def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(

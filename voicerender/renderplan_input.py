@@ -364,6 +364,22 @@ def classify_measurement(
         return MeasurementOutcome(
             PreflightDisposition.TOO_LONG, measurement=measurement
         )
+    source = getattr(value, "source", None)
+    if isinstance(source, str) and source.strip():
+        details = getattr(value, "details", {})
+        measurement = RequestMeasure(
+            fits=None,
+            amount=None,
+            maximum=None,
+            unit="unknown",
+            source=source,
+            details=dict(details) if isinstance(details, Mapping) else {},
+        )
+        return MeasurementOutcome(
+            PreflightDisposition.REJECT,
+            measurement=measurement,
+            error=str(value) or "Engine measurement failed",
+        )
     return MeasurementOutcome(
         PreflightDisposition.REJECT,
         error=str(value) or "Engine measurement failed",

@@ -20,6 +20,7 @@ from voicerender.engines.kittensynth import (
     KittenSynthEngineAdapter,
     KittenSynthEngineSession,
 )
+from voicerender.errors import EngineBackendError
 from voicerender.lexicons import LexiconCatalogEntry
 
 
@@ -157,6 +158,112 @@ def test_request_tokens_and_ipa_overrides_are_forwarded_to_measure_and_synthesis
         assert forwarded["tokens"][0].morph == "Tense=Pres"
         assert forwarded["pronunciation_overrides"][0].phonemes == "ɹ iː d"
         assert forwarded["pronunciation_overrides"][0].alphabet == "ipa"
+
+
+def test_measurement_error_retains_engine_stage_and_native_provenance() -> None:
+    class Voice:
+        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
+            raise ValueError("linguistic token span [7, 8) cannot be projected")
+
+    request = SpeechRequest(
+        id="segment-123",
+        text="Hello, bow!",
+        language="en-US",
+        voice="Jasper",
+    )
+    session = KittenSynthEngineSession(Voice(), _selection())
+
+    with pytest.raises(EngineBackendError) as captured:
+        session.measure(request)
+
+    error = captured.value
+    assert error.code == "kitten.engine_error"
+    assert error.engine == "kitten"
+    assert error.target_id == "nano-0.8-int8"
+    assert error.request_id == "segment-123"
+    assert error.native_error_type == "ValueError"
+    assert error.stage == "measure"
+    assert error.source == "kittensynth.measure_prepared"
+    assert error.details["adapter_code"] == "kitten.engine_error"
+    assert "kitten.engine_error during measure" in str(error)
+    assert "request/segment=segment-123" in str(error)
+    assert "linguistic token span [7, 8) cannot be projected" in str(error)
+
+
+def test_punctuation_rich_renderplan_tokens_are_forwarded_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+
+    class Voice:
+        def __init__(self) -> None:
+            self.measure_args: list[dict[str, Any]] = []
+            self.synthesis_args: list[dict[str, Any]] = []
+
+        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
+            self.measure_args.append(kwargs)
+            return SimpleNamespace(
+                token_count=5,
+                max_tokens=32,
+                fits=True,
+                model_id="nano-0.8-int8",
+                metadata={},
+            )
+
+        def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
+            self.synthesis_args.append(kwargs)
+            return SimpleNamespace(
+                audio=np.array([0.0, 0.25], dtype=np.float32),
+                sample_rate=24000,
+                voice="Jasper",
+                model_ref="nano-0.8-int8",
+                speed=1.0,
+                metadata={},
+            )
+
+    tokens = (
+        SpeechToken(0, 5, "Hello", pos="INTJ", tag="UH", lemma="hello", language="en"),
+        SpeechToken(5, 6, ",", pos="PUNCT", tag="PUNCT", language="en"),
+        SpeechToken(
+            7, 10, "bow", pos="NOUN", tag="NN", lemma="bow", morph="Number=Sing"
+        ),
+        SpeechToken(10, 11, "!", pos="PUNCT", tag="PUNCT", language="en"),
+    )
+    request = SpeechRequest(
+        id="punctuation-rich-request",
+        text="Hello, bow!",
+        language="en-US",
+        tokens=tokens,
+    )
+    voice = Voice()
+    session = KittenSynthEngineSession(voice, _selection())
+
+    session.measure(request)
+    session.synthesize(request)
+
+    expected = [
+        (0, 5, "Hello", "INTJ", "UH", "hello", None, "en"),
+        (5, 6, ",", "PUNCT", "PUNCT", None, None, "en"),
+        (7, 10, "bow", "NOUN", "NN", "bow", "Number=Sing", None),
+        (10, 11, "!", "PUNCT", "PUNCT", None, None, "en"),
+    ]
+    for arguments in (voice.measure_args[0], voice.synthesis_args[0]):
+        assert [
+            (
+                token.start,
+                token.end,
+                token.text,
+                token.pos,
+                token.tag,
+                token.lemma,
+                token.morph,
+                token.language,
+            )
+            for token in arguments["tokens"]
+        ] == expected
 
 
 def test_kitten_forwards_partial_tokens_to_measurement_and_synthesis(
