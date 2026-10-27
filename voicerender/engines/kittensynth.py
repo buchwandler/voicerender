@@ -718,7 +718,10 @@ class KittenSynthEngineAdapter:
         return make_renderprofile_fragment(
             self,
             selection,
-            token_fields=("span", "pos", "tag", "lemma", "morph"),
+            # Kitten can use caller-provided linguistic context, but none of the
+            # token fields is a hard renderability requirement. Available token
+            # metadata is forwarded opportunistically.
+            token_fields=(),
             frontend="kittensynth",
             pronunciation="kitteng2p.ipa",
             capacity_key="max_tokens",

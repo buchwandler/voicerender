@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -351,6 +352,7 @@ def test_kokoro_fragment_uses_discovered_capacity_and_exact_token_contract(
 
 def test_kittensynth_authoritative_capacity_survives_profile_refresh(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     adapter = KittenSynthEngineAdapter()
     metadata = {
@@ -378,13 +380,36 @@ def test_kittensynth_authoritative_capacity_survives_profile_refresh(
         role="narrator",
         voice="Jasper",
     )
+    assert adapter.capabilities().supports_linguistic_tokens is True
+    assert profile.roles["narrator"].requirements.token_fields == ()
+    new_profile_path = tmp_path / "kitten-new.renderprofile.toml"
+    save_render_profile(profile, new_profile_path)
+    assert "token_fields = []" in new_profile_path.read_text(encoding="utf-8")
+
+    old_role = replace(
+        profile.roles["narrator"],
+        requirements=replace(
+            profile.roles["narrator"].requirements,
+            token_fields=("span", "pos", "tag", "lemma", "morph"),
+        ),
+    )
+    old_profile = replace(
+        profile,
+        roles={"narrator": old_role},
+        profile_id=None,
+    ).with_identity()
     metadata.update(
         max_tokens=128,
         capacity_policy_revision="kitten.capacity.v2",
     )
-    refreshed = refresh_render_profile(profile)
+    refreshed = refresh_render_profile(old_profile)
 
     role = refreshed.roles["narrator"]
+    assert refreshed.profile_id != old_profile.profile_id
+    assert role.requirements.token_fields == ()
+    refreshed_path = tmp_path / "kitten-refreshed.renderprofile.toml"
+    save_render_profile(refreshed, refreshed_path)
+    assert "token_fields = []" in refreshed_path.read_text(encoding="utf-8")
     assert role.renderer_capacity == CapacityConstraint(
         metric="model_tokens", maximum=128, guarantee="hard"
     )

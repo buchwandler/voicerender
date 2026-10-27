@@ -318,7 +318,18 @@ def _install_fake_kittensynth(
             return cls()
 
         def measure_prepared(self, text: str, **kwargs: Any) -> Any:
-            events.append(("measure", text))
+            events.append(
+                (
+                    "measure",
+                    SimpleNamespace(
+                        text=text,
+                        tokens=kwargs.get("tokens", ()),
+                        pronunciation_overrides=kwargs.get(
+                            "pronunciation_overrides", ()
+                        ),
+                    ),
+                )
+            )
             return SimpleNamespace(
                 token_count=amount,
                 max_tokens=maximum,
@@ -536,6 +547,16 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     }
     plan = _plan(("Kitten preflight", True, "sentence"), binding=binding)
 
+    sparse_item = replace(
+        plan.flow[0],
+        tokens=TokenBundle(
+            span=((0, 6), (7, 16)),
+            lemma=((0, "kitten"), (1, "preflight")),
+            morph=(),
+        ),
+        segment_id=None,
+    )
+    plan = replace(plan, flow=(sparse_item,), plan_id=None).with_identity()
     report = preflight_render_plan(plan, tmp_path / "kitten-preflight.toml")
 
     check = report.checks[0]
@@ -546,7 +567,10 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
     assert check.maximum == 256
     assert check.source == "kittensynth.measure_prepared"
     assert [event[0] for event in events] == ["measure", "close"]
-    assert events[0][1] == "Kitten preflight"
+    assert events[0][1].text == "Kitten preflight"
+    assert [
+        (token.text, token.lemma, token.morph) for token in events[0][1].tokens
+    ] == [("Kitten", "kitten", None), ("preflight", "preflight", None)]
 
 
 def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(
@@ -674,7 +698,7 @@ def test_kitten_preflight_defers_emphasis_to_composition(
     assert "audiocompose.emphasis.gain.v1" in check.detail
     assert "pending composition" in check.detail
     assert [event[0] for event in events] == ["measure", "close"]
-    assert events[0][1] == item.text
+    assert events[0][1].text == item.text
 
 
 def test_piper_render_defers_emphasis_to_composition_without_native_option(

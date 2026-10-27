@@ -31,6 +31,7 @@ from voicerender.engines.inflectsynth import (
     InflectSynthEngineAdapter,
     InflectSynthEngineSession,
 )
+from voicerender.engines.kittensynth import KittenSynthEngineAdapter
 from voicerender.engines.kokoro import PyKokoroEngineAdapter
 from voicerender.engines.pipersynth import PiperSynthEngineAdapter
 from voicerender.engines.pocketsynth import (
@@ -240,6 +241,31 @@ def test_optional_tokens_are_preserved_for_supporting_adapter(
     assert [token.pos for token in request.tokens] == ["NOUN", "PUNCT", "NOUN"]
 
 
+def test_sparse_optional_kitten_tokens_convert_without_morphology(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.supports_tokens = True
+    adapter.required_fields = ()
+    item = _item(
+        text="read",
+        tokens=TokenBundle(
+            span=((0, 4),),
+            lemma=((0, "read"),),
+            morph=(),
+        ),
+    )
+
+    request = speech_request_from_renderplan(item)
+
+    assert len(request.tokens) == 1
+    assert request.tokens[0].text == "read"
+    assert request.tokens[0].lemma == "read"
+    assert request.tokens[0].pos is None
+    assert request.tokens[0].tag is None
+    assert request.tokens[0].morph is None
+
+
 def test_required_tokens_rejected_when_adapter_declares_no_token_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,6 +282,8 @@ def _builtin_renderplan_request(
     adapter: Any,
     *,
     speaker: str | int | None = 2,
+    tokens: TokenBundle | None = None,
+    text: str = "  Hello, world!  ",
 ) -> SpeechRequest:
     from voicerender import renderplan_input
 
@@ -287,11 +315,35 @@ def _builtin_renderplan_request(
     monkeypatch.setattr(adapter, "probe_api", lambda: probe)
     monkeypatch.setattr(adapter, "target_metadata", lambda selection: {})
     item = _item(
-        tokens=_complete_tokens(),
+        tokens=tokens if tokens is not None else _complete_tokens(),
+        text=text,
         binding_extra={"renderer": adapter.id},
         speaker=speaker,
     )
     return speech_request_from_renderplan(item)
+
+
+def test_kittensynth_profile_contract_converts_sparse_optional_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = KittenSynthEngineAdapter()
+    assert adapter.capabilities().supports_linguistic_tokens is True
+    request = _builtin_renderplan_request(
+        monkeypatch,
+        adapter,
+        speaker=None,
+        text="read",
+        tokens=TokenBundle(
+            span=((0, 4),),
+            lemma=((0, "read"),),
+            morph=(),
+        ),
+    )
+
+    assert len(request.tokens) == 1
+    assert request.tokens[0].text == "read"
+    assert request.tokens[0].lemma == "read"
+    assert request.tokens[0].morph is None
 
 
 @pytest.mark.parametrize(

@@ -33,6 +33,10 @@ semantics of `profile validate`, `inspect`, `show`, and `refresh`. The snapshot
 inside a generated RenderPlan variant remains `renderprofile.toml`.
 A profile has a canonical `profile_id`; RenderPlans carry that identity and copy
 the resolved role bindings needed to execute without reopening the profile.
+
+### Linguistic token requirements
+
+`requirements.token_fields` lists source fields that must be available on every projected token; it is not a list of every token field a renderer can consume. An adapter may support linguistic tokens while treating all such context as optional. Kitten consumes available linguistic token metadata opportunistically. Missing optional fields fall back to Kitten/Kitteng2p's normal pronunciation path; POS, tag, lemma, and morphology are not hard Kitten RenderProfile requirements.
 Refreshing engine metadata writes a proposal rather than overwriting user policy:
 
 ```bash

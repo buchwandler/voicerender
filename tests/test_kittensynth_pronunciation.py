@@ -56,14 +56,14 @@ def _selection(**options: Any) -> EngineSelection:
     )
 
 
-def test_kitten_capabilities_and_option_descriptors_advertise_pronunciation() -> None:
+def test_kitten_advertises_linguistic_support_without_hard_token_requirements() -> None:
     adapter = KittenSynthEngineAdapter()
 
     capabilities = adapter.capabilities()
     descriptors = adapter.option_descriptors()
 
     assert capabilities.supports_lexicons
-    assert capabilities.supports_linguistic_tokens
+    assert capabilities.supports_linguistic_tokens is True
     assert capabilities.supports_pronunciation_overrides
     assert capabilities.pronunciation_alphabets == frozenset({"ipa"})
     assert {
@@ -74,13 +74,8 @@ def test_kitten_capabilities_and_option_descriptors_advertise_pronunciation() ->
     } <= set(descriptors)
     assert descriptors["lexicon_data_policy"].choices == ("auto", "installed-only")
     assert descriptors["heteronym_policy"].choices == ("auto", "off")
-    assert adapter.renderprofile_fragment(_selection()).token_fields == (
-        "span",
-        "pos",
-        "tag",
-        "lemma",
-        "morph",
-    )
+    fragment = adapter.renderprofile_fragment(_selection())
+    assert fragment.token_fields == ()
 
 
 def test_request_tokens_and_ipa_overrides_are_forwarded_to_measure_and_synthesis(
@@ -152,11 +147,90 @@ def test_request_tokens_and_ipa_overrides_are_forwarded_to_measure_and_synthesis
     measured_kwargs = voice.measure_args[0][1]
     synthesized_kwargs = voice.synthesis_args[0][1]
     for forwarded in (measured_kwargs, synthesized_kwargs):
+        assert forwarded["tokens"][0].start == 0
+        assert forwarded["tokens"][0].end == 4
         assert forwarded["tokens"][0].text == "read"
+        assert forwarded["tokens"][0].tag == "VB"
+        assert forwarded["tokens"][0].lemma == "read"
+        assert forwarded["tokens"][0].language == "en"
         assert forwarded["tokens"][0].pos == "VERB"
         assert forwarded["tokens"][0].morph == "Tense=Pres"
         assert forwarded["pronunciation_overrides"][0].phonemes == "ɹ iː d"
         assert forwarded["pronunciation_overrides"][0].alphabet == "ipa"
+
+
+def test_kitten_forwards_partial_tokens_to_measurement_and_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("kittensynth")
+    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "kittensynth", module)
+
+    class Voice:
+        def __init__(self) -> None:
+            self.measure_calls: list[tuple[str, dict[str, Any]]] = []
+            self.synthesis_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
+            self.measure_calls.append((text, kwargs))
+            return SimpleNamespace(
+                token_count=3,
+                max_tokens=32,
+                fits=True,
+                model_id="nano-0.8-int8",
+                metadata={},
+            )
+
+        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
+            self.synthesis_calls.append((args, kwargs))
+            return SimpleNamespace(
+                audio=np.array([0.0, 0.25], dtype=np.float32),
+                sample_rate=24000,
+                voice="Jasper",
+                model_ref="nano-0.8-int8",
+                speed=1.0,
+                metadata={},
+            )
+
+    voice = Voice()
+    session = KittenSynthEngineSession(voice, _selection())
+    partial = SpeechRequest(
+        id="partial-token-request",
+        text="read",
+        language="en-US",
+        tokens=(
+            SpeechToken(
+                start=0,
+                end=4,
+                text="read",
+                lemma="read",
+                pos=None,
+                tag=None,
+                morph=None,
+                language="en-US",
+            ),
+        ),
+    )
+    session.measure(partial)
+    session.synthesize(partial)
+
+    measured_token = voice.measure_calls[0][1]["tokens"][0]
+    synthesized_token = voice.synthesis_calls[0][1]["tokens"][0]
+    for token in (measured_token, synthesized_token):
+        assert token.start == 0
+        assert token.end == 4
+        assert token.text == "read"
+        assert token.lemma == "read"
+        assert token.pos is None
+        assert token.tag is None
+        assert token.morph is None
+
+    no_tokens = replace(partial, id="no-token-request", tokens=())
+    session.measure(no_tokens)
+    session.synthesize(no_tokens)
+    assert "tokens" not in voice.measure_calls[1][1]
+    assert "tokens" not in voice.synthesis_calls[1][1]
 
 
 def test_open_forwards_g2p_configuration_and_forces_installed_only_offline(
