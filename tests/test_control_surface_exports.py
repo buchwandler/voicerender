@@ -23,6 +23,7 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
         "ParsedVoiceSelector",
         "RoleProfile",
         "VoiceCloneRequest",
+        "SayAsSpan",
         "VoiceDescriptor",
         "VoiceKind",
         "BundleContractError",

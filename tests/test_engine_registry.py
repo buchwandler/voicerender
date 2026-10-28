@@ -167,6 +167,7 @@ def _fake_package(package: str) -> ModuleType:
         "PronunciationOverride",
         "VoiceLevelConfig",
         "SynthesisInputTooLongError",
+        "SayAsSpan",
         "KokoroSynthesizer",
         "ShortSentenceConfig",
         "ReferenceVoice",
@@ -303,10 +304,14 @@ def test_all_engine_probes_use_public_api_without_loading_models(
             caller_owns_text_boundaries=False,
         )
     elif engine == "kokoro":
+        fake.REQUEST_API_VERSION = 2
         fake.request_api_contract = lambda: SimpleNamespace(
+            version=2,
             supports_request_measurement=True,
             supports_reference_voice=True,
             supports_voice_enrollment=True,
+            supports_say_as=True,
+            say_as_interpretations=("characters",),
         )
     original = importlib.import_module
     calls: list[str] = []

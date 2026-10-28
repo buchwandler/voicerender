@@ -133,6 +133,33 @@ class PronunciationSpan:
 
 
 @dataclass(frozen=True, slots=True)
+class SayAsSpan:
+    """Portable request-local text-interpretation semantics."""
+
+    start: int
+    end: int
+    interpret_as: str
+    format: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.start, bool) or not isinstance(self.start, int):
+            raise TypeError("SayAsSpan start must be an integer")
+        if isinstance(self.end, bool) or not isinstance(self.end, int):
+            raise TypeError("SayAsSpan end must be an integer")
+        if self.start < 0 or self.end <= self.start:
+            raise ValueError("SayAsSpan must have a non-empty, non-negative range")
+        if not isinstance(self.interpret_as, str):
+            raise TypeError("SayAsSpan interpret_as must be a string")
+        if not self.interpret_as.strip():
+            raise ValueError("SayAsSpan interpret_as must be non-empty")
+        if self.format is not None and not isinstance(self.format, str):
+            raise TypeError("SayAsSpan format must be a string or None")
+        if self.detail is not None and not isinstance(self.detail, str):
+            raise TypeError("SayAsSpan detail must be a string or None")
+
+
+@dataclass(frozen=True, slots=True)
 class SpeechRequest:
     """Prepared text and optional linguistic context for one engine synthesis."""
 
@@ -142,9 +169,24 @@ class SpeechRequest:
     voice: str | None = None
     speaker: str | int | None = None
     pronunciation_overrides: tuple[PronunciationSpan, ...] = ()
+    say_as: tuple[SayAsSpan, ...] = ()
     tokens: tuple[SpeechToken, ...] = ()
     whole_request_phonemes: str | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.whole_request_phonemes is not None and self.say_as:
+            raise ValueError(
+                "SpeechRequest cannot combine whole-request phonemes with say_as spans"
+            )
+        if any(
+            max(say_as.start, override.start) < min(say_as.end, override.end)
+            for say_as in self.say_as
+            for override in self.pronunciation_overrides
+        ):
+            raise ValueError(
+                "SpeechRequest cannot overlap say_as and pronunciation spans"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +237,8 @@ class EngineCapabilities:
     supports_speakers: bool = False
     supports_pronunciation_overrides: bool = False
     pronunciation_alphabets: frozenset[str] = frozenset()
+    supports_say_as: bool = False
+    say_as_interpretations: frozenset[str] = frozenset()
     supports_linguistic_tokens: bool = False
     supports_whole_request_phonemes: bool = False
     supports_lexicons: bool = False
@@ -523,6 +567,7 @@ __all__ = [
     "RenderProfileFragment",
     "RenderedSpeech",
     "RequestMeasure",
+    "SayAsSpan",
     "SpeechRequest",
     "SpeechToken",
     "SpeechWordTiming",

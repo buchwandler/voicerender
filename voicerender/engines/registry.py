@@ -361,6 +361,7 @@ def synthesize(
             "pronunciation_overrides": [
                 asdict(item) for item in request.pronunciation_overrides
             ],
+            "say_as": [asdict(item) for item in request.say_as],
             "tokens": [asdict(item) for item in request.tokens],
             "whole_request_phonemes": request.whole_request_phonemes,
         }

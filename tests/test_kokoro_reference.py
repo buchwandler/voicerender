@@ -19,15 +19,18 @@ from voicerender.engines.base import (
     PCM_RANGE_POLICY,
     EngineSelection,
     RenderedSpeech,
+    SayAsSpan,
     SpeechRequest,
     validate_rendered_speech,
 )
 from voicerender.engines.kokoro import (
+    PYKOKORO_REQUEST_API_VERSION,
     PYKOKORO_REQUIRED,
     PyKokoroEngineAdapter,
     _normalize_short_sentence,
     _normalize_voice_level,
     _pykokoro_discovery,
+    _pykokoro_request,
     _target_from_capabilities,
     _translate_pykokoro_error,
     _version_supported,
@@ -38,9 +41,9 @@ from voicerender.models import ModelDiscoveryError
 from voicerender.voice_sources import local_reference_source
 
 
-def test_pykokoro_minimum_version_is_0106() -> None:
-    assert not _version_supported("0.10.5")
-    assert _version_supported("0.10.6")
+def test_pykokoro_minimum_version_is_0107() -> None:
+    assert not _version_supported("0.10.6")
+    assert _version_supported("0.10.7")
     assert _version_supported("0.10.10")
     assert not _version_supported("0.11.0")
 
@@ -120,10 +123,14 @@ def _install(
         "closed": 0,
     }
     module = ModuleType("pykokoro")
-    module.__version__ = "0.10.5"
+    module.__version__ = "0.10.7"
     module.__file__ = "/fake/pykokoro/__init__.py"
 
     class FakeSynthesisRequest:
+        def __init__(self, **values: Any) -> None:
+            self.__dict__.update(values)
+
+    class FakeSayAsSpan:
         def __init__(self, **values: Any) -> None:
             self.__dict__.update(values)
 
@@ -193,6 +200,7 @@ def _install(
             state["closed"] += 1
 
     module.SynthesisRequest = FakeSynthesisRequest
+    module.SayAsSpan = FakeSayAsSpan
     module.GenerationConfig = FakeConfig
     module.TokenizerConfig = FakeConfig
     module.ShortSentenceConfig = FakeConfig
@@ -202,6 +210,94 @@ def _install(
     module.KokoroSynthesizer = FakeSynthesizer
     monkeypatch.setitem(sys.modules, "pykokoro", module)
     return PyKokoroEngineAdapter(), state
+
+
+def _api_probe_module(
+    *, api_version: int = 2, supports_say_as: bool = True
+) -> ModuleType:
+    module = ModuleType("pykokoro")
+    module.__version__ = "0.10.7"
+    module.__file__ = "/fake/pykokoro/__init__.py"
+
+    class FakeSynthesizer:
+        pass
+
+    for method in ("prepare", "measure_request", "enroll_voice", "synthesize", "close"):
+        setattr(FakeSynthesizer, method, lambda *args, **kwargs: None)
+    module.KokoroSynthesizer = FakeSynthesizer
+    for name in (
+        "SynthesisConfig",
+        "SynthesisRequest",
+        "PronunciationOverride",
+        "LinguisticToken",
+        "VoiceLevelConfig",
+        "SynthesisInputTooLongError",
+        "ShortSentenceConfig",
+        "RequestMeasure",
+        "ReferenceVoice",
+        "KokoroVoicePack",
+        "InnoEnrollmentOptions",
+        "SayAsSpan",
+    ):
+        setattr(module, name, type(name, (), {}))
+    module.REQUEST_API_VERSION = api_version
+    module.request_api_contract = lambda: SimpleNamespace(
+        supports_request_measurement=True,
+        supports_reference_voice=True,
+        supports_voice_enrollment=True,
+        supports_say_as=supports_say_as,
+        say_as_interpretations=("characters",),
+    )
+    return module
+
+
+def test_kokoro_probe_requires_request_api_v2_and_say_as_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_api = _api_probe_module(api_version=1)
+    monkeypatch.setitem(sys.modules, "pykokoro", old_api)
+    old_probe = PyKokoroEngineAdapter().probe_api()
+    assert not old_probe.compatible
+    assert old_probe.expected_api_version == PYKOKORO_REQUEST_API_VERSION == 2
+    assert old_probe.api_version == 1
+
+    no_say_as = _api_probe_module(supports_say_as=False)
+    monkeypatch.setitem(sys.modules, "pykokoro", no_say_as)
+    missing_capability = PyKokoroEngineAdapter().probe_api()
+    assert not missing_capability.compatible
+    assert (
+        missing_capability.details["capability_mismatches"]["supports_say_as"]["actual"]
+        is False
+    )
+
+
+def test_pykokoro_request_forwards_say_as_without_changing_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _ = _install(monkeypatch, _model())
+    del adapter
+    module = sys.modules["pykokoro"]
+    text = "Because someone called A R T finally."
+    start = text.index("A R T")
+    request = SpeechRequest(
+        id="say-as-request",
+        text=text,
+        language="en-US",
+        say_as=(SayAsSpan(start, start + len("A R T"), "characters"),),
+    )
+
+    native = _pykokoro_request(request, module)
+
+    assert native.text == text
+    assert len(native.say_as) == 1
+    forwarded = native.say_as[0]
+    assert (forwarded.start, forwarded.end, forwarded.interpret_as) == (
+        start,
+        start + len("A R T"),
+        "characters",
+    )
+    assert native.text[forwarded.start : forwarded.end] == "A R T"
+    assert "A- R- T" not in native.text
 
 
 def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> None:
@@ -689,6 +785,9 @@ def test_kokoro_shorthand_and_equivalent_tables_share_synthesis_identity() -> No
         adapter.canonical_synthesis_identity(shorthand)["options"]
         == adapter.canonical_synthesis_identity(tables)["options"]
     )
+
+    assert adapter.capabilities().supports_say_as is True
+    assert adapter.capabilities().say_as_interpretations == frozenset({"characters"})
 
 
 def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
@@ -1181,12 +1280,14 @@ def test_real_pykokoro_public_api_contract_smoke_without_runtime_load() -> None:
     probe = adapter.probe_api()
     contract = pykokoro.request_api_contract()
 
-    assert pykokoro.REQUEST_API_VERSION == 1
+    assert pykokoro.REQUEST_API_VERSION == 2
     assert probe.compatible, probe
-    assert probe.api_version == 1
+    assert probe.api_version == 2
     assert contract.supports_request_measurement is True
     assert contract.supports_reference_voice is True
     assert contract.supports_voice_enrollment is True
+    assert contract.supports_say_as is True
+    assert "characters" in contract.say_as_interpretations
 
 
 class BackendError(Exception):

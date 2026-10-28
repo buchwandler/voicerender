@@ -3,12 +3,14 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 from renderplan import (
     CapacityConstraint,
+    RenderPlan,
     SourceSpan,
     SpeechControl,
     SpeechItem,
@@ -24,6 +26,7 @@ from voicerender.engines.base import (
     PronunciationSpan,
     RenderProfileFragment,
     RequestMeasure,
+    SayAsSpan,
     SpeechRequest,
     SpeechToken,
 )
@@ -52,6 +55,7 @@ from voicerender.errors import (
     SpeechRequestTooLongError,
     UnsupportedSynthesisFeatureError,
 )
+from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_input import (
     PreflightDisposition,
     classify_measurement,
@@ -71,6 +75,8 @@ class _Adapter:
         self.supports_tokens = True
         self.native_semantics: frozenset[str] = frozenset()
         self.pronunciation = True
+        self.supports_say_as = False
+        self.say_as_interpretations: frozenset[str] = frozenset()
         self.lowered_controls: list[SpeechControl] = []
 
     def probe_api(self) -> EngineApiProbe:
@@ -89,6 +95,8 @@ class _Adapter:
             id=self.id,
             supports_pronunciation_overrides=self.pronunciation,
             pronunciation_alphabets=frozenset({"ipa"}),
+            supports_say_as=self.supports_say_as,
+            say_as_interpretations=self.say_as_interpretations,
             supports_linguistic_tokens=self.supports_tokens,
             native_semantics=self.native_semantics,
         )
@@ -645,6 +653,134 @@ def test_emphasis_without_downstream_policy_and_unknown_controls_fail_closed(
         match="does not declare support for 'extension:example'",
     ):
         speech_request_from_renderplan(extension, emphasis_policy="defer-to-compose")
+
+
+def test_unsupported_say_as_characters_is_rejected_during_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.required_fields = ()
+    item = _item(
+        text="A R T",
+        controls=(SpeechControl(0, 5, "say_as", {"interpret_as": "characters"}),),
+    )
+    plan = RenderPlan(
+        source_plan_id="sha256:" + "1" * 64,
+        render_profile_id="sha256:" + "2" * 64,
+        flow=(item,),
+    ).with_identity()
+
+    report = preflight_render_plan(plan, tmp_path / "say-as-preflight.toml")
+
+    assert report.status == "reject"
+    assert len(report.checks) == 1
+    check = report.checks[0]
+    assert check.status == "error"
+    assert check.detail is not None
+    assert "does not support say_as='characters'" in check.detail
+    assert not adapter.lowered_controls
+
+
+def test_say_as_control_lowers_to_typed_span_without_changing_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.required_fields = ()
+    adapter.supports_say_as = True
+    adapter.say_as_interpretations = frozenset({"characters"})
+    text = "Because someone called A R T finally."
+    start = text.index("A R T")
+    item = _item(
+        text=text,
+        controls=(
+            SpeechControl(
+                start=start,
+                end=start + len("A R T"),
+                name="say_as",
+                params={"interpret_as": "characters"},
+            ),
+        ),
+    )
+
+    request = speech_request_from_renderplan(item)
+
+    assert request.text == text
+    assert request.say_as == (
+        SayAsSpan(
+            start=start,
+            end=start + len("A R T"),
+            interpret_as="characters",
+        ),
+    )
+    assert "renderplan_controls" not in request.options
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"interpret_as": "  "},
+        {"interpret_as": "characters", "format": 1},
+        {"interpret_as": "characters", "detail": None},
+        {"interpret_as": "characters", "extra": "value"},
+    ],
+)
+def test_say_as_invalid_parameters_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.required_fields = ()
+    adapter.supports_say_as = True
+    adapter.say_as_interpretations = frozenset({"characters"})
+    control = SpeechControl(0, 5, "say_as", {"interpret_as": "characters"})
+    item = _item(text="A R T", controls=(control,))
+    object.__setattr__(control, "params", params)
+
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="say_as"):
+        speech_request_from_renderplan(item)
+
+
+def test_say_as_rejects_unsupported_interpretation_and_pronunciation_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _install(monkeypatch)
+    adapter.required_fields = ()
+    adapter.supports_say_as = True
+    adapter.say_as_interpretations = frozenset({"date"})
+    item = _item(
+        text="A R T",
+        controls=(SpeechControl(0, 5, "say_as", {"interpret_as": "characters"}),),
+    )
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError,
+        match="does not support say_as='characters'",
+    ):
+        speech_request_from_renderplan(item)
+
+    adapter.say_as_interpretations = frozenset({"characters"})
+    overlapping = _item(
+        text="A R T",
+        controls=(
+            SpeechControl(0, 5, "say_as", {"interpret_as": "characters"}),
+            SpeechControl(2, 5, "pronunciation", {"phonemes": "ɑːɹ tiː"}),
+        ),
+    )
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError,
+        match="cannot overlap pronunciation",
+    ):
+        speech_request_from_renderplan(overlapping)
+
+
+def test_speech_request_rejects_say_as_with_whole_request_phonemes() -> None:
+    with pytest.raises(ValueError, match="whole-request phonemes"):
+        SpeechRequest(
+            id="request-1",
+            text="A R T",
+            language="en-US",
+            whole_request_phonemes="ɑːɹ tiː",
+            say_as=(SayAsSpan(0, 5, "characters"),),
+        )
 
 
 @pytest.mark.parametrize(

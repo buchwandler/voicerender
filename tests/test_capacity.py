@@ -7,12 +7,14 @@ from voicerender import synthesize
 from voicerender.capacity import (
     CapacityContext,
     SemanticBoundary,
+    _slice_request,
     render_atomic_request,
 )
 from voicerender.engines.base import (
     PronunciationSpan,
     RenderedSpeech,
     RequestMeasure,
+    SayAsSpan,
     SpeechRequest,
     SpeechToken,
     SpeechWordTiming,
@@ -25,8 +27,10 @@ class _MeasuredSession:
         self.maximum = maximum
         self.sample_rate = sample_rate
         self.calls: list[SpeechRequest] = []
+        self.measure_calls: list[SpeechRequest] = []
 
     def measure(self, request: SpeechRequest) -> RequestMeasure:
+        self.measure_calls.append(request)
         amount = len(request.text)
         return RequestMeasure(
             fits=amount <= self.maximum,
@@ -278,7 +282,93 @@ def test_planned_semantic_boundary_inside_pronunciation_span_is_rejected() -> No
         item["split"].get("semantic_boundary_id") != boundary.semantic_boundary_id
         for item in rendered.manifest["requests"]
     )
+
+
+def test_capacity_say_as_span_is_atomic_rebased_and_serialized() -> None:
+    text = "one two A R T three four"
+    span_start = text.index("A R T")
+    span = SayAsSpan(span_start, span_start + len("A R T"), "characters")
+    request = _request(text, say_as=(span,))
+    session = _MeasuredSession(10)
+
+    rendered = render_atomic_request(session, request)
+
     assert "".join(child.text for child in session.calls) == text
+    assert len(rendered.requests) > 1
+    span_children = [
+        child.request for child in rendered.requests if child.request.say_as
+    ]
+    assert len(span_children) == 1
+    child = span_children[0]
+    child_span = child.say_as[0]
+    assert child.text[child_span.start : child_span.end] == "A R T"
+    assert child_span.start == span_start - next(
+        item.char_start for item in rendered.requests if item.request is child
+    )
+
+    child_by_id = {item.request.id: item.request for item in rendered.requests}
+    for request_id, child_request in child_by_id.items():
+        measured = [item for item in session.measure_calls if item.id == request_id]
+        assert measured
+        assert all(
+            (item.text, item.say_as) == (child_request.text, child_request.say_as)
+            for item in measured
+        )
+
+    diagnostic = next(
+        item.to_dict() for item in rendered.requests if item.request.say_as
+    )
+    assert diagnostic["request"]["say_as"] == [
+        {
+            "start": child_span.start,
+            "end": child_span.end,
+            "interpret_as": "characters",
+            "format": None,
+            "detail": None,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="partially overlaps a say_as span"):
+        _slice_request(request, span_start + 1, len(text))
+
+
+def test_fitting_request_with_say_as_stays_one_child() -> None:
+    text = "A R T fits."
+    request = _request(
+        text,
+        say_as=(SayAsSpan(0, len("A R T"), "characters"),),
+    )
+    session = _MeasuredSession(100)
+
+    rendered = render_atomic_request(session, request)
+
+    assert len(session.calls) == 1
+    assert session.calls[0].text == text
+    assert session.calls[0].say_as == request.say_as
+    assert rendered.requests[0].request.say_as == request.say_as
+    assert "".join(child.text for child in session.calls) == text
+
+
+def test_live_acoustic_request_identity_includes_say_as() -> None:
+    request = _request(
+        "A R T",
+        say_as=(SayAsSpan(0, 5, "characters", format="spell-out"),),
+    )
+    session = _MeasuredSession(100)
+    session.synthesis_identity = {"engine": "test"}
+
+    result = synthesize(session, request)
+
+    identity = result.metadata["acoustic_identity"]["request"]
+    assert identity["say_as"] == [
+        {
+            "start": 0,
+            "end": 5,
+            "interpret_as": "characters",
+            "format": "spell-out",
+            "detail": None,
+        }
+    ]
 
 
 def test_capacity_fitting_preserves_leading_trailing_and_repeated_whitespace():

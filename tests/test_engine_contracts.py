@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from voicerender.engines.base import (
+    PronunciationSpan,
     RenderedSpeech,
+    SayAsSpan,
     SpeechRequest,
     validate_rendered_speech,
 )
@@ -15,6 +17,33 @@ def _validate(audio: np.ndarray) -> RenderedSpeech:
     request = SpeechRequest(id="request-1", text="hello", language="en-US")
     result = RenderedSpeech(id=request.id, audio=audio, sample_rate=24000)
     return validate_rendered_speech(request, result, engine="fake")
+
+
+def test_say_as_span_validates_basic_fields() -> None:
+    span = SayAsSpan(0, 3, "characters", format="spell-out", detail="letters")
+    assert span.start == 0
+    assert span.end == 3
+    assert span.interpret_as == "characters"
+
+    with pytest.raises(TypeError, match="start"):
+        SayAsSpan(True, 3, "characters")
+    with pytest.raises(ValueError, match="range"):
+        SayAsSpan(3, 3, "characters")
+    with pytest.raises(ValueError, match="interpret_as"):
+        SayAsSpan(0, 1, "  ")
+    with pytest.raises(TypeError, match="detail"):
+        SayAsSpan(0, 1, "characters", detail=1)  # type: ignore[arg-type]
+
+
+def test_speech_request_rejects_overlapping_say_as_and_pronunciation() -> None:
+    with pytest.raises(ValueError, match="overlap say_as and pronunciation"):
+        SpeechRequest(
+            id="request-1",
+            text="A R T",
+            language="en-US",
+            pronunciation_overrides=(PronunciationSpan(2, 5, phonemes="ɑːɹ tiː"),),
+            say_as=(SayAsSpan(0, 5, "characters"),),
+        )
 
 
 def test_rendered_speech_accepts_pcm_full_scale_peak() -> None:

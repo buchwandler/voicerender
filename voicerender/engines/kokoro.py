@@ -36,7 +36,7 @@ from ..voice_sources import (
     validate_voice_source,
     voice_source_identity,
 )
-from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
+from .api_probe import EngineApiProbe, probe_public_api
 from .base import (
     PCM_RANGE_POLICY,
     EngineCapabilities,
@@ -46,6 +46,7 @@ from .base import (
     RenderedSpeech,
     RenderProfileFragment,
     RequestMeasure,
+    SayAsSpan,
     SpeechRequest,
     SpeechToken,
     SpeechWordTiming,
@@ -62,7 +63,8 @@ from .registry import normalize_engine_id
 logger = logging.getLogger(__name__)
 
 
-PYKOKORO_REQUIRED = ">=0.10.6,<0.11"
+PYKOKORO_REQUIRED = ">=0.10.7,<0.11"
+PYKOKORO_REQUEST_API_VERSION = 2
 _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
 
 
@@ -82,7 +84,7 @@ def _version_supported(version: str) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     patch = int(match.group(3) or 0)
-    return (major, minor, patch) >= (0, 10, 6) and (major, minor) == (0, 10)
+    return (major, minor, patch) >= (0, 10, 7) and (major, minor) == (0, 10)
 
 
 def _package_metadata() -> str | None:
@@ -774,6 +776,7 @@ def _pykokoro_request(
             _pykokoro_override(item, module) for item in request.pronunciation_overrides
         ),
         tokens=tuple(_pykokoro_token(item, module) for item in request.tokens),
+        say_as=tuple(_pykokoro_say_as(item, module) for item in request.say_as),
         phonemes=request.whole_request_phonemes,
     )
 
@@ -977,6 +980,16 @@ def _pykokoro_override(item: PronunciationSpan, module: Any) -> Any:
     )
 
 
+def _pykokoro_say_as(item: SayAsSpan, module: Any) -> Any:
+    return module.SayAsSpan(
+        start=item.start,
+        end=item.end,
+        interpret_as=item.interpret_as,
+        format=item.format,
+        detail=item.detail,
+    )
+
+
 def _pykokoro_token(item: SpeechToken, module: Any) -> Any:
     return module.LinguisticToken(
         start=item.start,
@@ -1008,6 +1021,7 @@ class PyKokoroEngineAdapter:
                 "SynthesisConfig",
                 "SynthesisRequest",
                 "PronunciationOverride",
+                "SayAsSpan",
                 "LinguisticToken",
                 "VoiceLevelConfig",
                 "SynthesisInputTooLongError",
@@ -1026,7 +1040,7 @@ class PyKokoroEngineAdapter:
                     "close",
                 ),
             },
-            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
+            expected_api_version=PYKOKORO_REQUEST_API_VERSION,
             require_explicit_contract=True,
             contract_required_symbols=("REQUEST_API_VERSION", "request_api_contract"),
             contract_required_methods={
@@ -1043,6 +1057,7 @@ class PyKokoroEngineAdapter:
                 "supports_request_measurement": True,
                 "supports_reference_voice": True,
                 "supports_voice_enrollment": True,
+                "supports_say_as": True,
             }
             actual = {
                 name: (
@@ -1057,6 +1072,19 @@ class PyKokoroEngineAdapter:
                 for name, expected in required.items()
                 if actual[name] is not expected
             }
+            say_as_interpretations = (
+                contract.get("say_as_interpretations")
+                if isinstance(contract, Mapping)
+                else getattr(contract, "say_as_interpretations", None)
+            )
+            if (
+                not isinstance(say_as_interpretations, (tuple, list))
+                or "characters" not in say_as_interpretations
+            ):
+                mismatches["say_as_interpretations"] = {
+                    "expected": ["characters"],
+                    "actual": say_as_interpretations,
+                }
         except Exception as exc:  # noqa: BLE001 - API probes must fail closed.
             return replace(
                 probe,
@@ -1211,6 +1239,8 @@ class PyKokoroEngineAdapter:
             supports_named_voices=True,
             supports_reference_voice=True,
             supports_pronunciation_overrides=True,
+            supports_say_as=True,
+            say_as_interpretations=frozenset({"characters"}),
             pronunciation_alphabets=frozenset({"ipa"}),
             supports_linguistic_tokens=True,
             supports_whole_request_phonemes=True,

@@ -65,6 +65,8 @@ An interrupted renderer's lock is reclaimed automatically only when the same-hos
 
 Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
 
+RenderPlan `say_as` controls lower to typed request-local `SayAsSpan` values. Kokoro forwards those spans and the unchanged canonical text to PyKokoro, which owns character-spelling realization; adapters that do not advertise the requested interpretation reject it during preflight.
+
 Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
 
 ## Engine failure diagnostics

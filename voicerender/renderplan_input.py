@@ -15,6 +15,7 @@ from .engines.base import (
     PronunciationSpan,
     RenderProfileFragment,
     RequestMeasure,
+    SayAsSpan,
     SpeechRequest,
     SpeechToken,
 )
@@ -54,6 +55,16 @@ class EmphasisPolicy(str, Enum):
 
     REJECT = "reject"
     DEFER_TO_COMPOSE = "defer-to-compose"
+
+
+@dataclass(frozen=True, slots=True)
+class LoweredControls:
+    """Structured results from lowering all RenderPlan speech controls."""
+
+    pronunciation_overrides: tuple[PronunciationSpan, ...] = ()
+    say_as: tuple[SayAsSpan, ...] = ()
+    native_options: tuple[Mapping[str, Any], ...] = ()
+    deferred_emphasis_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,28 +218,27 @@ def speech_request_conversion_from_renderplan(
             f"Engine {adapter.id!r} returned an invalid RenderProfile fragment"
         )
     tokens = _tokens_for_engine(item, adapter=adapter, fragment=fragment)
-    overrides, control_options, deferred_count = _lower_controls(
-        item, adapter, selection, emphasis_policy=policy
-    )
+    lowered = _lower_controls(item, adapter, selection, emphasis_policy=policy)
     options = dict(selection.options)
-    if control_options:
-        options["renderplan_controls"] = control_options
+    if lowered.native_options:
+        options["renderplan_controls"] = lowered.native_options
     request = SpeechRequest(
         id=item.segment_id or item.computed_id(),
         text=item.text,
         language=item.language,
         voice=selection.voice,
         speaker=selection.speaker,
-        pronunciation_overrides=overrides,
+        pronunciation_overrides=lowered.pronunciation_overrides,
+        say_as=lowered.say_as,
         tokens=tokens,
         options=options,
     )
     return SpeechRequestConversion(
         request=request,
         deferred_capability=(
-            EMPHASIS_COMPOSITION_CAPABILITY if deferred_count else None
+            EMPHASIS_COMPOSITION_CAPABILITY if lowered.deferred_emphasis_count else None
         ),
-        deferred_control_count=deferred_count,
+        deferred_control_count=lowered.deferred_emphasis_count,
     )
 
 
@@ -364,15 +374,15 @@ def classify_measurement(
         return MeasurementOutcome(
             PreflightDisposition.TOO_LONG, measurement=measurement
         )
-    source = getattr(value, "source", None)
-    if isinstance(source, str) and source.strip():
+    unknown_source = getattr(value, "source", None)
+    if isinstance(unknown_source, str) and unknown_source.strip():
         details = getattr(value, "details", {})
         measurement = RequestMeasure(
             fits=None,
             amount=None,
             maximum=None,
             unit="unknown",
-            source=source,
+            source=unknown_source,
             details=dict(details) if isinstance(details, Mapping) else {},
         )
         return MeasurementOutcome(
@@ -516,9 +526,10 @@ def _lower_controls(
     selection: EngineSelection,
     *,
     emphasis_policy: EmphasisPolicy,
-) -> tuple[tuple[PronunciationSpan, ...], tuple[Mapping[str, Any], ...], int]:
+) -> LoweredControls:
     capabilities = adapter.capabilities()
     overrides: list[PronunciationSpan] = []
+    say_as: list[SayAsSpan] = []
     lowered: list[Mapping[str, Any]] = []
     deferred_emphasis_count = 0
     for control in item.controls:
@@ -568,6 +579,51 @@ def _lower_controls(
             )
             continue
 
+        if control.name == "say_as":
+            params = control.params
+            if not isinstance(params, Mapping):
+                raise UnsupportedSynthesisFeatureError(
+                    "say_as control parameters must be a table"
+                )
+            unknown = set(params).difference({"interpret_as", "format", "detail"})
+            if unknown:
+                raise UnsupportedSynthesisFeatureError(
+                    "Unsupported say_as control parameter(s): "
+                    + ", ".join(sorted(str(name) for name in unknown))
+                )
+            interpret_as = params.get("interpret_as")
+            if not isinstance(interpret_as, str) or not interpret_as.strip():
+                raise UnsupportedSynthesisFeatureError(
+                    "say_as control requires non-empty interpret_as"
+                )
+            format_value = params.get("format")
+            detail_value = params.get("detail")
+            if "format" in params and not isinstance(format_value, str):
+                raise UnsupportedSynthesisFeatureError(
+                    "say_as format must be a string when present"
+                )
+            if "detail" in params and not isinstance(detail_value, str):
+                raise UnsupportedSynthesisFeatureError(
+                    "say_as detail must be a string when present"
+                )
+            if (
+                not capabilities.supports_say_as
+                or interpret_as not in capabilities.say_as_interpretations
+            ):
+                raise UnsupportedSynthesisFeatureError(
+                    f"Engine {adapter.id!r} does not support say_as={interpret_as!r}"
+                )
+            say_as.append(
+                SayAsSpan(
+                    start=control.start,
+                    end=control.end,
+                    interpret_as=interpret_as,
+                    format=format_value,
+                    detail=detail_value,
+                )
+            )
+            continue
+
         if control.name == "emphasis":
             if emphasis_policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
                 raise UnsupportedSynthesisFeatureError(
@@ -612,7 +668,22 @@ def _lower_controls(
                 "options": dict(lowered_options["options"]),
             }
         )
-    return tuple(overrides), tuple(lowered), deferred_emphasis_count
+
+    if any(
+        max(say_span.start, pronunciation.start) < min(say_span.end, pronunciation.end)
+        for say_span in say_as
+        for pronunciation in overrides
+    ):
+        raise UnsupportedSynthesisFeatureError(
+            "say_as spans cannot overlap pronunciation controls"
+        )
+
+    return LoweredControls(
+        pronunciation_overrides=tuple(overrides),
+        say_as=tuple(say_as),
+        native_options=tuple(lowered),
+        deferred_emphasis_count=deferred_emphasis_count,
+    )
 
 
 def _validate_control_range(item: SpeechItem, control: SpeechControl) -> None:

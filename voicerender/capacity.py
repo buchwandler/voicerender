@@ -12,6 +12,7 @@ from .engines.base import (
     PronunciationSpan,
     RenderedSpeech,
     RequestMeasure,
+    SayAsSpan,
     SpeechRequest,
     SpeechToken,
     SpeechWordTiming,
@@ -92,6 +93,7 @@ class AtomicRequest:
                     "voice": request.voice,
                     "speaker": request.speaker,
                     "pronunciation_overrides": request.pronunciation_overrides,
+                    "say_as": request.say_as,
                     "tokens": request.tokens,
                     "whole_request_phonemes": request.whole_request_phonemes,
                     "options": request.options,
@@ -289,6 +291,7 @@ def _collect_protected_ranges(
 ) -> tuple[tuple[int, int], ...]:
     ranges = [(token.start, token.end) for token in request.tokens]
     ranges.extend((span.start, span.end) for span in request.pronunciation_overrides)
+    ranges.extend((span.start, span.end) for span in request.say_as)
     ranges.extend(extra)
     for start, end in ranges:
         if start < 0 or start >= end or end > len(request.text):
@@ -329,6 +332,20 @@ def _slice_request(request: SpeechRequest, start: int, end: int) -> SpeechReques
         for span in request.pronunciation_overrides
         if span.start >= start and span.end <= end
     )
+    say_as: list[SayAsSpan] = []
+    for span in request.say_as:
+        if span.start >= start and span.end <= end:
+            say_as.append(
+                SayAsSpan(
+                    start=span.start - start,
+                    end=span.end - start,
+                    interpret_as=span.interpret_as,
+                    format=span.format,
+                    detail=span.detail,
+                )
+            )
+        elif span.start < end and span.end > start:
+            raise ValueError("capacity child partially overlaps a say_as span")
     return SpeechRequest(
         id=child_id,
         text=text,
@@ -336,6 +353,7 @@ def _slice_request(request: SpeechRequest, start: int, end: int) -> SpeechReques
         voice=request.voice,
         speaker=request.speaker,
         pronunciation_overrides=overrides,
+        say_as=tuple(say_as),
         tokens=tokens,
         whole_request_phonemes=request.whole_request_phonemes,
         options=dict(request.options),

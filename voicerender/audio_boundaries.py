@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from importlib import import_module
+from typing import Any, cast
 
 import numpy as np
-from audiosig import trim_trail
 
 from .engines.base import SpeechWordTiming
+
+trim_trail = cast(
+    Callable[..., np.ndarray],
+    vars(import_module("audiosig.boundaries"))["trim_trail"],
+)
 
 BOUNDARY_POLICY_ID = "voicerender.trailing-silence.v1"
 
