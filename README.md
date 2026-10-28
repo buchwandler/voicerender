@@ -187,7 +187,7 @@ RenderProfile is the complete cast for one render variant. Each logical role is 
 ```bash
 voicerender profile create \
   --role narrator --engine kokoro --target v1.0 --voice af_heart \
-  --language en-US --offline -o printer-cast.renderprofile.toml
+  --language en-US --offline --short-sentence phrase -o printer-cast.renderprofile.toml
 voicerender profile bind printer-cast.renderprofile.toml host \
   --engine kitten --target mini-0.8 --voice Jasper \
   --language en-US --offline --in-place
@@ -198,7 +198,11 @@ voicerender profile show printer-cast.renderprofile.toml
 voicerender profile validate printer-cast.renderprofile.toml
 ```
 
-The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes normalized speech artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+
+### Speech artifacts and pause policy
+
+VoiceRender applies engine-neutral, trailing-only silence normalization before it writes a speech WAV or caches it. Leading samples are preserved and all-silent audio remains unchanged. This keeps the speech artifact tight; it does not insert the profile's policy pauses. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for downstream composition after normalized speech. With `mode = "none"`, no policy pause is inserted. `profile show` reports the mode, manual durations, and this composition boundary. Boundary policy is included in artifact identity, so output produced under a missing or different policy is treated as stale rather than silently reused; re-render with `--force` or reset with `--reset-stale`.
 
 ## ONNX Runtime provider policy
 
@@ -264,6 +268,18 @@ Preflight validates local content pins and managed catalog metadata, and measure
 ### Kokoro quality and voice-level options
 
 Inspect Kokoro's accepted settings and their structured field descriptions with `voicerender engines options kokoro --json`. Existing string shorthand remains supported: `short_sentence` accepts `off`, `wrap`, `phrase`, or `randomized-phrase`; `voice_level` accepts `off` or `calibrated`. The structured forms expose the PyKokoro controls without adding VoiceRender-side audio processing:
+
+For profile creation and binding, `--short-sentence {off,wrap,phrase,randomized-phrase}` is a convenience for setting the Kokoro `short_sentence` option. It is opt-in: omitting it leaves PyKokoro's short-sentence behavior unset, while `--short-sentence off` records an explicit disable. The flag is available on both `profile create` and `profile bind`; do not combine it with `--option short_sentence=...`. Use the generic option for structured settings:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target v1.0 --voice af_heart --language en-US \
+  --short-sentence phrase -o kokoro.renderprofile.toml
+
+voicerender profile bind kokoro.renderprofile.toml narrator \
+  --engine kokoro --target v1.0 --voice af_heart --language en-US \
+  --short-sentence off --in-place
+```
 
 ```bash
 voicerender profile create \
@@ -546,7 +562,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **No implicit model downloads:** install SDKs and assets through each engine's supported process.
 - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
 - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
-- **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
+- **Speech artifact boundaries:** VoiceRender trims trailing silence before caching and writing each speech WAV; leading samples and all-silent input are preserved, and profile pauses remain a separate composition policy.
 - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
 
 ## Tests

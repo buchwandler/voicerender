@@ -44,6 +44,11 @@ def test_engine_options_lists_all_accepted_names_and_optional_metadata(
 def test_kokoro_options_expose_shorthand_and_structured_capabilities() -> None:
     options = {option.name: option for option in engine_options("kokoro")}
 
+    assert "opt-in" in options["short_sentence"].description.lower()
+    assert (
+        "conditional default" in options["short_sentence.enabled"].description.lower()
+    )
+    assert "table is present" in options["short_sentence.enabled"].description.lower()
     assert options["short_sentence"].value_type == "string|table"
     assert "randomized-phrase" in options["short_sentence"].choices
     assert options["short_sentence.resolve_mode"].default == "randomized-phrase"

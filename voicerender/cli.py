@@ -147,6 +147,11 @@ def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None
     )
     parser.add_argument("--speaker")
     parser.add_argument(
+        "--short-sentence",
+        choices=("off", "wrap", "phrase", "randomized-phrase"),
+        help="Explicitly configure Kokoro short-sentence processing",
+    )
+    parser.add_argument(
         "--option",
         action="append",
         default=[],
@@ -353,6 +358,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
     )
     profile_create.add_argument("--speaker")
+    profile_create.add_argument(
+        "--short-sentence",
+        choices=("off", "wrap", "phrase", "randomized-phrase"),
+        help="Explicitly configure Kokoro short-sentence processing",
+    )
     profile_create.add_argument(
         "--option",
         action="append",
@@ -1125,6 +1135,31 @@ def _profile_pronunciation_options(
     return result
 
 
+def _profile_short_sentence_option(
+    engine: str,
+    options: Mapping[str, Any],
+    mode: str | None,
+) -> dict[str, Any]:
+    """Merge the Kokoro convenience mode into its canonical engine option."""
+    result = dict(options)
+    if mode is None:
+        return result
+    if engine.strip().casefold() != "kokoro":
+        raise InvalidEngineOptionError(
+            "--short-sentence is only supported for Kokoro profiles",
+            code="kokoro.short_sentence_engine_invalid",
+            engine=engine,
+        )
+    if "short_sentence" in result:
+        raise InvalidEngineOptionError(
+            "--short-sentence conflicts with --option short_sentence=...",
+            code="kokoro.short_sentence_option_conflict",
+            engine=engine,
+        )
+    result["short_sentence"] = mode
+    return result
+
+
 def _pronunciation_stack_for_binding(
     binding: Mapping[str, Any], language: str
 ) -> dict[str, Any] | None:
@@ -1233,7 +1268,34 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+def _kokoro_short_sentence_lines(options: Any) -> tuple[str, ...]:
+    if not isinstance(options, Mapping) or "short_sentence" not in options:
+        return ("short sentence: off (implicit)",)
+
+    setting = options["short_sentence"]
+    if setting == "off" or setting is None:
+        return ("short sentence: off (explicit)",)
+    if isinstance(setting, Mapping):
+        if setting.get("enabled", True) is False:
+            return ("short sentence: off (explicit)",)
+        mode = setting.get("resolve_mode", "randomized-phrase")
+        threshold = setting.get("min_phoneme_length", 30)
+    elif isinstance(setting, str):
+        mode = setting
+        threshold = 30
+    else:
+        return ("short sentence: configured (invalid)",)
+
+    lines = [f"short sentence: {mode}"]
+    if isinstance(threshold, int) and not isinstance(threshold, bool):
+        lines.append(f"threshold: <{threshold} phonemes")
+    lines.append("enabled: yes")
+    return tuple(lines)
+
+
+def _print_profile_role_items(
+    roles: list[dict[str, Any]], *, show_engine_details: bool = False
+) -> None:
     print(
         "  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE / ENROLLMENT"
     )
@@ -1263,6 +1325,10 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
             f"{target:<18} {selector}"
         )
+        if show_engine_details and binding.get("renderer") == "kokoro":
+            print("    Kokoro")
+            for line in _kokoro_short_sentence_lines(options):
+                print(f"      {line}")
         pronunciation_stack = item.get("pronunciation_stack")
         if isinstance(pronunciation_stack, Mapping):
             precedence = pronunciation_stack.get("precedence", ())
@@ -2721,6 +2787,9 @@ def main(argv: list[str] | None = None) -> int:
                     g2lex_paths=args.g2lex,
                     lexicon_data_policy=args.lexicon_data_policy,
                 )
+                profile_options = _profile_short_sentence_option(
+                    args.engine, profile_options, args.short_sentence
+                )
                 input_paths = (
                     args.reference_wav,
                     args.prepared_voice,
@@ -2865,6 +2934,9 @@ def main(argv: list[str] | None = None) -> int:
                             g2lex_paths=args.g2lex,
                             lexicon_data_policy=args.lexicon_data_policy,
                         )
+                        binding_options = _profile_short_sentence_option(
+                            args.engine, binding_options, args.short_sentence
+                        )
                         profile = set_profile_role(
                             args.profile,
                             args.role,
@@ -2919,7 +2991,10 @@ def main(argv: list[str] | None = None) -> int:
                     f"RenderProfile {payload['profile_id']} "
                     f"(default role: {payload['default_role']})"
                 )
-                _print_profile_role_items(payload["roles"])
+                _print_profile_role_items(
+                    payload["roles"],
+                    show_engine_details=args.profile_command in {"inspect", "show"},
+                )
                 if args.profile_command in {"inspect", "show"}:
                     planning = payload["planning"]
                     fallbacks = ", ".join(planning["capacity_fallback"]) or "none"
@@ -2927,14 +3002,21 @@ def main(argv: list[str] | None = None) -> int:
                         f"Planning: split={planning['split']}; capacity fallback={fallbacks}"
                     )
                     pauses = payload["pauses"]
-                    durations = ", ".join(
-                        f"{key}={value}"
-                        for key, value in sorted(pauses.items())
-                        if key != "mode"
-                    )
-                    print(
-                        f"Pauses: mode={pauses['mode']}; durations={durations or 'none'}"
-                    )
+                    pause_mode = pauses.get("mode", "none")
+                    print("Pauses")
+                    print(f"  mode: {pause_mode}")
+                    if pause_mode == "manual":
+                        for boundary in ("clause", "sentence", "paragraph"):
+                            if boundary in pauses:
+                                print(f"  {boundary}: {pauses[boundary]}")
+                        print("  speech artifact tails: trimmed")
+                        print(
+                            "  composition semantics: configured pause is inserted "
+                            "after normalized speech"
+                        )
+                    else:
+                        print("  speech artifact tails: trimmed")
+                        print("  composition semantics: no policy pause is inserted")
             elif args.profile_command == "reidentify":
                 print(
                     "RenderProfile reidentified\n"

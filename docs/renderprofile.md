@@ -34,7 +34,7 @@ inside a generated RenderPlan variant remains `renderprofile.toml`.
 A profile has a canonical `profile_id`; RenderPlans carry that identity and copy
 the resolved role bindings needed to execute without reopening the profile.
 
-### Linguistic token requirements
+## Linguistic token requirements
 
 `requirements.token_fields` lists source fields that must be available on every projected token; it is not a list of every token field a renderer can consume. An adapter may support linguistic tokens while treating all such context as optional. Kitten consumes available linguistic token metadata opportunistically. Missing optional fields fall back to Kitten/Kitteng2p's normal pronunciation path; POS, tag, lemma, and morphology are not hard Kitten RenderProfile requirements.
 Refreshing engine metadata writes a proposal rather than overwriting user policy:
@@ -83,7 +83,7 @@ voicerender profile show printer-cast.renderprofile.toml --json
 voicerender profile role list printer-cast.renderprofile.toml --json
 ```
 
-`profile create` makes the initial/default role. `profile bind` adds or replaces a binding and supports voice, Voicefolio, reference WAV, prepared voice, voice-source, speaker, and engine-option selectors. The human view shows each role's engine, target, language, and actual voice/speaker/source identity without dumping renderer metadata.
+`profile create` makes the initial/default role. `profile bind` adds or replaces a binding and supports voice, Voicefolio, reference WAV, prepared voice, voice-source, speaker, and engine-option selectors. The human view shows each role's engine, target, language, and actual voice/speaker/source identity without dumping renderer metadata. For Kokoro roles, `profile show` also distinguishes short-sentence processing that is off implicitly, off explicitly, or enabled with a mode and phoneme threshold.
 
 Use VoiceRender's public role helpers when building or editing profiles programmatically:
 
@@ -143,6 +143,14 @@ voicerender profile bind printer-cast.renderprofile.toml guest \
 ```
 
 Kitten remains on its historical eSpeak-only path when no lexicon sources are configured. Request-local IPA spans, local files, named sources, contextual heteronym rules, and eSpeak fallback are reported in effective precedence by `profile show`/`inspect` and preflight. Local source identity uses content and logical SHA-256 values rather than filesystem paths; the ordered named asset IDs, versions, and digests are also part of the synthesis identity. Moving an unchanged local file does not change that source identity, while changing its content does. Offline profiles require their selected named lexicons to be installed.
+
+## Speech artifact boundaries and pause policy
+
+VoiceRender applies engine-neutral, trailing-only silence normalization before persisting synthesized speech WAVs or cache entries. Leading samples are preserved, and an all-silent waveform remains unchanged. This produces speech-tight artifacts; normalization does not trim leading samples and does not insert profile pauses.
+
+`PausePolicy(mode = "manual")` records clause, sentence, and paragraph durations for downstream composition after speech-tail normalization. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports the mode and manual durations, then states that policy pauses are composed after normalized speech or not inserted.
+
+The boundary policy is part of cache and render identity. Existing output with a missing or different policy is stale and is not silently reused; RenderPlan rendering reports `output.stale_audio_policy` unless the caller re-renders with `--force` or resets it with `--reset-stale`.
 
 ## UtterPlan bundle projection
 
@@ -263,7 +271,19 @@ Profile create, bind, inspect, and validate read VoiceFolio catalog metadata but
 
 ## Kokoro quality and voice-level options
 
-`voicerender engines options kokoro --json` lists the adapter's accepted options and structured fields. The compatible shorthand forms remain `short_sentence = "off" | "wrap" | "phrase" | "randomized-phrase"` and `voice_level = "off" | "calibrated"`. These options may also be provided as tables:
+`voicerender engines options kokoro --json` lists the adapter's accepted options and structured fields. The compatible shorthand forms remain `short_sentence = "off" | "wrap" | "phrase" | "randomized-phrase"` and `voice_level = "off" | "calibrated"`. `profile create` and `profile bind` additionally accept `--short-sentence {off,wrap,phrase,randomized-phrase}` as a convenience for the `short_sentence` engine option; do not combine the flag with `--option short_sentence=...`. These options may also be provided as tables:
+
+For example, the shorthand flag can opt in during profile creation or explicitly disable the feature while rebinding:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target v1.0 --voice af_heart --language en-US \
+  --short-sentence randomized-phrase -o kokoro.renderprofile.toml
+
+voicerender profile bind kokoro.renderprofile.toml narrator \
+  --engine kokoro --target v1.0 --voice af_heart --language en-US \
+  --short-sentence off --in-place
+```
 
 ```toml
 [roles.narrator.binding.options.short_sentence]
@@ -279,7 +299,7 @@ mode = "calibrated"
 # gain_db = -1.5
 ```
 
-`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; the defaults are shown above. An omitted setting leaves PyKokoro's short-sentence fix unset, while the `off` shorthand disables it. `voice_level` accepts `mode = "off" | "calibrated"` and optional finite numeric `gain_db`. Calibrated mode uses PyKokoro's static per-model/quality/voice catalog; it is not runtime loudness normalization. Automatically matched catalog calibration is not available for custom enrolled voices, though explicit gain is supported. VoiceRender does not add loudness DSP; its separate PCM boundary adapter clamps finite full-scale overshoots and records diagnostics.
+`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; the defaults are shown above. It is opt-in: omitting the setting leaves PyKokoro's short-sentence fix unset, while the `off` shorthand or `--short-sentence off` explicitly disables it. `profile show` reports the configured state; PyKokoro's resolved runtime `short_sentence_mode` is preserved in render diagnostics and execution fingerprints. `voice_level` accepts `mode = "off" | "calibrated"` and optional finite numeric `gain_db`. Calibrated mode uses PyKokoro's static per-model/quality/voice catalog; it is not runtime loudness normalization. Automatically matched catalog calibration is not available for custom enrolled voices, though explicit gain is supported. VoiceRender does not add loudness DSP; its separate PCM boundary adapter clamps finite full-scale overshoots and records diagnostics.
 
 Kokoro enrollment modes have different semantics. **Inno** uses reference audio to tune a voice, requires no transcript, and may accept `fmax`. **AkinVox** performs transcript-conditioned cloning: it requires the exact non-empty reference transcript, currently supports English only, and requires synthesis speed `1.0`. The generic `voicerender voice clone --engine kokoro ... --transcript ...` path binds that transcript into AkinVox's enrollment options. Conflicting transcript sources are rejected, and Inno does not accept a transcript. Reference resolution and enrollment remain lazy until rendering; preflight only checks pins/metadata and measures the text request.
 

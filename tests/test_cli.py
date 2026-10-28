@@ -275,6 +275,48 @@ def test_cli_profile_create_reference_wav_persists_computed_pin(
     assert captured["transcript"] == "Exact reference words."
 
 
+@pytest.mark.parametrize("mode", ("off", "wrap", "phrase", "randomized-phrase"))
+def test_cli_profile_create_short_sentence_flag_sets_engine_option(
+    monkeypatch, tmp_path: Path, mode: str
+) -> None:
+    from types import SimpleNamespace
+
+    from voicerender import cli
+
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "create_render_profile",
+        lambda **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(profile_id="profile-1")
+        ),
+    )
+    monkeypatch.setattr(cli, "save_render_profile", lambda profile, path: path)
+
+    result = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "kokoro",
+            "--target",
+            "kokoro-0.8",
+            "--language",
+            "en-US",
+            "--voice",
+            "af_heart",
+            "--short-sentence",
+            mode,
+            "--output",
+            str(tmp_path / "profile.renderprofile.toml"),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    assert captured["options"]["short_sentence"] == mode
+
+
 def test_cli_profile_create_voicefolio_ref_uses_full_pinned_source(
     monkeypatch, tmp_path: Path
 ) -> None:

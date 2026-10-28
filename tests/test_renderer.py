@@ -34,6 +34,9 @@ class FakeEngine:
         self.calls = []
         self.fail_once_for = None
 
+        self.audio = np.full(160, 0.1, dtype=np.float32)
+        self.word_timings = ()
+
     def version(self):
         return "1.0"
 
@@ -52,7 +55,9 @@ class FakeEngine:
                     owner.fail_once_for = None
                     raise RuntimeError("injected interruption")
                 return SynthesisOutput(
-                    audio=np.full(160, 0.1, dtype=np.float32), sample_rate=16000
+                    audio=owner.audio,
+                    sample_rate=16000,
+                    word_timings=owner.word_timings,
                 )
 
         yield Session()
@@ -152,6 +157,76 @@ def test_corrupt_cache_is_not_reused(tmp_path, mock_engine):
     (cache / f"{key}.wav").write_bytes(b"bad")
     second = render(segments(), profile=profile(), output_dir=tmp_path / "b", take=1)
     assert second.rendered_count == 1 and second.reused_count == 0
+
+
+def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
+    tmp_path, mock_engine
+):
+    from voicerender.render import _identity
+
+    mock_engine.audio = np.concatenate(
+        (np.full(16_000, 0.1, dtype=np.float32), np.zeros(6_400, dtype=np.float32))
+    )
+    mock_engine.word_timings = (
+        {
+            "text": "First.",
+            "char_start": 0,
+            "char_end": 6,
+            "start_sample": 100,
+            "end_sample": 17_000,
+        },
+    )
+    cache = tmp_path / "legacy-cache"
+    output = tmp_path / "legacy-boundary"
+    speech = segments()[:1]
+    legacy_profile = profile()
+
+    result = render(
+        speech,
+        profile=legacy_profile,
+        output_dir=output,
+        cache_dir=cache,
+    )
+    assert result.rendered_count == 1
+    entry = read_manifest(output)["segments"][0]
+    assert entry["wav"]["frames"] == 16_000
+    assert entry["audio_boundary"]["removed_frames"] == 6_400
+    assert entry["timings"][0]["start_sample"] == 100
+    assert entry["timings"][0]["end_sample"] == 16_000
+
+    identity = _identity(legacy_profile.roles["narrator"], engine_version="1.0")
+    assert identity["algorithm"] == "voicerender.batch.v2"
+    assert identity["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
+    cache_meta = next(cache.glob("*.json"))
+    cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
+    assert cache_data["schema"] == "voicerender.batch-cache.v2"
+    assert cache_data["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
+
+    reused = render(
+        speech,
+        profile=legacy_profile,
+        output_dir=tmp_path / "legacy-cache-reuse",
+        cache_dir=cache,
+    )
+    assert reused.reused_count == 1
+    assert (
+        read_manifest(tmp_path / "legacy-cache-reuse")["segments"][0]["audio_boundary"][
+            "output_frames"
+        ]
+        == 16_000
+    )
+    assert len(mock_engine.calls) == 1
+
+    cache_data["schema"] = "voicerender.batch-cache.v1"
+    cache_meta.write_text(json.dumps(cache_data), encoding="utf-8")
+    regenerated = render(
+        speech,
+        profile=legacy_profile,
+        output_dir=tmp_path / "legacy-old-cache",
+        cache_dir=cache,
+    )
+    assert regenerated.rendered_count == 1
+    assert len(mock_engine.calls) == 2
 
 
 def test_force_disables_cache(tmp_path, mock_engine):

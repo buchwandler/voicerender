@@ -42,6 +42,7 @@ from voicerender import (
     BookRenderResult,
     ChapterRenderOutcome,
 )
+from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
 from voicerender.book import render_book
 from voicerender.book_contract import load_renderplan_set
 from voicerender.errors import ArtifactError
@@ -383,28 +384,33 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                 for control in item.controls
             )
         )
+        diagnostics = {
+            "schema": "voicerender.render-diagnostics.v1",
+            "render_plan_id": plan.plan_id or plan.computed_id(),
+            "audio_boundary_policy": BOUNDARY_POLICY_ID,
+        }
         if pending_composition:
-            diagnostics = {
-                "schema": "voicerender.render-diagnostics.v1",
-                "render_plan_id": plan.plan_id or plan.computed_id(),
-                "emphasis_policy": emphasis_policy.value,
-                "pending_composition": True,
-                "deferred_controls": [
-                    {
-                        "capability": book_module.EMPHASIS_COMPOSITION_CAPABILITY,
-                        "segment_number": item.number,
-                        "segment_id": item.segment_id or item.computed_id(),
-                        "count": sum(
-                            control.name == "emphasis" for control in item.controls
-                        ),
-                    }
-                    for item in plan.speech
-                    if any(control.name == "emphasis" for control in item.controls)
-                ],
-            }
-            (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
-                json.dumps(diagnostics), encoding="utf-8"
+            diagnostics.update(
+                {
+                    "emphasis_policy": emphasis_policy.value,
+                    "pending_composition": True,
+                    "deferred_controls": [
+                        {
+                            "capability": book_module.EMPHASIS_COMPOSITION_CAPABILITY,
+                            "segment_number": item.number,
+                            "segment_id": item.segment_id or item.computed_id(),
+                            "count": sum(
+                                control.name == "emphasis" for control in item.controls
+                            ),
+                        }
+                        for item in plan.speech
+                        if any(control.name == "emphasis" for control in item.controls)
+                    ],
+                }
             )
+        (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
+            json.dumps(diagnostics), encoding="utf-8"
+        )
         selected_keys = {
             (item.number, item.segment_id or item.computed_id()) for item in selected
         }

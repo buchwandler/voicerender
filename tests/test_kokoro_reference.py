@@ -113,6 +113,7 @@ def _install(
         "config": None,
         "audio": np.ones(24, dtype=np.float32),
         "diagnostics": (),
+        "short_sentence_mode": None,
         "measurements": [],
         "enrollments": [],
         "syntheses": [],
@@ -184,6 +185,7 @@ def _install(
                 phonemes="t e s t",
                 token_ids=(1, 2),
                 trace=None,
+                short_sentence_mode=state["short_sentence_mode"],
                 voice_level_applications=(),
             )
 
@@ -720,6 +722,40 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
     assert config.voice_level.mode == "off"
     assert config.voice_level.gain_db == -1.5
     assert rendered.metadata["voice_level"]["mode"] == "off"
+
+
+def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, state = _install(monkeypatch, _model())
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={},
+    )
+    request = SpeechRequest(id="short-mode", text="A short line.", language="en-US")
+
+    with adapter.open(selection) as session:
+        omitted_config = state["config"]
+        off_rendered = session.synthesize(request)
+    assert omitted_config.short_sentence_config is None
+    assert getattr(omitted_config.generation, "enable_short_sentence", None) is None
+    assert off_rendered.metadata["short_sentence_mode"] == "off"
+
+    state["short_sentence_mode"] = "wrap"
+    with adapter.open(selection) as session:
+        wrap_rendered = session.synthesize(request)
+    assert wrap_rendered.metadata["short_sentence_mode"] == "wrap"
+
+    explicit_off = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={"short_sentence": "off"},
+    )
+    with adapter.open(explicit_off):
+        assert state["config"].short_sentence_config.enabled is False
 
 
 def test_kokoro_forwards_persisted_g2lex_tables_as_public_file_refs(

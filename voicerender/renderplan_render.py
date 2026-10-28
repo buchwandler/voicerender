@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Literal
@@ -30,6 +30,7 @@ from renderplan import (
     save_preflight,
 )
 
+from .audio_boundaries import BOUNDARY_POLICY_ID, trim_renderer_trailing_silence
 from .engines.base import EngineSelection, SpeechRequest
 from .engines.registry import get_adapter
 from .error_diagnostics import (
@@ -67,7 +68,7 @@ from .storage import atomic_json, atomic_wav, digest, verified_wav, wav_info
 
 RENDER_MANIFEST_FILENAME = "render-manifest.toml"
 RENDER_DIAGNOSTICS_FILENAME = "render-diagnostics.json"
-_CACHE_SCHEMA = "voicerender.renderplan-cache.v1"
+_CACHE_SCHEMA = "voicerender.renderplan-cache.v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +258,9 @@ def render_renderplan(
     ]
     diagnostics: dict[str, Any] = {
         "schema": "voicerender.render-diagnostics.v1",
+        "audio_boundary_policy": BOUNDARY_POLICY_ID,
+        "audio_boundary": {},
+        "render_results": {},
         "render_plan_id": parsed_plan.plan_id or parsed_plan.computed_id(),
         "emphasis_policy": policy.value,
         "pending_composition": bool(deferred_controls),
@@ -307,6 +311,27 @@ def render_renderplan(
             force=force,
             reset_stale_output=reset_stale_output,
         )
+        if not stale_output_reset:
+            diagnostics_path = out / RENDER_DIAGNOSTICS_FILENAME
+            try:
+                previous_diagnostics = json.loads(
+                    diagnostics_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                previous_diagnostics = None
+            if (
+                isinstance(previous_diagnostics, dict)
+                and previous_diagnostics.get("audio_boundary_policy")
+                == BOUNDARY_POLICY_ID
+            ):
+                if isinstance(previous_diagnostics.get("audio_boundary"), dict):
+                    diagnostics["audio_boundary"].update(
+                        previous_diagnostics["audio_boundary"]
+                    )
+                if isinstance(previous_diagnostics.get("render_results"), dict):
+                    diagnostics["render_results"].update(
+                        previous_diagnostics["render_results"]
+                    )
         if stale_output_reset and reset_stale_output and had_preflight:
             save_preflight(report, out / "preflight.toml")
         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
@@ -418,11 +443,20 @@ def render_renderplan(
                 try:
                     cached = None if force else _read_cache(cache, current.cache_key)
                     if cached is not None:
-                        source, info = cached
+                        source, info, boundary_info, render_result = cached
                         _copy_verified(source, target, info)
                         reused += 1
                         terminal_outcome = "reused"
                         fingerprint["execution_status"] = "cache_reused"
+                        fingerprint["audio_boundary"] = boundary_info
+                        diagnostics["audio_boundary"][current.segment_id] = (
+                            boundary_info
+                        )
+                        if render_result:
+                            fingerprint["render_result"] = render_result
+                            diagnostics["render_results"][current.segment_id] = (
+                                render_result
+                            )
                     else:
                         fingerprint["execution_status"] = "synthesized"
                         session = sessions.acquire(
@@ -542,17 +576,39 @@ def render_renderplan(
                             raise ArtifactError(
                                 "Renderer returned an artifact for a different speech request"
                             )
+                        normalized_audio, boundary = trim_renderer_trailing_silence(
+                            rendered_speech.audio,
+                            sample_rate=rendered_speech.sample_rate,
+                        )
+                        boundary_info = asdict(boundary)
+                        fingerprint["audio_boundary"] = boundary_info
+                        diagnostics["audio_boundary"][current.segment_id] = (
+                            boundary_info
+                        )
+                        render_result = {}
+                        resolved_mode = rendered_speech.metadata.get(
+                            "short_sentence_mode"
+                        )
+                        if isinstance(resolved_mode, str):
+                            render_result["short_sentence_mode"] = resolved_mode
+                            fingerprint["render_result"] = render_result
+                            diagnostics["render_results"][current.segment_id] = (
+                                render_result
+                            )
                         info = atomic_wav(
                             cache / f"{current.cache_key}.wav",
-                            rendered_speech.audio,
+                            normalized_audio,
                             rendered_speech.sample_rate,
                         )
                         atomic_json(
                             cache / f"{current.cache_key}.json",
                             {
                                 "schema": _CACHE_SCHEMA,
+                                "audio_boundary_policy": BOUNDARY_POLICY_ID,
                                 "key": current.cache_key,
                                 "wav": info,
+                                "audio_boundary": boundary_info,
+                                "render_result": render_result,
                             },
                         )
                         if not verified_wav(cache / f"{current.cache_key}.wav", info):
@@ -822,6 +878,29 @@ def _load_existing_artifacts(
             _reset_owned_artifacts(output_dir)
             return {}, True
         manifest.validate_against(plan)
+        diagnostics_path = output_dir / RENDER_DIAGNOSTICS_FILENAME
+        current_audio_policy = False
+        if diagnostics_path.is_file() and not diagnostics_path.is_symlink():
+            try:
+                diagnostics_data = json.loads(
+                    diagnostics_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                diagnostics_data = None
+            current_audio_policy = (
+                isinstance(diagnostics_data, dict)
+                and diagnostics_data.get("audio_boundary_policy") == BOUNDARY_POLICY_ID
+            )
+        if not current_audio_policy:
+            if not (force or reset_stale_output):
+                raise ArtifactError(
+                    "Existing render output uses an older audio-boundary policy. "
+                    f"Current policy: {BOUNDARY_POLICY_ID}. "
+                    "Re-render with --force or reset the stale output.",
+                    code="output.stale_audio_policy",
+                )
+            _reset_owned_artifacts(output_dir)
+            return {}, True
         expected = {
             (item.number, item.segment_id or item.computed_id()): item
             for item in plan.speech
@@ -923,6 +1002,7 @@ def _prepare_speech(
         synthesis_identity = dict(adapter.canonical_synthesis_identity(selection))
         identity = {
             "schema": _CACHE_SCHEMA,
+            "audio_boundary_policy": BOUNDARY_POLICY_ID,
             "segment_id": item.segment_id or item.computed_id(),
             "engine": adapter.id,
             "engine_version": adapter_version,
@@ -936,6 +1016,7 @@ def _prepare_speech(
         }
         execution_fingerprint = {
             "voicerender_version": _voicerender_version(),
+            "audio_boundary_policy": BOUNDARY_POLICY_ID,
             "adapter_id": adapter.id,
             "adapter_version": adapter_version,
             "api_probe_signature": digest(api_probe),
@@ -984,7 +1065,9 @@ def _finalize_execution_fingerprint(fingerprint: dict[str, Any]) -> dict[str, An
     return result
 
 
-def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None:
+def _read_cache(
+    cache_dir: Path, key: str
+) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     wav = cache_dir / f"{key}.wav"
     sidecar = cache_dir / f"{key}.json"
     try:
@@ -995,12 +1078,22 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
         not isinstance(data, dict)
         or data.get("schema") != _CACHE_SCHEMA
         or data.get("key") != key
+        or data.get("audio_boundary_policy") != BOUNDARY_POLICY_ID
     ):
         return None
     info = data.get("wav")
-    if not isinstance(info, dict) or not verified_wav(wav, info):
+    boundary = data.get("audio_boundary")
+    render_result = data.get("render_result", {})
+    if (
+        not isinstance(info, dict)
+        or not verified_wav(wav, info)
+        or not isinstance(boundary, dict)
+        or boundary.get("policy") != BOUNDARY_POLICY_ID
+        or boundary.get("output_frames") != info.get("frames")
+        or not isinstance(render_result, dict)
+    ):
         return None
-    return wav, info
+    return wav, info, boundary, render_result
 
 
 def _replace_file(source: Path, target: Path) -> None:

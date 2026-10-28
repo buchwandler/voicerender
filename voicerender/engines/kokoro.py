@@ -926,6 +926,11 @@ class PyKokoroEngineSession:
             "voice": result.voice,
             "phonemes": result.phonemes,
             "token_ids": tuple(result.token_ids),
+            "short_sentence_mode": (
+                result.short_sentence_mode
+                if result.short_sentence_mode is not None
+                else "off"
+            ),
             "pcm_range": {
                 "policy": PCM_RANGE_POLICY,
                 "peak_before_clip": adaptation.peak_before_clip,
@@ -1087,40 +1092,46 @@ class PyKokoroEngineAdapter:
                 value_type="string|table",
                 default=None,
                 choices=("off", "wrap", "phrase", "randomized-phrase"),
-                description="Mode shorthand or table with enabled, resolve_mode, min_phoneme_length, phoneme_pretext, phrase_fallback_tries.",
+                description=(
+                    "Opt-in: omitted leaves short-sentence processing off; supply a mode "
+                    "shorthand or table to enable it."
+                ),
             ),
             "short_sentence.enabled": EngineOption(
                 name="short_sentence.enabled",
                 value_type="boolean",
                 default=True,
-                description="Enable the short-sentence context quality fix.",
+                description=(
+                    "Conditional default: true when a short_sentence table is present; "
+                    "selecting Kokoro alone does not enable short-sentence processing."
+                ),
             ),
             "short_sentence.resolve_mode": EngineOption(
                 name="short_sentence.resolve_mode",
                 value_type="string",
                 default="randomized-phrase",
                 choices=("wrap", "phrase", "randomized-phrase"),
-                description="How short requests are expanded into context.",
+                description="Default mode within a supplied short_sentence table.",
             ),
             "short_sentence.min_phoneme_length": EngineOption(
                 name="short_sentence.min_phoneme_length",
                 value_type="integer",
                 default=30,
                 minimum=0,
-                description="Minimum phoneme count before short-sentence context is added.",
+                description="Default threshold within a supplied short_sentence table.",
             ),
             "short_sentence.phoneme_pretext": EngineOption(
                 name="short_sentence.phoneme_pretext",
                 value_type="string",
                 default="—",
-                description="Text prepended to the short-sentence context.",
+                description="Default pretext within a supplied short_sentence table.",
             ),
             "short_sentence.phrase_fallback_tries": EngineOption(
                 name="short_sentence.phrase_fallback_tries",
                 value_type="integer",
                 default=1,
                 minimum=0,
-                description="Number of phrase fallback attempts.",
+                description="Default fallback attempts within a supplied short_sentence table.",
             ),
             "voice_level": EngineOption(
                 name="voice_level",

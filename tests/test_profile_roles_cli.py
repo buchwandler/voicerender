@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from renderplan import RenderProfile, RoleProfile
+from renderplan import PausePolicy, RenderProfile, RoleProfile
 
 from voicerender import cli
 from voicerender.renderprofile import load_render_profile, save_render_profile
@@ -290,13 +290,34 @@ def test_role_list_and_profile_show_present_the_complete_cast(
         roles["narrator"],
         binding={
             **roles["narrator"].binding,
+            "renderer": "kokoro",
+            "options": {},
             "voice": "af_heart",
             "renderer_metadata": {"private_detail": "not shown"},
         },
     )
     roles["guest"] = replace(
         roles["guest"],
-        binding={**roles["guest"].binding, "speaker": "Jasper"},
+        binding={
+            **roles["guest"].binding,
+            "renderer": "kokoro",
+            "speaker": "Jasper",
+            "options": {
+                "short_sentence": {
+                    "enabled": True,
+                    "resolve_mode": "wrap",
+                    "min_phoneme_length": 24,
+                }
+            },
+        },
+    )
+    roles["explicit-off"] = RoleProfile(
+        language="en-US",
+        binding={
+            "renderer": "kokoro",
+            "target_id": "kokoro-test",
+            "options": {"short_sentence": "off"},
+        },
     )
     roles["source"] = RoleProfile(
         language="en-US",
@@ -319,7 +340,13 @@ def test_role_list_and_profile_show_present_the_complete_cast(
         },
     )
     save_render_profile(
-        replace(profile, roles=roles, profile_id=None).with_identity(), source
+        replace(
+            profile,
+            roles=roles,
+            pauses=PausePolicy(mode="none"),
+            profile_id=None,
+        ).with_identity(),
+        source,
     )
 
     exit_code = cli.main(["profile", "role", "list", str(source)])
@@ -340,7 +367,14 @@ def test_role_list_and_profile_show_present_the_complete_cast(
     assert exit_code == 0
     assert "RenderProfile " in show_output
     assert "Planning:" in show_output
-    assert "Pauses:" in show_output
+    assert "Pauses\n  mode: none" in show_output
+    assert "speech artifact tails: trimmed" in show_output
+    assert "no policy pause is inserted" in show_output
+    assert "short sentence: off (implicit)" in show_output
+    assert "short sentence: off (explicit)" in show_output
+    assert "short sentence: wrap" in show_output
+    assert "threshold: <24 phonemes" in show_output
+    assert "enabled: yes" in show_output
     assert "af_heart" in show_output
     assert "speaker:Jasper" in show_output
     assert "source:managed_reference" in show_output
@@ -371,3 +405,78 @@ def test_role_list_and_profile_show_present_the_complete_cast(
         item for item in show_payload["roles"] if item["role"] == "narrator"
     )
     assert "private_detail" in narrator_role["binding"]["renderer_metadata"]
+
+
+@pytest.mark.parametrize("mode", ("off", "wrap", "phrase", "randomized-phrase"))
+def test_profile_bind_short_sentence_flag_persists_engine_option(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    source = tmp_path / "source.renderprofile.toml"
+    output = tmp_path / "bound.renderprofile.toml"
+    _write_profile(source)
+    captured: dict[str, object] = {}
+
+    def fake_set_profile_role(profile_path, role, **kwargs):
+        captured.update(kwargs)
+        loaded = load_render_profile(profile_path)
+        roles = dict(loaded.roles)
+        current = roles[role]
+        binding = {
+            **current.binding,
+            "renderer": kwargs["engine"],
+            "target_id": kwargs["target_id"],
+            "options": dict(kwargs["options"] or {}),
+        }
+        roles[role] = replace(current, binding=binding)
+        return replace(loaded, roles=roles, profile_id=None).with_identity()
+
+    monkeypatch.setattr(cli, "set_profile_role", fake_set_profile_role)
+    result = cli.main(
+        [
+            "profile",
+            "bind",
+            str(source),
+            "narrator",
+            "--engine",
+            "kokoro",
+            "--target",
+            "kokoro-0.8",
+            "--language",
+            "en-US",
+            "--short-sentence",
+            mode,
+            "--output",
+            str(output),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    assert captured["options"]["short_sentence"] == mode
+    bound = load_render_profile(output)
+    assert bound.roles["narrator"].binding["options"]["short_sentence"] == mode
+
+
+def test_profile_show_explains_manual_pauses_follow_normalized_speech(
+    tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "manual.renderprofile.toml"
+    profile = _write_profile(source)
+    profile = replace(
+        profile,
+        pauses=PausePolicy(
+            mode="manual",
+            durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
+        ),
+        profile_id=None,
+    ).with_identity()
+    save_render_profile(profile, source)
+
+    assert cli.main(["profile", "show", str(source)]) == 0
+    output = capsys.readouterr().out
+    assert "Pauses\n  mode: manual" in output
+    assert "  clause: 180" in output
+    assert "  sentence: 500" in output
+    assert "  paragraph: 800" in output
+    assert "speech artifact tails: trimmed" in output
+    assert "configured pause is inserted after normalized speech" in output

@@ -13,6 +13,7 @@ authors = [{name = "buchwandler"}]
 keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
 dependencies = [
   "numpy>=1.23",
+  "audiosig>=0.1.8,<0.2",
   "soundfile>=0.12",
   "tomlkit>=0.13",
   "tomli>=2; python_version < '3.11'",
