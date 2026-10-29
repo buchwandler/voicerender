@@ -759,10 +759,14 @@ def test_book_preserves_initial_preflight_report_handoff(
     assert outcome.error_code == error_code
     assert outcome.replan_required is replan_required
     if status == "reject":
-        assert outcome.error_message == (
+        assert outcome.error_message is not None
+        error_message = outcome.error_message
+        assert error_message.startswith(
             "RenderPlan preflight rejected this plan (1 error checks).\n"
             "Primary cause: Chatterbox target 'turbo' requires quality 'q4f16'."
         )
+        assert "Affected speech item: segment 1" in error_message
+        assert "  id: sha256:" in error_message
     assert outcome.preflight_report == outcome.output_dir / "preflight.toml"
     assert outcome.preflight_report.is_file()
     assert calls["render"] == []

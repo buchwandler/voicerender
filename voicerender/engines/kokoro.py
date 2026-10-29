@@ -63,7 +63,7 @@ from .registry import normalize_engine_id
 logger = logging.getLogger(__name__)
 
 
-PYKOKORO_REQUIRED = ">=0.10.7,<0.11"
+PYKOKORO_REQUIRED = ">=0.10.8,<0.11"
 PYKOKORO_REQUEST_API_VERSION = 2
 _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
 
@@ -84,7 +84,7 @@ def _version_supported(version: str) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     patch = int(match.group(3) or 0)
-    return (major, minor, patch) >= (0, 10, 7) and (major, minor) == (0, 10)
+    return (major, minor, patch) >= (0, 10, 8) and (major, minor) == (0, 10)
 
 
 def _package_metadata() -> str | None:
@@ -663,6 +663,7 @@ def _translate_pykokoro_error(
     *,
     opening: bool = False,
     failure_code: str | None = None,
+    source: str | None = None,
 ) -> EngineError:
     import pykokoro
 
@@ -726,6 +727,8 @@ def _translate_pykokoro_error(
         "request_id": request.id if request is not None else None,
         "native_error_type": type(error).__name__,
     }
+    if source is not None:
+        context["source"] = source
     if error_type is SpeechRequestTooLongError:
         context.update(
             amount=getattr(error, "token_count", None),
@@ -806,7 +809,12 @@ class PyKokoroEngineSession:
         except EngineSynthesisError:
             raise
         except Exception as exc:
-            raise _translate_pykokoro_error(exc, self._selection, request) from exc
+            raise _translate_pykokoro_error(
+                exc,
+                self._selection,
+                request,
+                source="pykokoro.measure_request",
+            ) from exc
         amount = getattr(measured, "amount", None)
         if isinstance(amount, bool) or not isinstance(amount, int):
             raise EngineBackendError(

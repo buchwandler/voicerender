@@ -1000,6 +1000,54 @@ def test_preflight_failure_message_groups_distinct_causes_and_preserves_details(
     assert len(payload["check_details"]) == 3
 
 
+def test_preflight_failure_message_identifies_single_affected_speech_item() -> None:
+    from voicerender.preflight import preflight_failure_message
+
+    report = SimpleNamespace(
+        status="reject",
+        checks=(
+            SimpleNamespace(
+                status="error",
+                source="pykokoro.measure_request",
+                detail="say_as characters span has unsupported surface '(A R T)'",
+                segment_number=10,
+                segment_id="sha256:" + "a" * 64,
+            ),
+        ),
+    )
+
+    summary = preflight_failure_message(report)  # type: ignore[arg-type]
+
+    assert "Primary cause:" in summary
+    assert "Affected speech item: segment 10" in summary
+    assert "  id: sha256:" + "a" * 64 in summary
+    assert "Because someone (A R T) finally." not in summary
+
+
+def test_preflight_failure_message_without_segment_metadata_keeps_compact_cause() -> None:
+    from voicerender.preflight import preflight_failure_message
+
+    report = SimpleNamespace(
+        status="reject",
+        checks=(
+            SimpleNamespace(
+                status="error",
+                source="fake.measure_request",
+                detail="request rejected",
+                segment_number=None,
+                segment_id=None,
+            ),
+        ),
+    )
+
+    summary = preflight_failure_message(report)  # type: ignore[arg-type]
+
+    assert summary == (
+        "RenderPlan preflight rejected this plan (1 error checks).\n"
+        "Primary cause: request rejected"
+    )
+
+
 def test_preflight_failure_message_summarizes_165_identical_checks() -> None:
     from voicerender.cli import _preflight_payload
     from voicerender.preflight import preflight_failure_message

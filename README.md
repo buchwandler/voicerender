@@ -134,7 +134,7 @@ On a render-time exception, `render-diagnostics.json` keeps the existing `voicer
 
 The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
 
-Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. Older supported versions (including 0.10.5) continue with Python exception chaining and the available metadata; the optional dependency floor remains unchanged until a diagnostics-capable release is confirmed.
+Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. The Kokoro extra requires PyKokoro 0.10.8+, which owns wrapper-aware character frontend projection. VoiceRender forwards canonical `say_as` text and source offsets unchanged—including wrapper punctuation inside an authored span—and does not trim or rewrite them.
 The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
 
 Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:

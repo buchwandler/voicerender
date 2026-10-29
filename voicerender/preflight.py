@@ -330,7 +330,15 @@ def preflight_failure_message(report: PreflightReport) -> str:
         group = groups[0]
         detail = str(group["detail"] or group["source"])
         if group["affected_count"] == 1:
-            return f"{heading}\nPrimary cause: {detail}"
+            lines = [f"{heading}\nPrimary cause: {detail}"]
+            first = group["first_segment_number"]
+            first_id = group["first_segment_id"]
+            if first is not None or first_id:
+                label = str(first) if first is not None else "unknown"
+                lines.append(f"Affected speech item: segment {label}")
+                if first_id:
+                    lines.append(f"  id: {first_id}")
+            return "\n".join(lines)
         first = group["first_segment_number"]
         first_id = group["first_segment_id"]
         first_label = f"{first} ({first_id})" if first_id else str(first)

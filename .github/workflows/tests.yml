@@ -97,7 +97,7 @@ jobs:
         run: |
           python -m pip install --upgrade "pip<26.2" pytest
           python -m pip install -e . \
-            "pykokoro==0.10.5" \
+            "pykokoro==0.10.8" \
             "pipersynth==0.2.5" \
             "pocketsynth[cpu]==0.2.5" \
             "kittensynth[cpu]==0.1.4" \

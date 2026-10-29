@@ -36,14 +36,18 @@ from voicerender.engines.kokoro import (
     _version_supported,
 )
 from voicerender.engines.selection import EngineRequest
-from voicerender.errors import EngineBackendError, EngineSelectionError
+from voicerender.errors import (
+    EngineBackendError,
+    EngineSelectionError,
+    InvalidSpeechRequestError,
+)
 from voicerender.models import ModelDiscoveryError
 from voicerender.voice_sources import local_reference_source
 
 
-def test_pykokoro_minimum_version_is_0107() -> None:
-    assert not _version_supported("0.10.6")
-    assert _version_supported("0.10.7")
+def test_pykokoro_minimum_version_is_0108() -> None:
+    assert not _version_supported("0.10.7")
+    assert _version_supported("0.10.8")
     assert _version_supported("0.10.10")
     assert not _version_supported("0.11.0")
 
@@ -118,12 +122,13 @@ def _install(
         "diagnostics": (),
         "short_sentence_mode": None,
         "measurements": [],
+        "measure_error": None,
         "enrollments": [],
         "syntheses": [],
         "closed": 0,
     }
     module = ModuleType("pykokoro")
-    module.__version__ = "0.10.7"
+    module.__version__ = "0.10.8"
     module.__file__ = "/fake/pykokoro/__init__.py"
 
     class FakeSynthesisRequest:
@@ -151,6 +156,8 @@ def _install(
 
         def measure_request(self, request: Any, *, maximum: int | None = None) -> Any:
             state["measurements"].append((request, maximum))
+            if state["measure_error"] is not None:
+                raise state["measure_error"]
             return SimpleNamespace(amount=9, maximum=maximum)
 
         def enroll_voice(
@@ -216,7 +223,7 @@ def _api_probe_module(
     *, api_version: int = 2, supports_say_as: bool = True
 ) -> ModuleType:
     module = ModuleType("pykokoro")
-    module.__version__ = "0.10.7"
+    module.__version__ = "0.10.8"
     module.__file__ = "/fake/pykokoro/__init__.py"
 
     class FakeSynthesizer:
@@ -299,6 +306,54 @@ def test_pykokoro_request_forwards_say_as_without_changing_text(
     assert native.text[forwarded.start : forwarded.end] == "A R T"
     assert "A- R- T" not in native.text
 
+
+def test_pykokoro_request_forwards_parenthesized_characters_span_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _ = _install(monkeypatch, _model())
+    del adapter
+    module = sys.modules["pykokoro"]
+    text = "Because someone (A R T) finally."
+    start = text.index("(A R T)")
+    end = start + len("(A R T)")
+    request = SpeechRequest(
+        id="parenthesized-say-as-request",
+        text=text,
+        language="en-US",
+        say_as=(SayAsSpan(start, end, "characters"),),
+    )
+
+    native = _pykokoro_request(request, module)
+
+    assert native.text == text
+    assert native.say_as[0].start == start
+    assert native.say_as[0].end == end
+    assert native.text[start:end] == "(A R T)"
+
+
+def test_measurement_request_validation_error_preserves_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, state = _install(monkeypatch, _model())
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        voice="af_heart",
+    )
+
+    class InvalidRequestError(ValueError):
+        pass
+
+    state["measure_error"] = InvalidRequestError("invalid say_as request")
+    with adapter.open(selection) as session, pytest.raises(
+        InvalidSpeechRequestError
+    ) as caught:
+        session.measure(
+            SpeechRequest(id="invalid-measurement", text="A R T", language="en-US")
+        )
+
+    assert getattr(caught.value, "source", None) == "pykokoro.measure_request"
 
 def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> None:
     static = _target_from_capabilities(
