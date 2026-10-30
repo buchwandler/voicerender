@@ -109,6 +109,11 @@ class _ProfileAdapter:
         yield object()
 
 
+class _KokoroProfileAdapter(_ProfileAdapter):
+    id = "kokoro"
+    package_name = "kokoro"
+
+
 def _install(monkeypatch: pytest.MonkeyPatch) -> _ProfileAdapter:
     adapter = _ProfileAdapter()
     monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
@@ -148,7 +153,12 @@ def test_profile_create_uses_adapter_facts_and_shared_codec(
     )
     assert profile.pauses == PausePolicy(
         mode="manual",
-        durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
+        durations_ms={
+            "clause": 180,
+            "parenthetical": 180,
+            "sentence": 500,
+            "paragraph": 800,
+        },
     )
 
     path = tmp_path / "profile.renderprofile.toml"
@@ -156,6 +166,31 @@ def test_profile_create_uses_adapter_facts_and_shared_codec(
     assert load_render_profile(path) == profile
     assert validate_render_profile(path) == profile
 
+
+@pytest.mark.parametrize("engine", ("kokoro", "pykokoro"))
+def test_new_profiles_default_to_parenthetical_pause(
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+) -> None:
+    adapter = _KokoroProfileAdapter()
+    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+
+    profile = create_render_profile(
+        engine=engine,
+        target_id="target-v1",
+        language="en-US",
+        voice="voice-a",
+    )
+
+    assert profile.pauses == PausePolicy(
+        mode="manual",
+        durations_ms={
+            "clause": 180,
+            "parenthetical": 180,
+            "sentence": 500,
+            "paragraph": 800,
+        },
+    )
 
 def test_refresh_updates_only_engine_facts_and_preserves_user_policy(
     monkeypatch: pytest.MonkeyPatch,

@@ -466,7 +466,7 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
         profile,
         pauses=PausePolicy(
             mode="manual",
-            durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
+            durations_ms={"clause": 180, "parenthetical": 180, "sentence": 500, "paragraph": 800},
         ),
         profile_id=None,
     ).with_identity()
@@ -478,5 +478,6 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
     assert "  clause: 180" in output
     assert "  sentence: 500" in output
     assert "  paragraph: 800" in output
+    assert "  parenthetical: 180" in output
     assert "speech artifact tails: trimmed" in output
     assert "configured pause is inserted after normalized speech" in output

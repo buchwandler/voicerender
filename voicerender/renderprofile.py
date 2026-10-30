@@ -36,10 +36,17 @@ from .voice_sources import (
     validate_voice_source,
 )
 
-_DEFAULT_PAUSES = PausePolicy(
-    mode="manual",
-    durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
-)
+
+def _default_pauses() -> PausePolicy:
+    return PausePolicy(
+        mode="manual",
+        durations_ms={
+            "clause": 180,
+            "parenthetical": 180,
+            "sentence": 500,
+            "paragraph": 800,
+        },
+    )
 
 
 def create_render_profile(
@@ -282,7 +289,7 @@ def create_render_profile(
         planning=PlanningPolicy(
             split="sentence", capacity_fallback=("clause", "token")
         ),
-        pauses=_DEFAULT_PAUSES,
+        pauses=_default_pauses(),
     ).with_identity()
 
 
