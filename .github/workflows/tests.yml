@@ -120,12 +120,14 @@ jobs:
           python -m pip install --upgrade "pip<26.2"
           python -m pip install \
             "pytest==8.0.0" \
-            "numpy==1.23.0" \
+            "numpy==1.24.0" \
+            "audiosig==0.1.8" \
             "soundfile==0.12.1" \
             "tomlkit==0.13.3" \
             "tomli==2.0.1" \
-            "renderplan==0.1.2" \
-            "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d"
+            "renderplan==0.2.1" \
+            "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d" \
+            "onnxvoice==0.2.14"
           python -m pip install --no-deps -e .
       - name: Run lower-bound tests
         run: python -m pytest -q
