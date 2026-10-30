@@ -23,7 +23,7 @@ def _json_value(value: Any, *, label: str, path: tuple[str, ...]) -> Any:
     if isinstance(value, Enum):
         return _json_value(value.value, label=label, path=path)
     if isinstance(value, Path):
-        return str(value)
+        return value.as_posix()
     if is_dataclass(value) and not isinstance(value, type):
         return {
             item.name: _json_value(

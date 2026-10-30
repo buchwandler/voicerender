@@ -274,7 +274,7 @@ def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
         "installed_qualities": list(model.installed_qualities),
         "source": model.source,
         "revision": model.revision,
-        "path": str(model.path) if model.path is not None else None,
+        "path": model.path.as_posix() if model.path is not None else None,
         "metadata": json_value(
             model.metadata,
             label=f"model {model.engine!r} target {model.target_id!r} metadata",
