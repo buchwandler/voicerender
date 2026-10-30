@@ -216,7 +216,9 @@ def _install(monkeypatch: pytest.MonkeyPatch) -> _Adapter:
     return adapter
 
 
-def _plan(*texts: str, tokens: TokenBundle | None = None) -> RenderPlan:
+def _plan(
+    *texts: str, tokens: TokenBundle | None = None, schema_version: int = 2
+) -> RenderPlan:
     flow = tuple(
         SpeechItem(
             number=number,
@@ -241,6 +243,7 @@ def _plan(*texts: str, tokens: TokenBundle | None = None) -> RenderPlan:
         source_plan_id="sha256:" + "3" * 64,
         render_profile_id="sha256:" + "4" * 64,
         flow=flow,
+        schema_version=schema_version,
     ).with_identity()
 
 
@@ -2000,7 +2003,10 @@ def test_default_session_pool_bounds_clones_and_preserves_plan_order(
 
     adapter = _install(monkeypatch)
     voices = ("clone-a", "clone-b", "clone-a", "clone-c", "clone-b", "clone-d")
-    plan = _plan(*(f"speech {index}" for index in range(1, len(voices) + 1)))
+    plan = _plan(
+        *(f"speech {index}" for index in range(1, len(voices) + 1)),
+        schema_version=1,
+    )
     plan = replace(
         plan,
         flow=tuple(

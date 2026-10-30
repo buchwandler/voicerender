@@ -427,14 +427,15 @@ class KittenSynthEngineSession:
                 source="kittensynth.no_capacity_measurement",
             )
         try:
-            import kittensynth
-
-            tokens, overrides = _kitten_request_inputs(request, kittensynth)
             request_inputs: dict[str, Any] = {}
-            if request.tokens:
-                request_inputs["tokens"] = tokens
-            if request.pronunciation_overrides:
-                request_inputs["pronunciation_overrides"] = overrides
+            if request.tokens or request.pronunciation_overrides:
+                import kittensynth
+
+                tokens, overrides = _kitten_request_inputs(request, kittensynth)
+                if request.tokens:
+                    request_inputs["tokens"] = tokens
+                if request.pronunciation_overrides:
+                    request_inputs["pronunciation_overrides"] = overrides
             measured = measure_method(request.text, **request_inputs)
         except EngineSynthesisError:
             raise
@@ -509,14 +510,15 @@ class KittenSynthEngineSession:
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
         speed = float(self._selection.options.get("speed", 1.0))
         try:
-            import kittensynth
-
-            tokens, overrides = _kitten_request_inputs(request, kittensynth)
             request_inputs: dict[str, Any] = {}
-            if request.tokens:
-                request_inputs["tokens"] = tokens
-            if request.pronunciation_overrides:
-                request_inputs["pronunciation_overrides"] = overrides
+            if request.tokens or request.pronunciation_overrides:
+                import kittensynth
+
+                tokens, overrides = _kitten_request_inputs(request, kittensynth)
+                if request.tokens:
+                    request_inputs["tokens"] = tokens
+                if request.pronunciation_overrides:
+                    request_inputs["pronunciation_overrides"] = overrides
             result = self._voice.synthesize_prepared(
                 request.text,
                 voice=request.voice or self._selection.voice or DEFAULT_KITTEN_VOICE,
