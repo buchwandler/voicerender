@@ -3006,7 +3006,12 @@ def main(argv: list[str] | None = None) -> int:
                     print("Pauses")
                     print(f"  mode: {pause_mode}")
                     if pause_mode == "manual":
-                        for boundary in ("clause", "parenthetical", "sentence", "paragraph"):
+                        for boundary in (
+                            "clause",
+                            "parenthetical",
+                            "sentence",
+                            "paragraph",
+                        ):
                             if boundary in pauses:
                                 print(f"  {boundary}: {pauses[boundary]}")
                         print("  speech artifact tails: trimmed")

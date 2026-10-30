@@ -1024,7 +1024,9 @@ def test_preflight_failure_message_identifies_single_affected_speech_item() -> N
     assert "Because someone (A R T) finally." not in summary
 
 
-def test_preflight_failure_message_without_segment_metadata_keeps_compact_cause() -> None:
+def test_preflight_failure_message_without_segment_metadata_keeps_compact_cause() -> (
+    None
+):
     from voicerender.preflight import preflight_failure_message
 
     report = SimpleNamespace(

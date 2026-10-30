@@ -192,6 +192,7 @@ def test_new_profiles_default_to_parenthetical_pause(
         },
     )
 
+
 def test_refresh_updates_only_engine_facts_and_preserves_user_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

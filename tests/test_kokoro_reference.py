@@ -346,14 +346,16 @@ def test_measurement_request_validation_error_preserves_source(
         pass
 
     state["measure_error"] = InvalidRequestError("invalid say_as request")
-    with adapter.open(selection) as session, pytest.raises(
-        InvalidSpeechRequestError
-    ) as caught:
+    with (
+        adapter.open(selection) as session,
+        pytest.raises(InvalidSpeechRequestError) as caught,
+    ):
         session.measure(
             SpeechRequest(id="invalid-measurement", text="A R T", language="en-US")
         )
 
     assert getattr(caught.value, "source", None) == "pykokoro.measure_request"
+
 
 def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> None:
     static = _target_from_capabilities(

@@ -466,7 +466,12 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
         profile,
         pauses=PausePolicy(
             mode="manual",
-            durations_ms={"clause": 180, "parenthetical": 180, "sentence": 500, "paragraph": 800},
+            durations_ms={
+                "clause": 180,
+                "parenthetical": 180,
+                "sentence": 500,
+                "paragraph": 800,
+            },
         ),
         profile_id=None,
     ).with_identity()
