@@ -209,7 +209,7 @@ jobs:
                   for value in metadata.get_all("Requires-Dist", [])
                   if Requirement(value).name.lower() == "renderplan"
               )
-              assert {">=0.1.2", "<0.2"} <= {
+              assert {">=0.2.1", "<0.3"} <= {
                   str(specifier) for specifier in renderplan_requirement.specifier
               }
               base_requirements = set()
