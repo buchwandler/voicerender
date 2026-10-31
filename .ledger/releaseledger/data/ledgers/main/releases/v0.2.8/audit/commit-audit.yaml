@@ -1,0 +1,699 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.2.8
+git_base_ref: v0.2.7
+git_base_sha: bae27535283b1d3be79a22106304898bd8ec723f
+git_head_ref: HEAD
+git_head_sha: 1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+git_range: bae27535283b1d3be79a22106304898bd8ec723f..1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+commit_count: 24
+rows:
+  - sha: facf1522283965a9ae643c9d76d358a8321b2ce4
+    source_ref: git:facf1522283965a9ae643c9d76d358a8321b2ce4
+    short_sha: facf152
+    changed_paths:
+      - tests/test_pocketsynth_managed.py
+      - voicerender/engines/pocketsynth.py
+    stats:
+      files_changed: 2
+      insertions: 263
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/pocketsynth.py
+      - tests/test_pocketsynth_managed.py
+    observed_behavior:
+      PocketSynth rendered audio is adapted to the shared full-scale
+      PCM policy and clipping metadata is recorded
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: fix pocket gain"
+    target_entry_id: entry-0001
+    notes: Covered by the PocketSynth PCM safety entry
+  - sha: 5b4f1f2e3c65ebcc617ca8f35624b42540a61bbe
+    source_ref: git:5b4f1f2e3c65ebcc617ca8f35624b42540a61bbe
+    short_sha: 5b4f1f2
+    changed_paths:
+      - tests/test_model_management_api.py
+      - tests/test_model_management_cli.py
+      - tests/test_soprosynth_engine.py
+      - voicerender/cli.py
+      - voicerender/models_api.py
+    stats:
+      files_changed: 5
+      insertions: 223
+      deletions: 13
+    inspected: true
+    inspected_paths:
+      - voicerender/models_api.py
+      - voicerender/cli.py
+      - tests/test_model_management_api.py
+      - tests/test_model_management_cli.py
+    observed_behavior:
+      Model artifacts report installed quality state accurately and
+      model metadata is serialized through stable JSON-safe fields
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: sopro models fix"
+    target_entry_id: entry-0002
+    notes: Covered by the stable metadata entry
+  - sha: a929bbd8428c30924ec014eae6eceadda3ee0da6
+    source_ref: git:a929bbd8428c30924ec014eae6eceadda3ee0da6
+    short_sha: a929bbd
+    changed_paths:
+      - .github/workflows/tests.yml
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_jsonutil.py
+      - tests/test_model_management_api.py
+      - tests/test_sopro_release_compatibility.py
+      - tests/test_voice_descriptors.py
+      - voicerender/capacity.py
+      - voicerender/engines/pipersynth.py
+      - voicerender/engines/registry.py
+      - voicerender/jsonutil.py
+      - voicerender/models_api.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/voices_api.py
+    stats:
+      files_changed: 16
+      insertions: 348
+      deletions: 64
+    inspected: true
+    inspected_paths:
+      - voicerender/jsonutil.py
+      - voicerender/models_api.py
+      - voicerender/voices_api.py
+      - voicerender/engines/registry.py
+      - voicerender/preflight.py
+    observed_behavior:
+      Engine, model, voice, and render metadata use a shared JSON-safe
+      serializer instead of leaking unsupported dataclass values
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: improve sopro embedding"
+    target_entry_id: entry-0002
+    notes: Covered by the stable metadata entry
+  - sha: 58f64e96e492141af1ae00f945ad6fa2d7315dcd
+    source_ref: git:58f64e96e492141af1ae00f945ad6fa2d7315dcd
+    short_sha: 58f64e9
+    changed_paths:
+      - .github/workflows/tests.yml
+      - .ledger/releaseledger/data/ledgers/main/events/events.jsonl
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0010.md
+      - .ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+      - README.md
+      - docs/changelog.md
+      - tests/test_engine_registry.py
+      - tests/test_sopro_release_compatibility.py
+      - tests/test_soprosynth_engine.py
+      - voicerender/cli.py
+      - voicerender/engines/api_probe.py
+      - voicerender/engines/soprosynth.py
+    stats:
+      files_changed: 12
+      insertions: 624
+      deletions: 52
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/soprosynth.py
+      - voicerender/engines/api_probe.py
+      - voicerender/cli.py
+      - tests/test_soprosynth_engine.py
+    observed_behavior:
+      Sopro request contracts are probed and validated explicitly,
+      with legacy-compatible fit handling and actionable measurement diagnostics
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: sopro preflight"
+    target_entry_id: entry-0003
+    notes: Covered by the Sopro compatibility entry
+  - sha: a37bba8a8ede3e49941a9aed2a7ace43b1ca8b09
+    source_ref: git:a37bba8a8ede3e49941a9aed2a7ace43b1ca8b09
+    short_sha: a37bba8
+    changed_paths:
+      - pyproject.toml
+      - tests/test_document_contract.py
+      - tests/test_error_diagnostics.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_runtime.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/error_diagnostics.py
+    stats:
+      files_changed: 8
+      insertions: 421
+      deletions: 6
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kittensynth.py
+      - voicerender/error_diagnostics.py
+      - voicerender/preflight.py
+    observed_behavior:
+      Engine diagnostics bound and redact failure details, including
+      structured Kitten model-download transport context
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: better kitten exception"
+    target_entry_id: entry-0004
+    notes: Covered by the diagnostics entry
+  - sha: 3bad4f0a6245ff90034a3eda939e6c1b8fa1a6f5
+    source_ref: git:3bad4f0a6245ff90034a3eda939e6c1b8fa1a6f5
+    short_sha: 3bad4f0
+    changed_paths:
+      - tests/test_chatterboxsynth_engine.py
+      - voicerender/engines/chatterboxsynth.py
+    stats:
+      files_changed: 2
+      insertions: 114
+      deletions: 2
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/chatterboxsynth.py
+      - tests/test_chatterboxsynth_engine.py
+    observed_behavior:
+      Chatterbox synthesis options omit unset generation overrides
+      so backend defaults remain effective
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: chatterbox"
+    target_entry_id: entry-0005
+    notes: Covered by the Chatterbox management entry
+  - sha: 78759945fd47f5a1970a420472e2f6b00c1a85fa
+    source_ref: git:78759945fd47f5a1970a420472e2f6b00c1a85fa
+    short_sha: "7875994"
+    changed_paths:
+      - tests/test_chatterboxsynth_engine.py
+      - tests/test_document_contract.py
+      - tests/test_model_management_api.py
+      - tests/test_model_management_cli.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - voicerender/book.py
+      - voicerender/cli.py
+      - voicerender/document.py
+      - voicerender/engines/chatterbox_assets.py
+      - voicerender/engines/chatterboxsynth.py
+      - voicerender/engines/registry.py
+      - voicerender/models_api.py
+      - voicerender/preflight.py
+    stats:
+      files_changed: 14
+      insertions: 671
+      deletions: 26
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/chatterbox_assets.py
+      - voicerender/engines/chatterboxsynth.py
+      - voicerender/models_api.py
+      - voicerender/preflight.py
+      - voicerender/cli.py
+    observed_behavior:
+      Chatterbox exposes canonical target model listing, quality-aware
+      installation, per-quality status, and actionable missing-profile errors
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: improved model download handling"
+    target_entry_id: entry-0005
+    notes: Covered by the Chatterbox management entry
+  - sha: 4baf17e7ab9f64d7dfd7e6bbe889de97a703030d
+    source_ref: git:4baf17e7ab9f64d7dfd7e6bbe889de97a703030d
+    short_sha: 4baf17e
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_profile_reidentify.py
+      - voicerender/cli.py
+      - voicerender/renderprofile.py
+    stats:
+      files_changed: 6
+      insertions: 184
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - voicerender/renderprofile.py
+      - voicerender/cli.py
+      - docs/renderprofile.md
+      - README.md
+    observed_behavior:
+      Profiles can be reidentified from authored content through a
+      dedicated CLI operation without engine validation
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: reinit profile id added"
+    target_entry_id: entry-0006
+    notes: Covered by the profile identity entry
+  - sha: 72676e0a95972739f8cad9869aa7b166fe77002b
+    source_ref: git:72676e0a95972739f8cad9869aa7b166fe77002b
+    short_sha: 72676e0
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - tests/test_bundle_inspect.py
+      - tests/test_preflight.py
+      - tests/test_profile_reidentify.py
+      - voicerender/bundle_inspect.py
+      - voicerender/cli.py
+      - voicerender/preflight.py
+      - voicerender/renderprofile.py
+    stats:
+      files_changed: 9
+      insertions: 693
+      deletions: 114
+    inspected: true
+    inspected_paths:
+      - voicerender/bundle_inspect.py
+      - voicerender/preflight.py
+      - voicerender/cli.py
+      - voicerender/renderprofile.py
+    observed_behavior:
+      Bundle inspection compares authored profiles with immutable variant
+      snapshots and reports structured differences and remediation
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: profile id"
+    target_entry_id: entry-0006
+    notes: Covered by the profile identity entry
+  - sha: a561679b1a3082a22c7f0eff937c65522ab57b03
+    source_ref: git:a561679b1a3082a22c7f0eff937c65522ab57b03
+    short_sha: a561679
+    changed_paths:
+      - README.md
+      - tests/test_engine_options.py
+      - tests/test_kokoro_reference.py
+      - tests/test_lexicons_cli.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - voicerender/cli.py
+      - voicerender/engines/kokoro.py
+    stats:
+      files_changed: 8
+      insertions: 1606
+      deletions: 8
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kokoro.py
+      - voicerender/cli.py
+      - voicerender/lexicons.py
+      - tests/test_lexicons_cli.py
+    observed_behavior:
+      Kokoro profiles can discover named pronunciation lexicons and
+      pin validated local G2Lex files with deterministic precedence
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: better g2lex support"
+    target_entry_id: entry-0007
+    notes: Covered by the Kokoro pronunciation entry
+  - sha: db46ed5760d566a0a1344dc7bc1879d3b6f64f31
+    source_ref: git:db46ed5760d566a0a1344dc7bc1879d3b6f64f31
+    short_sha: db46ed5
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_document_contract.py
+      - tests/test_engine_registry.py
+      - tests/test_kittensynth_engine.py
+      - tests/test_kittensynth_pronunciation.py
+      - tests/test_lexicons_cli.py
+      - tests/test_preflight.py
+      - voicerender/bundle_inspect.py
+      - voicerender/cli.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/lexicons.py
+    stats:
+      files_changed: 13
+      insertions: 1481
+      deletions: 63
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kittensynth.py
+      - voicerender/lexicons.py
+      - voicerender/cli.py
+    observed_behavior:
+      Kitten profiles support named and local pronunciation sources,
+      pinned G2Lex validation, and pronunciation-stack inspection
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: use improved kitten api"
+    target_entry_id: entry-0008
+    notes: Covered by the Kitten pronunciation entry
+  - sha: 0eedac5a018a25e0fb7bd244868b46164a0f76d0
+    source_ref: git:0eedac5a018a25e0fb7bd244868b46164a0f76d0
+    short_sha: 0eedac5
+    changed_paths:
+      - docs/renderprofile.md
+      - tests/test_kittensynth_pronunciation.py
+      - tests/test_preflight.py
+      - tests/test_renderplan_input.py
+      - tests/test_renderprofile.py
+      - voicerender/engines/kittensynth.py
+    stats:
+      files_changed: 6
+      insertions: 197
+      deletions: 15
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kittensynth.py
+      - tests/test_kittensynth_pronunciation.py
+    observed_behavior:
+      Kitten forwards available linguistic context without requiring
+      every optional token field
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: kitten"
+    target_entry_id: entry-0008
+    notes: Covered by the Kitten pronunciation entry
+  - sha: fd8b266697c70da613ec9b64a86e4656d1bbc33b
+    source_ref: git:fd8b266697c70da613ec9b64a86e4656d1bbc33b
+    short_sha: fd8b266
+    changed_paths:
+      - pyproject.toml
+      - tests/test_kittensynth_pronunciation.py
+      - tests/test_preflight.py
+      - voicerender/engines/kittensynth.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+    stats:
+      files_changed: 6
+      insertions: 297
+      deletions: 12
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kittensynth.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_input.py
+      - pyproject.toml
+    observed_behavior:
+      Kitten pronunciation capability contracts and measurement diagnostics
+      require compatible runtime dependencies and preserve source context
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: update kitten dep"
+    target_entry_id: entry-0008
+    notes: Covered by the Kitten pronunciation entry
+  - sha: a61d829722b59ae51a0a7c8be54340c94b2a1b49
+    source_ref: git:a61d829722b59ae51a0a7c8be54340c94b2a1b49
+    short_sha: a61d829
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_audio_boundaries.py
+      - tests/test_cli.py
+      - tests/test_document_contract.py
+      - tests/test_engine_options.py
+      - tests/test_kokoro_reference.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_render.py
+      - voicerender/audio_boundaries.py
+      - voicerender/cli.py
+      - voicerender/engines/kokoro.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 17
+      insertions: 958
+      deletions: 62
+    inspected: true
+    inspected_paths:
+      - voicerender/audio_boundaries.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+      - voicerender/engines/kokoro.py
+    observed_behavior:
+      Rendered speech tails are normalized under a versioned policy,
+      timings are clamped safely, and cache metadata records the boundary operation
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: remove silence"
+    target_entry_id: entry-0009
+    notes: Covered by the audio boundary entry
+  - sha: f9e16602b52bc71da1b5ec735cfcbcd5bcede0f2
+    source_ref: git:f9e16602b52bc71da1b5ec735cfcbcd5bcede0f2
+    short_sha: f9e1660
+    changed_paths:
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_capacity.py
+      - tests/test_control_surface_exports.py
+      - tests/test_engine_contracts.py
+      - tests/test_engine_registry.py
+      - tests/test_kokoro_reference.py
+      - tests/test_renderplan_input.py
+      - voicerender/__init__.py
+      - voicerender/audio_boundaries.py
+      - voicerender/capacity.py
+      - voicerender/engines/base.py
+      - voicerender/engines/kokoro.py
+      - voicerender/engines/registry.py
+      - voicerender/renderplan_input.py
+    stats:
+      files_changed: 15
+      insertions: 563
+      deletions: 26
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/base.py
+      - voicerender/renderplan_input.py
+      - voicerender/capacity.py
+      - voicerender/engines/kokoro.py
+    observed_behavior:
+      Speech requests support validated say-as spans and Kokoro lowers
+      character interpretation controls through capacity planning and synthesis
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: say as support"
+    target_entry_id: entry-0010
+    notes: Covered by the say-as entry
+  - sha: 508918408e9e3611b1ba4f92aac99d9d0df483a8
+    source_ref: git:508918408e9e3611b1ba4f92aac99d9d0df483a8
+    short_sha: "5089184"
+    changed_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - docs/index.md
+      - pyproject.toml
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_render_book.py
+      - voicerender/engines/kokoro.py
+      - voicerender/preflight.py
+    stats:
+      files_changed: 9
+      insertions: 138
+      deletions: 15
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kokoro.py
+      - voicerender/preflight.py
+      - README.md
+    observed_behavior:
+      Kokoro compatibility checks target the supported runtime contract
+      and preflight diagnostics identify the affected speech item
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: kokoro fix"
+    target_entry_id: entry-0007
+    notes: Covered by the Kokoro compatibility entry
+  - sha: 05451ee230e85149052f2f77d4b00ef0b24373bc
+    source_ref: git:05451ee230e85149052f2f77d4b00ef0b24373bc
+    short_sha: 05451ee
+    changed_paths:
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_profile_roles_cli.py
+      - tests/test_renderprofile.py
+      - voicerender/cli.py
+      - voicerender/renderprofile.py
+    stats:
+      files_changed: 6
+      insertions: 54
+      deletions: 11
+    inspected: true
+    inspected_paths:
+      - voicerender/renderprofile.py
+      - voicerender/cli.py
+      - docs/renderprofile.md
+    observed_behavior:
+      Manual pause policies support parenthetical boundaries and profile
+      inspection explains normalized speech composition
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add parenthesis pause"
+    target_entry_id: entry-0011
+    notes: Covered by the pause policy entry
+  - sha: a48ba9be6a4944ecda32046644ecdf1aed359989
+    source_ref: git:a48ba9be6a4944ecda32046644ecdf1aed359989
+    short_sha: a48ba9b
+    changed_paths:
+      - pyproject.toml
+    stats:
+      files_changed: 1
+      insertions: 1
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - pyproject.toml
+    observed_behavior:
+      Package metadata advances the development version toward the
+      v0.2.8 release line
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "feat: raise version"
+    notes: Version metadata is not public release-note prose
+  - sha: f41ea26af53202824169b9b377515b5830d5cf38
+    source_ref: git:f41ea26af53202824169b9b377515b5830d5cf38
+    short_sha: f41ea26
+    changed_paths:
+      - tests/test_renderplan_render.py
+      - voicerender/engines/kittensynth.py
+    stats:
+      files_changed: 2
+      insertions: 24
+      deletions: 16
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kittensynth.py
+      - tests/test_renderplan_render.py
+    observed_behavior:
+      Kitten omits optional request inputs when no linguistic controls
+      are present, preserving compatibility with older prepared voices
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: fix kitten"
+    target_entry_id: entry-0008
+    notes: Covered by the Kitten pronunciation entry
+  - sha: e1011f03ed221393aa5697a73214674a2701d072
+    source_ref: git:e1011f03ed221393aa5697a73214674a2701d072
+    short_sha: e1011f0
+    changed_paths:
+      - voicerender/jsonutil.py
+      - voicerender/models_api.py
+    stats:
+      files_changed: 2
+      insertions: 2
+      deletions: 2
+    inspected: true
+    inspected_paths:
+      - voicerender/jsonutil.py
+      - voicerender/models_api.py
+    observed_behavior:
+      JSON path values use portable POSIX serialization for model metadata
+      and nested diagnostic values
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: path"
+    target_entry_id: entry-0002
+    notes: Covered by the stable metadata entry
+  - sha: 01e1ff8ce42f723b46628520706e1bd549214531
+    source_ref: git:01e1ff8ce42f723b46628520706e1bd549214531
+    short_sha: 01e1ff8
+    changed_paths:
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_renderprofile.py
+      - voicerender/cli.py
+    stats:
+      files_changed: 5
+      insertions: 21
+      deletions: 6
+    inspected: true
+    inspected_paths:
+      - voicerender/cli.py
+      - voicerender/preflight.py
+      - voicerender/renderprofile.py
+      - tests/test_kokoro_reference.py
+    observed_behavior:
+      Regression coverage and CLI formatting fixes stabilize the profile,
+      preflight, and Kokoro paths without adding user-facing capability
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "fix: pytest"
+    notes: Test and formatting maintenance
+  - sha: fecfbffbbfc2d365b13a67abbfc378aa40d4a9b8
+    source_ref: git:fecfbffbbfc2d365b13a67abbfc378aa40d4a9b8
+    short_sha: fecfbff
+    changed_paths:
+      - .github/workflows/tests.yml
+    stats:
+      files_changed: 1
+      insertions: 5
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+    observed_behavior: CI workflow configuration is adjusted for the test matrix
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: ci"
+    notes: CI maintenance
+  - sha: a47820e550aa6f14bb36e6ab9cd21d44efdb0517
+    source_ref: git:a47820e550aa6f14bb36e6ab9cd21d44efdb0517
+    short_sha: a47820e
+    changed_paths:
+      - .github/workflows/tests.yml
+    stats:
+      files_changed: 1
+      insertions: 1
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+    observed_behavior: CI workflow configuration receives a follow-up matrix adjustment
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "chore: ci"
+    notes: CI maintenance
+  - sha: 1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+    source_ref: git:1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+    short_sha: 1eac844
+    changed_paths:
+      - tests/test_soprosynth_engine.py
+    stats:
+      files_changed: 1
+      insertions: 2
+      deletions: 2
+    inspected: true
+    inspected_paths:
+      - tests/test_soprosynth_engine.py
+    observed_behavior:
+      Regression expectation is aligned with the producer-provided
+      Sopro maximum measurement
+    public_impact: internal
+    decision: internal
+    stale: false
+    evidence_subject: "fix: pytest"
+    notes: Test-only maintenance

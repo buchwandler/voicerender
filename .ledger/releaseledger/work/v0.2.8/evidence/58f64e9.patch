@@ -1,0 +1,1040 @@
+ .github/workflows/tests.yml                        |   2 +-
+ .../data/ledgers/main/events/events.jsonl          |   1 +
+ .../main/releases/0.2.1/entries/entry-0010.md      |  33 ++
+ .../data/ledgers/main/releases/0.2.1/release.md    |   4 +-
+ README.md                                          |   6 +
+ docs/changelog.md                                  |   1 +
+ tests/test_engine_registry.py                      |   4 +
+ tests/test_sopro_release_compatibility.py          |  16 +-
+ tests/test_soprosynth_engine.py                    | 396 ++++++++++++++++++++-
+ voicerender/cli.py                                 |  28 ++
+ voicerender/engines/api_probe.py                   |  13 +-
+ voicerender/engines/soprosynth.py                  | 172 +++++++--
+ 12 files changed, 624 insertions(+), 52 deletions(-)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 575a4a1..81fc94b 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -105,7 +105,7 @@ jobs:
+             "supertonicsynth[cpu]==0.1.2" \
+             "inflectsynth[cpu]==0.1.1"
+       - name: Run released-set compatibility contracts
+-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_sopro_release_compatibility.py
++        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
+
+   lower-bounds:
+     runs-on: ubuntu-latest
+diff --git a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+index 622dfe4..0db2e0b 100644
+--- a/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
++++ b/.ledger/releaseledger/data/ledgers/main/events/events.jsonl
+@@ -61,3 +61,4 @@
+ {"data":{"updated_rows":18},"event":"audit.updated","event_id":"event-0061","record_revisions":{"commit_audit_sheet":2},"release_version":"0.2.7","schema_version":2}
+ {"data":{"entry_ids":["entry-0001","entry-0002","entry-0003","entry-0004"],"synced_audit_rows":16},"event":"entry.batch_added","event_id":"event-0062","record_revisions":{"commit_audit_sheet":3,"entry:0.2.7/entry-0001":1,"entry:0.2.7/entry-0002":1,"entry:0.2.7/entry-0003":1,"entry:0.2.7/entry-0004":1,"release:0.2.7":3},"release_version":"0.2.7","schema_version":2}
+ {"data":{"released_at":"2026-10-24"},"event":"release.finalized","event_id":"event-0063","record_revisions":{"release:0.2.7":4},"release_version":"0.2.7","schema_version":2}
++{"data":{"kind":"fixed","status":"accepted"},"entry_id":"entry-0010","event":"entry.added","event_id":"event-0064","record_revisions":{"entry:0.2.1/entry-0010":1,"release:0.2.1":8},"release_version":"0.2.1","schema_version":2}
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0010.md b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0010.md
+new file mode 100644
+index 0000000..483e9b8
+--- /dev/null
++++ b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/entries/entry-0010.md
+@@ -0,0 +1,33 @@
++---
++schema_version: 2
++object_type: release_entry
++versioning:
++  schema_version: 1
++  revision: 1
++entry_id: entry-0010
++release_version: 0.2.1
++kind: fixed
++summary: Fixed Sopro preflight capacity handling for authoritative and legacy measurements
++status: accepted
++audience: null
++scopes: []
++source_refs:
++  - tl:task-0041
++paths:
++  - README.md
++  - .github/workflows/tests.yml
++  - tests/test_soprosynth_engine.py
++  - tests/test_sopro_release_compatibility.py
++  - voicerender/engines/api_probe.py
++  - voicerender/engines/soprosynth.py
++  - voicerender/cli.py
++issues: []
++prs: []
++sources: []
++contributors: []
++breaking: false
++internal: false
++order: 10
++---
++
++VoiceRender validates Sopro's exact model-token measurements, honors producer fit results without requiring a finite maximum, and enables a narrow compatibility bridge for SoproSynth 0.1.0/0.1.1 only when API v1 confirms engine-owned text boundaries. Other unknown-fit measurements remain rejected; character limits are never converted into token limits.
+diff --git a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+index 0a0772f..bf26a87 100644
+--- a/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
++++ b/.ledger/releaseledger/data/ledgers/main/releases/0.2.1/release.md
+@@ -3,7 +3,7 @@ schema_version: 2
+ object_type: release
+ versioning:
+   schema_version: 1
+-  revision: 7
++  revision: 8
+ version: 0.2.1
+ status: planned
+ history_state: curated
+@@ -16,7 +16,7 @@ changelog_file: null
+ boundary_ref: null
+ source_refs: []
+ source_count: null
+-entry_count: 9
++entry_count: 10
+ artifact_count: 0
+ git_base_ref: v0.2.0
+ git_base_sha: a627d2d625bc3e6daae8e3bee58abb77231918ec
+diff --git a/README.md b/README.md
+index 400cee0..04683eb 100644
+--- a/README.md
++++ b/README.md
+@@ -44,6 +44,12 @@ PiperSynth owns the authoritative phoneme-capacity decision, and the `.[piper]`
+
+ `maximum=None` is not itself an error. `fits=None` is the fail-closed state: VoiceRender rejects preflight without attempting synthesis. Native PiperSynth measurement metadata, including capacity kind/source when provided, is retained in `RequestMeasure.details.native_metadata`; VoiceRender does not infer fit from that metadata.
+
++### Sopro request measurement
++
++SoproSynth owns request tokenization and internal text segmentation. VoiceRender forwards its exact measurement and authoritative `fits` result; a finite `max_input_tokens` is optional. `fits=True` with `maximum=None` is accepted, `fits=False` requests replanning, and `fits=None` remains fail-closed in the engine-neutral preflight classifier.
++
++The `.[sopro]` extra allows SoproSynth `>=0.1.0,<0.2`. For the known legacy releases 0.1.0 and 0.1.1 only, VoiceRender may infer `fits=True` from a valid exact token count when the maximum and producer fit are absent and the API-v1 contract confirms `supports_request_measurement=True` and `caller_owns_text_boundaries=False`. Other versions must provide fit authority themselves; unknown fit continues to reject preflight. The bridge does not estimate token limits from `max_segment_chars` or convert characters to tokens. Repeated identical unknown-fit failures also receive a concise CLI summary while every per-request check remains in the report.
++
+ ## CLI workflow
+
+ A planning tool produces a shared RenderPlan whose `render_profile_id` and role bindings match the selected RenderProfile. Create the first/default role of a complete cast through adapter discovery when needed; see the [RenderProfile lifecycle](docs/renderprofile.md):
+diff --git a/docs/changelog.md b/docs/changelog.md
+index 7f8ab41..cd4a5fd 100644
+--- a/docs/changelog.md
++++ b/docs/changelog.md
+@@ -86,6 +86,7 @@
+ ### Fixed
+
+ - Fixed KittenSynth over-limit error reporting with replan details
++- Fixed Sopro preflight capacity handling for authoritative and legacy measurements
+
+ <!-- generated by releaseledger -->
+
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index f3cebc0..65f768d 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -284,6 +284,8 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+             supports_reference_voice=True,
+             supports_request_measurement=True,
+             supports_named_voices=False,
++            version=1,
++            caller_owns_text_boundaries=False,
+         )
+     elif engine == "kokoro":
+         fake.request_api_contract = lambda: SimpleNamespace(
+@@ -698,6 +700,8 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
+             supports_reference_voice=True,
+             supports_request_measurement=True,
+             supports_named_voices=False,
++            version=1,
++            caller_owns_text_boundaries=False,
+         )
+         fake.discover_bundles = lambda **kwargs: (
+             SimpleNamespace(
+diff --git a/tests/test_sopro_release_compatibility.py b/tests/test_sopro_release_compatibility.py
+index 78032d1..8d1ec6d 100644
+--- a/tests/test_sopro_release_compatibility.py
++++ b/tests/test_sopro_release_compatibility.py
+@@ -5,7 +5,10 @@ from collections.abc import Mapping
+
+ import pytest
+
+-from voicerender.engines.soprosynth import _target_from_bundle
++from voicerender.engines.soprosynth import (
++    SoproSynthEngineAdapter,
++    _target_from_bundle,
++)
+ from voicerender.models_api import _from_target, model_artifact_to_dict
+
+
+@@ -41,3 +44,14 @@ def test_released_discovered_bundle_metadata_crosses_model_json_boundary() -> No
+     assert isinstance(payload["metadata"]["catalog"], dict)
+     assert isinstance(payload["metadata"]["catalog"]["profile"]["providers"], list)
+     assert json.loads(encoded) == payload
++
++
++def test_released_sopro_measurement_contract_is_compatible() -> None:
++    soprosynth = pytest.importorskip("soprosynth")
++    contract = soprosynth.request_api_contract()
++
++    assert contract.version == soprosynth.REQUEST_API_VERSION == 1
++    assert contract.supports_request_measurement is True
++    assert contract.caller_owns_text_boundaries is False
++    probe = SoproSynthEngineAdapter().probe_api()
++    assert probe.compatible, probe
+diff --git a/tests/test_soprosynth_engine.py b/tests/test_soprosynth_engine.py
+index 46d6ab1..3641bde 100644
+--- a/tests/test_soprosynth_engine.py
++++ b/tests/test_soprosynth_engine.py
+@@ -9,12 +9,18 @@ from typing import Any
+
+ import numpy as np
+ import pytest
++from renderplan import RenderPlan, SourceSpan, SpeechItem, load_preflight, save_plan
+
+ from voicerender.engines.base import SpeechRequest
+ from voicerender.engines.catalog import CatalogRequest
+-from voicerender.engines.registry import normalize_engine_id
++from voicerender.engines.registry import _ADAPTERS, normalize_engine_id
+ from voicerender.engines.selection import EngineRequest
+-from voicerender.errors import EngineSelectionError, InvalidEngineVoiceError
++from voicerender.errors import (
++    EngineBackendError,
++    EngineSelectionError,
++    InvalidEngineVoiceError,
++)
++from voicerender.preflight import preflight_render_plan
+ from voicerender.voice_sources import (
+     ResolvedReferenceAudio,
+     local_prepared_voice_source,
+@@ -34,7 +40,9 @@ def _managed_source() -> dict[str, str]:
+     }
+
+
+-def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
++def _fake_soprosynth(
++    *, max_input_tokens: int | None = 128
++) -> tuple[ModuleType, dict[str, Any]]:
+     module = ModuleType("soprosynth")
+     module.__version__ = "0.1.0"
+     module.__file__ = "/fake/soprosynth/__init__.py"
+@@ -43,9 +51,12 @@ def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
+         "loads": [],
+         "prepared": [],
+         "measurements": [],
++        "measurement_result": None,
++        "measurement_results": {},
+         "syntheses": [],
+         "closed": 0,
+         "from_pretrained": 0,
++        "contract_calls": 0,
+     }
+
+     class SoproSynthError(Exception):
+@@ -87,7 +98,13 @@ def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
+
+         def measure_request(self, request: Any, *, maximum: int | None = None) -> Any:
+             state["measurements"].append((request, maximum))
+-            return SimpleNamespace(amount=7, maximum=maximum, fits=None)
++            result = state["measurement_results"].get(request.text)
++            if result is not None:
++                return result
++            result = state["measurement_result"]
++            if result is not None:
++                return result
++            return SimpleNamespace(amount=7, maximum=maximum, fits=None, unit="tokens")
+
+         def prepare_voice(
+             self,
+@@ -168,7 +185,7 @@ def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
+         source_commit="commit-1",
+         metadata=MappingProxyType(
+             {
+-                "max_input_tokens": 128,
++                "max_input_tokens": max_input_tokens,
+                 "catalog": MappingProxyType(
+                     {
+                         "profile_metadata": MappingProxyType(
+@@ -203,23 +220,90 @@ def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
+         "request_api_version": "1",
+     }
+     module.REQUEST_API_VERSION = 1
+-    module.request_api_contract = lambda: SimpleNamespace(
+-        version=1,
+-        supports_reference_voice=True,
+-        supports_request_measurement=True,
+-        supports_named_voices=False,
+-    )
++
++    def request_api_contract() -> Any:
++        state["contract_calls"] += 1
++        return SimpleNamespace(
++            version=1,
++            supports_reference_voice=True,
++            supports_request_measurement=True,
++            supports_named_voices=False,
++            caller_owns_text_boundaries=False,
++        )
++
++    module.request_api_contract = request_api_contract
+     return module, state
+
+
+-def _install(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any]]:
++def _install(
++    monkeypatch: pytest.MonkeyPatch, *, max_input_tokens: int | None = 128
++) -> tuple[Any, dict[str, Any]]:
+     from voicerender.engines.soprosynth import SoproSynthEngineAdapter
+
+-    module, state = _fake_soprosynth()
++    module, state = _fake_soprosynth(max_input_tokens=max_input_tokens)
+     monkeypatch.setitem(sys.modules, "soprosynth", module)
+     return SoproSynthEngineAdapter(), state
+
+
++def _measure_once(
++    monkeypatch: pytest.MonkeyPatch,
++    measurement: Any,
++    *,
++    max_input_tokens: int | None = 128,
++    package_version: str | None = None,
++) -> Any:
++    adapter, state = _install(monkeypatch, max_input_tokens=max_input_tokens)
++    module = sys.modules["soprosynth"]
++    if package_version is not None:
++        module.__version__ = package_version
++    state["measurement_result"] = measurement
++    selection, diagnostics = adapter.resolve(
++        EngineRequest(
++            engine="sopro",
++            target_id="model-v1",
++            language="en-US",
++            options={"voice_source": _managed_source()},
++        )
++    )
++    assert diagnostics == ()
++    with adapter.open(selection) as session:
++        return session.measure(
++            SpeechRequest(id="measure-test", text="Measured text.", language="en-US")
++        )
++
++
++def _sopro_renderplan(texts: tuple[str, ...]) -> RenderPlan:
++    binding = {
++        "renderer": "sopro",
++        "target_id": "model-v1",
++        "options": {"voice_source": _managed_source()},
++    }
++    items = tuple(
++        SpeechItem(
++            number=index,
++            text=text,
++            language="en-US",
++            role="narrator",
++            binding=binding,
++            source=(
++                SourceSpan(
++                    locator=f"source-{index}",
++                    start=0,
++                    end=len(text),
++                ),
++            ),
++            planning_level="sentence",
++            preflight_required=True,
++        )
++        for index, text in enumerate(texts, start=1)
++    )
++    return RenderPlan(
++        source_plan_id="sha256:" + "1" * 64,
++        render_profile_id="sha256:" + "2" * 64,
++        flow=items,
++    ).with_identity()
++
++
+ def test_sopro_api_probe_discovery_and_target_capabilities(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -231,6 +315,9 @@ def test_sopro_api_probe_discovery_and_target_capabilities(
+
+     assert probe.compatible, probe
+     assert probe.api_version == 1
++    assert probe.details["request_api_contract"]["caller_owns_text_boundaries"] is False
++    assert adapter.probe_api() is probe
++    assert state["contract_calls"] == 1
+     assert len(targets) == 1
+     assert targets[0].id == "model-v1"
+     assert targets[0].metadata["bundle_ref"] == "sopro:model-v1"
+@@ -329,6 +416,8 @@ def test_sopro_preflight_measures_without_resolving_or_preparing_and_reuses_voic
+         assert measured.maximum == 128
+         assert measured.unit == "model_tokens"
+         assert measured.source == "soprosynth.measure_request"
++        assert session._request_contract is not None
++        assert session._request_contract.caller_owns_text_boundaries is False
+         assert resolve_calls == []
+         assert state["prepared"] == []
+
+@@ -358,6 +447,7 @@ def test_sopro_preflight_measures_without_resolving_or_preparing_and_reuses_voic
+     assert state["loads"][0][1]["profile"] == "wasm-uint8"
+     assert state["from_pretrained"] == 0
+     assert state["closed"] == 1
++    assert state["contract_calls"] == 1
+
+
+ def test_sopro_local_reference_is_rehashed_before_preparation(
+@@ -444,6 +534,7 @@ def test_sopro_api_probe_rejects_missing_reference_measurement_contract(
+         supports_reference_voice=False,
+         supports_request_measurement=True,
+         supports_named_voices=False,
++        caller_owns_text_boundaries=False,
+     )
+
+     probe = adapter.probe_api()
+@@ -451,3 +542,282 @@ def test_sopro_api_probe_rejects_missing_reference_measurement_contract(
+     assert not probe.compatible
+     assert probe.status == "api_incompatible"
+     assert "capability_mismatches" in probe.details
++
++
++@pytest.mark.parametrize("boundary_value", (True, None))
++def test_sopro_api_probe_requires_engine_owned_text_boundaries(
++    monkeypatch: pytest.MonkeyPatch,
++    boundary_value: bool | None,
++) -> None:
++    adapter, _ = _install(monkeypatch)
++    module = sys.modules["soprosynth"]
++    contract = {
++        "version": 1,
++        "supports_reference_voice": True,
++        "supports_request_measurement": True,
++        "supports_named_voices": False,
++    }
++    if boundary_value is not None:
++        contract["caller_owns_text_boundaries"] = boundary_value
++    module.request_api_contract = lambda: SimpleNamespace(**contract)
++
++    probe = adapter.probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "api_incompatible"
++    mismatch = probe.details["capability_mismatches"]["caller_owns_text_boundaries"]
++    assert mismatch == {"expected": False, "actual": boundary_value}
++
++
++@pytest.mark.parametrize(
++    ("field", "value"),
++    (
++        ("amount", True),
++        ("amount", -1),
++        ("maximum", True),
++        ("maximum", 0),
++        ("maximum", -1),
++        ("fits", "yes"),
++        ("fits", 1),
++        ("fits", 0),
++        ("amount", "7"),
++        ("amount", 7.0),
++        ("maximum", "128"),
++        ("unit", "characters"),
++    ),
++)
++def test_sopro_rejects_malformed_producer_measurements(
++    monkeypatch: pytest.MonkeyPatch,
++    field: str,
++    value: Any,
++) -> None:
++    measurement = {"amount": 7, "maximum": None, "fits": True, "unit": "tokens"}
++    measurement[field] = value
++
++    with pytest.raises(EngineBackendError) as error:
++        _measure_once(
++            monkeypatch, SimpleNamespace(**measurement), max_input_tokens=None
++        )
++    assert error.value.code == "sopro.measurement_invalid"
++
++
++@pytest.mark.parametrize(("fits", "expected"), ((True, True), (False, False)))
++@pytest.mark.parametrize("unit", (None, "tokens", "model_tokens"))
++def test_sopro_forwards_authoritative_producer_fit_without_a_maximum(
++    monkeypatch: pytest.MonkeyPatch,
++    fits: bool,
++    expected: bool,
++    unit: str | None,
++) -> None:
++    measured = _measure_once(
++        monkeypatch,
++        SimpleNamespace(amount=31, maximum=None, fits=fits, unit=unit),
++        max_input_tokens=None,
++    )
++
++    assert measured.amount == 31
++    assert measured.maximum is None
++    assert measured.fits is expected
++    assert measured.unit == "model_tokens"
++    assert measured.details["producer_unit"] == unit
++    assert measured.details["producer_maximum"] is None
++    assert measured.details["fit_source"] == "producer"
++
++
++@pytest.mark.parametrize("package_version", ("0.1.0", "0.1.1"))
++def test_sopro_legacy_auto_boundary_contract_supplies_fit_authority(
++    monkeypatch: pytest.MonkeyPatch,
++    package_version: str,
++) -> None:
++    measured = _measure_once(
++        monkeypatch,
++        SimpleNamespace(amount=13, maximum=None, fits=None, unit="tokens"),
++        max_input_tokens=None,
++        package_version=package_version,
++    )
++
++    assert measured.amount == 13
++    assert measured.maximum is None
++    assert measured.fits is True
++    assert measured.details["fit_source"] == "legacy_contract_auto_boundaries"
++
++
++@pytest.mark.parametrize(("amount", "expected_fits"), ((20, True), (129, False)))
++def test_sopro_finite_maximum_remains_authoritative(
++    monkeypatch: pytest.MonkeyPatch,
++    amount: int,
++    expected_fits: bool,
++) -> None:
++    measured = _measure_once(
++        monkeypatch,
++        SimpleNamespace(amount=amount, maximum=128, fits=None, unit="tokens"),
++    )
++
++    assert measured.maximum == 128
++    assert measured.fits is expected_fits
++    assert measured.details["fit_source"] == "finite_maximum"
++
++
++def test_sopro_optional_capacity_metadata_is_valid(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, _ = _install(monkeypatch, max_input_tokens=None)
++    selection, diagnostics = adapter.resolve(
++        EngineRequest(
++            engine="sopro",
++            target_id="model-v1",
++            language="en-US",
++            options={"voice_source": _managed_source()},
++        )
++    )
++
++    assert diagnostics == ()
++    assert selection.metadata["max_input_tokens"] is None
++    assert adapter.renderprofile_fragment(selection).renderer_capacity is None
++
++
++def test_sopro_preflight_accepts_authoritative_fits_without_a_maximum(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++) -> None:
++    adapter, state = _install(monkeypatch, max_input_tokens=None)
++    from voicerender.engines import soprosynth
++
++    monkeypatch.setattr(soprosynth, "validate_voice_source", lambda *args, **kwargs: ())
++    monkeypatch.setitem(_ADAPTERS, "sopro", adapter)
++    amounts = (6, 13, 31, 47)
++    texts = tuple(f"request-{amount}" for amount in amounts)
++    state["measurement_results"] = {
++        text: SimpleNamespace(
++            amount=amount,
++            maximum=None,
++            fits=True,
++            unit="tokens",
++        )
++        for amount, text in zip(amounts, texts, strict=True)
++    }
++
++    report = preflight_render_plan(
++        _sopro_renderplan(texts), tmp_path / "sopro-preflight.toml"
++    )
++
++    assert report.status == "ok"
++    assert [check.status for check in report.checks] == ["ok"] * len(amounts)
++    assert [check.measured for check in report.checks] == list(amounts)
++    assert all(check.maximum is None for check in report.checks)
++    assert [maximum for _, maximum in state["measurements"]] == [None] * len(amounts)
++    assert state["syntheses"] == []
++    assert state["contract_calls"] == 1
++
++
++def test_unsupported_sopro_version_keeps_unknown_fit_unknown(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    measured = _measure_once(
++        monkeypatch,
++        SimpleNamespace(amount=13, maximum=None, fits=None, unit="tokens"),
++        max_input_tokens=None,
++        package_version="0.1.2",
++    )
++
++    assert measured.fits is None
++    assert measured.details["fit_source"] == "unknown"
++
++
++def test_installed_sopro_measurement_type_is_forwarded(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    soprosynth = pytest.importorskip("soprosynth")
++    native = soprosynth.RequestMeasure(
++        amount=31,
++        maximum=None,
++        unit="tokens",
++        fits=True,
++    )
++
++    measured = _measure_once(monkeypatch, native, max_input_tokens=None)
++
++    assert measured.amount == 31
++    assert measured.maximum is None
++    assert measured.fits is True
++    assert measured.unit == "model_tokens"
++    assert measured.details["fit_source"] == "producer"
++
++
++def test_sopro_unknown_fit_remains_rejected_by_generic_preflight(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++) -> None:
++    adapter, state = _install(monkeypatch, max_input_tokens=None)
++    module = sys.modules["soprosynth"]
++    module.__version__ = "0.1.2"
++    from voicerender.engines import soprosynth
++
++    monkeypatch.setattr(soprosynth, "validate_voice_source", lambda *args, **kwargs: ())
++    monkeypatch.setitem(_ADAPTERS, "sopro", adapter)
++    state["measurement_result"] = SimpleNamespace(
++        amount=13,
++        maximum=None,
++        fits=None,
++        unit="tokens",
++    )
++
++    report = preflight_render_plan(
++        _sopro_renderplan(("unknown fit",)), tmp_path / "sopro-unknown-fit.toml"
++    )
++
++    assert report.status == "reject"
++    assert report.checks[0].status == "error"
++    assert report.checks[0].detail == (
++        "Engine measured the exact request size but did not provide an "
++        "authoritative maximum/fit result"
++    )
++    assert state["syntheses"] == []
++
++
++def test_sopro_cli_aggregates_repeated_unknown_fit_failures(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    capsys: pytest.CaptureFixture[str],
++) -> None:
++    from voicerender.cli import main
++    from voicerender.engines import soprosynth
++
++    adapter, state = _install(monkeypatch, max_input_tokens=None)
++    module = sys.modules["soprosynth"]
++    module.__version__ = "0.1.2"
++    monkeypatch.setattr(soprosynth, "validate_voice_source", lambda *args, **kwargs: ())
++    monkeypatch.setitem(_ADAPTERS, "sopro", adapter)
++    texts = ("unknown one", "unknown two", "unknown three")
++    state["measurement_results"] = {
++        text: SimpleNamespace(
++            amount=13,
++            maximum=None,
++            fits=None,
++            unit="tokens",
++        )
++        for text in texts
++    }
++    plan_path = tmp_path / "sopro.renderplan.toml"
++    report_path = tmp_path / "sopro.preflight.toml"
++    save_plan(_sopro_renderplan(texts), plan_path)
++
++    exit_code = main(["preflight", str(plan_path), "--output", str(report_path)])
++
++    output = capsys.readouterr().out
++    assert exit_code == 1
++    assert "sopro measurement: 3/3 requests have exact model-token counts" in output
++    assert "fit authority: missing; maximum: not reported" in output
++    assert "source: soprosynth.measure_request" in output
++    assert (
++        "action: update SoproSynth or verify its request-measurement contract" in output
++    )
++    persisted = load_preflight(report_path)
++    assert len(persisted.checks) == len(texts)
++    assert all(check.status == "error" for check in persisted.checks)
++    assert all(
++        check.detail == "Engine measured the exact request size but did not provide an "
++        "authoritative maximum/fit result"
++        for check in persisted.checks
++    )
++    assert state["syntheses"] == []
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index c2ff2b0..7be8233 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -1101,6 +1101,32 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
+     }
+
+
++def _sopro_unknown_fit_summary(report: Any) -> tuple[str, ...]:
++    detail = (
++        "Engine measured the exact request size but did not provide an "
++        "authoritative maximum/fit result"
++    )
++    checks = tuple(
++        check
++        for check in report.checks
++        if check.source == "soprosynth.measure_request"
++        and check.status == "error"
++        and check.metric == "model_tokens"
++        and check.measured is not None
++        and check.maximum is None
++        and check.detail == detail
++    )
++    if len(checks) < 2:
++        return ()
++    count = len(checks)
++    return (
++        f"  sopro measurement: {count}/{count} requests have exact model-token counts",
++        "  fit authority: missing; maximum: not reported",
++        "  source: soprosynth.measure_request",
++        "  action: update SoproSynth or verify its request-measurement contract",
++    )
++
++
+ def _render_payload(result: RenderPlanResult) -> dict[str, Any]:
+     return {
+         "render_plan_id": result.manifest.render_plan_id,
+@@ -2498,6 +2524,8 @@ def main(argv: list[str] | None = None) -> int:
+                     f"{payload['replan']} replan, {payload['reject']} reject; "
+                     f"{payload['checked']} speech items"
+                 )
++                for line in _sopro_unknown_fit_summary(report):
++                    print(line)
+             return 0 if report.status == "ok" else 2 if report.status == "replan" else 1
+
+         if args.command == "render":
+diff --git a/voicerender/engines/api_probe.py b/voicerender/engines/api_probe.py
+index ba40e11..25e5f41 100644
+--- a/voicerender/engines/api_probe.py
++++ b/voicerender/engines/api_probe.py
+@@ -58,6 +58,7 @@ def _probe_public_api(
+     contract_required_symbols: tuple[str, ...] = (),
+     contract_required_methods: Mapping[str, tuple[str, ...]] | None = None,
+     legacy_required_methods: Mapping[str, tuple[str, ...]] | None = None,
++    contract_fields: tuple[str, ...] = (),
+ ) -> EngineApiProbe:
+     """Probe a package root and concrete public entry points without opening a runtime."""
+     metadata_warning: str | None = None
+@@ -207,6 +208,7 @@ def _probe_public_api(
+     contract_source: ContractSource | None = None
+     contract_names = ("REQUEST_API_VERSION", "request_api_contract")
+     contract_values: dict[str, Any] = {}
++    contract_snapshot: dict[str, Any] = {}
+     for name in contract_names:
+         try:
+             contract_values[name] = getattr(module, name)
+@@ -261,7 +263,13 @@ def _probe_public_api(
+                 missing_methods=tuple(missing_methods),
+             )
+         try:
+-            contract_function()
++            contract_result = contract_function()
++            for field_name in contract_fields:
++                contract_snapshot[field_name] = (
++                    contract_result.get(field_name)
++                    if isinstance(contract_result, Mapping)
++                    else getattr(contract_result, field_name, None)
++                )
+         except Exception as exc:
+             logger.debug(
+                 "Engine %s request API contract inspection failed",
+@@ -407,6 +415,7 @@ def _probe_public_api(
+         compatible=True,
+         status="ready",
+         warnings=tuple(warnings),
++        details={"request_api_contract": contract_snapshot} if contract_fields else {},
+     )
+
+
+@@ -421,6 +430,7 @@ def probe_public_api(
+     contract_required_symbols: tuple[str, ...] = (),
+     contract_required_methods: Mapping[str, tuple[str, ...]] | None = None,
+     legacy_required_methods: Mapping[str, tuple[str, ...]] | None = None,
++    contract_fields: tuple[str, ...] = (),
+ ) -> EngineApiProbe:
+     """Probe a public package API and emit one compact structured debug event."""
+     probe = _probe_public_api(
+@@ -433,6 +443,7 @@ def probe_public_api(
+         contract_required_symbols=contract_required_symbols,
+         contract_required_methods=contract_required_methods,
+         legacy_required_methods=legacy_required_methods,
++        contract_fields=contract_fields,
+     )
+     event = {
+         "engine": probe.engine,
+diff --git a/voicerender/engines/soprosynth.py b/voicerender/engines/soprosynth.py
+index 31b022a..1f733cc 100644
+--- a/voicerender/engines/soprosynth.py
++++ b/voicerender/engines/soprosynth.py
+@@ -4,14 +4,16 @@ from __future__ import annotations
+
+ import json
+ import math
++import sys
+ from collections.abc import Mapping
+ from contextlib import AbstractContextManager, contextmanager
+-from dataclasses import replace
++from dataclasses import dataclass, replace
+ from numbers import Real
+ from typing import Any
+
+ from ..errors import (
+     EmptySpeechTextError,
++    EngineApiIncompatibleError,
+     EngineBackendError,
+     EngineError,
+     EngineSelectionError,
+@@ -48,6 +50,7 @@ from .profiles import make_renderprofile_fragment
+
+ ENGINE_ID = "sopro"
+ PACKAGE_NAME = "soprosynth"
++SUPPORTED_LEGACY_SOPRO_VERSIONS = frozenset({"0.1.0", "0.1.1"})
+ SUPPORTED_LANGUAGES = frozenset({"en", "pt", "fr", "de"})
+ SOPRO_OPTION_NAMES = frozenset(
+     {
+@@ -75,6 +78,15 @@ SOPRO_OPTION_NAMES = frozenset(
+ )
+
+
++@dataclass(frozen=True, slots=True)
++class _SoproRequestContract:
++    package_version: str | None
++    api_version: int | None
++    contract_version: int | None
++    supports_request_measurement: bool | None
++    caller_owns_text_boundaries: bool | None
++
++
+ def _module() -> Any:
+     """Import SoproSynth only when a Sopro operation is requested."""
+     import soprosynth
+@@ -286,10 +298,16 @@ def _positive_maximum(value: Any) -> int | None:
+ class SoproSynthEngineSession:
+     """One loaded Sopro runtime with lazily prepared reference voices."""
+
+-    def __init__(self, runtime: Any, selection: EngineSelection) -> None:
++    def __init__(
++        self,
++        runtime: Any,
++        selection: EngineSelection,
++        request_contract: _SoproRequestContract | None = None,
++    ) -> None:
+         self._runtime = runtime
+         self._selection = selection
+         self._prepared_voices: dict[str, Any] = {}
++        self._request_contract = request_contract
+
+     def measure(self, request: SpeechRequest) -> RequestMeasure:
+         if request.voice is not None:
+@@ -332,27 +350,67 @@ class SoproSynthEngineSession:
+             raise _translate_error(
+                 exc, self._selection, request, stage="measure"
+             ) from exc
+-        amount = getattr(measured, "amount", None)
+-        maximum = _positive_maximum(getattr(measured, "maximum", None))
+-        if type(amount) is not int or amount < 0:
++        raw_amount = getattr(measured, "amount", None)
++        raw_maximum = getattr(measured, "maximum", None)
++        raw_fits = getattr(measured, "fits", None)
++        raw_unit = getattr(measured, "unit", None)
++
++        amount = raw_amount if type(raw_amount) is int and raw_amount >= 0 else None
++        maximum = raw_maximum if type(raw_maximum) is int and raw_maximum > 0 else None
++        fits = raw_fits if type(raw_fits) is bool else None
++        valid_unit = raw_unit is None or (
++            isinstance(raw_unit, str) and raw_unit in {"tokens", "model_tokens"}
++        )
++        if (
++            amount is None
++            or (raw_maximum is not None and maximum is None)
++            or (raw_fits is not None and fits is None)
++            or not valid_unit
++        ):
+             raise EngineBackendError(
+                 "SoproSynth returned an invalid request measurement.",
+                 engine=ENGINE_ID,
+                 target_id=self._selection.target_id,
+                 request_id=request.id,
+                 code="sopro.measurement_invalid",
+-                details={"amount": amount, "maximum": maximum},
++                details={
++                    "amount": raw_amount,
++                    "maximum": raw_maximum,
++                    "fits": raw_fits,
++                    "unit": raw_unit,
++                },
+             )
+-        fits = getattr(measured, "fits", None)
+-        if not isinstance(fits, bool):
+-            fits = None if maximum is None else amount <= maximum
++
++        fit_source = "producer" if fits is not None else "unknown"
++        if fits is None and maximum is not None:
++            fits = amount <= maximum
++            fit_source = "finite_maximum"
++        elif fits is None and self._supports_legacy_contract_fit():
++            fits = True
++            fit_source = "legacy_contract_auto_boundaries"
+         return RequestMeasure(
+             fits=fits,
+             amount=amount,
+             maximum=maximum,
+             unit="model_tokens",
+             source="soprosynth.measure_request",
+-            details={"language": _engine_language(request.language)},
++            details={
++                "language": _engine_language(request.language),
++                "producer_unit": raw_unit,
++                "fit_source": fit_source,
++                "producer_maximum": raw_maximum,
++            },
++        )
++
++    def _supports_legacy_contract_fit(self) -> bool:
++        contract = self._request_contract
++        return (
++            contract is not None
++            and contract.package_version in SUPPORTED_LEGACY_SOPRO_VERSIONS
++            and contract.api_version == SUPPORTED_REQUEST_API_VERSION
++            and contract.contract_version == SUPPORTED_REQUEST_API_VERSION
++            and contract.supports_request_measurement is True
++            and contract.caller_owns_text_boundaries is False
+         )
+
+     def _voice_source(self) -> Mapping[str, Any]:
+@@ -504,7 +562,26 @@ class SoproSynthEngineAdapter:
+     def version(self) -> str | None:
+         return distribution_version(self.package_name)
+
++    def __init__(self) -> None:
++        self._probe_cache_module: Any | None = None
++        self._probe_cache: EngineApiProbe | None = None
++
+     def probe_api(self) -> EngineApiProbe:
++        module = sys.modules.get(self.package_name)
++        if (
++            module is not None
++            and module is self._probe_cache_module
++            and self._probe_cache is not None
++        ):
++            return self._probe_cache
++        probe = self._probe_api_uncached()
++        module = sys.modules.get(self.package_name)
++        if module is not None:
++            self._probe_cache_module = module
++            self._probe_cache = probe
++        return probe
++
++    def _probe_api_uncached(self) -> EngineApiProbe:
+         probe = probe_public_api(
+             engine=self.id,
+             package=self.package_name,
+@@ -540,32 +617,31 @@ class SoproSynthEngineAdapter:
+             },
+             expected_api_version=SUPPORTED_REQUEST_API_VERSION,
+             require_explicit_contract=True,
++            contract_fields=(
++                "version",
++                "supports_reference_voice",
++                "supports_request_measurement",
++                "supports_named_voices",
++                "caller_owns_text_boundaries",
++            ),
+         )
+         if not probe.compatible:
+             return probe
+-        module = _module()
+-        try:
+-            contract = module.request_api_contract()
+-            required = {
+-                "supports_reference_voice": True,
+-                "supports_request_measurement": True,
+-                "supports_named_voices": False,
+-            }
+-            mismatches = {
+-                name: {"expected": value, "actual": getattr(contract, name, None)}
+-                for name, value in required.items()
+-                if getattr(contract, name, None) is not value
+-            }
+-        except Exception as exc:  # noqa: BLE001 - Public contract failures are probe results.
+-            return replace(
+-                probe,
+-                compatible=False,
+-                status="api_probe_failed",
+-                failed_stage="contract_capabilities",
+-                failed_symbol="request_api_contract",
+-                error_type=type(exc).__name__,
+-                error_message=str(exc),
+-            )
++        contract = probe.details.get("request_api_contract", {})
++        if not isinstance(contract, Mapping):
++            contract = {}
++        required = {
++            "version": SUPPORTED_REQUEST_API_VERSION,
++            "supports_reference_voice": True,
++            "supports_request_measurement": True,
++            "supports_named_voices": False,
++            "caller_owns_text_boundaries": False,
++        }
++        mismatches = {
++            name: {"expected": value, "actual": contract.get(name)}
++            for name, value in required.items()
++            if contract.get(name) is not value
++        }
+         if mismatches:
+             return replace(
+                 probe,
+@@ -958,6 +1034,34 @@ class SoproSynthEngineAdapter:
+         self, selection: EngineSelection
+     ) -> AbstractContextManager[SoproSynthEngineSession]:
+         module = _module()
++        probe = self.probe_api()
++        if not probe.compatible:
++            raise EngineApiIncompatibleError(
++                "SoproSynth public synthesis API is incompatible",
++                engine=self.id,
++                engine_version=probe.distribution_version,
++                details={"probe": dict(probe.details)},
++            )
++        raw_contract = probe.details.get("request_api_contract", {})
++        contract = raw_contract if isinstance(raw_contract, Mapping) else {}
++        raw_contract_version = contract.get("version")
++        raw_measurement_support = contract.get("supports_request_measurement")
++        raw_boundary_ownership = contract.get("caller_owns_text_boundaries")
++        request_contract = _SoproRequestContract(
++            package_version=probe.module_version or probe.distribution_version,
++            api_version=probe.api_version,
++            contract_version=(
++                raw_contract_version if type(raw_contract_version) is int else None
++            ),
++            supports_request_measurement=(
++                raw_measurement_support
++                if type(raw_measurement_support) is bool
++                else None
++            ),
++            caller_owns_text_boundaries=(
++                raw_boundary_ownership if type(raw_boundary_ownership) is bool else None
++            ),
++        )
+         options = selection.options
+         bundle_ref = selection.metadata.get("bundle_ref") or selection.target_id
+         try:
+@@ -976,7 +1080,7 @@ class SoproSynthEngineAdapter:
+         @contextmanager
+         def session() -> Any:
+             try:
+-                yield SoproSynthEngineSession(runtime, selection)
++                yield SoproSynthEngineSession(runtime, selection, request_contract)
+             finally:
+                 try:
+                     runtime.close()

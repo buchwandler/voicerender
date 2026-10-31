@@ -1,0 +1,764 @@
+ .github/workflows/tests.yml               | 22 +++++++-
+ pyproject.toml                            |  2 -
+ tests/test_engine_registry.py             | 25 ++++++++-
+ tests/test_jsonutil.py                    | 88 +++++++++++++++++++++++++++++++
+ tests/test_model_management_api.py        | 24 ++++++++-
+ tests/test_sopro_release_compatibility.py | 43 +++++++++++++++
+ tests/test_voice_descriptors.py           | 16 ++++++
+ voicerender/capacity.py                   | 28 ++--------
+ voicerender/engines/pipersynth.py         |  9 ++--
+ voicerender/engines/registry.py           | 12 +++--
+ voicerender/jsonutil.py                   | 67 +++++++++++++++++++++++
+ voicerender/models_api.py                 | 21 ++------
+ voicerender/preflight.py                  |  4 +-
+ voicerender/renderplan_input.py           |  7 ++-
+ voicerender/renderplan_render.py          |  7 ++-
+ voicerender/voices_api.py                 | 37 ++++++++++---
+ 16 files changed, 348 insertions(+), 64 deletions(-)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index e4b344c..575a4a1 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -65,6 +65,26 @@ jobs:
+       - name: Run API and adapter contracts without model downloads
+         run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py
+
++  sopro-contract:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++      - name: Install Sopro extra and test tools
++        run: |
++          python -m pip install --upgrade "pip<26.2"
++          python -m pip install -e ".[sopro]" pytest
++      - name: Run Sopro contracts without model downloads
++        run: >
++          python -m pytest -q
++          tests/test_soprosynth_engine.py
++          tests/test_model_management_api.py
++          tests/test_model_management_cli.py
++          tests/test_sopro_release_compatibility.py
++
+   exact-released-set:
+     runs-on: ubuntu-latest
+     steps:
+@@ -85,7 +105,7 @@ jobs:
+             "supertonicsynth[cpu]==0.1.2" \
+             "inflectsynth[cpu]==0.1.1"
+       - name: Run released-set compatibility contracts
+-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py
++        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_sopro_release_compatibility.py
+
+   lower-bounds:
+     runs-on: ubuntu-latest
+diff --git a/pyproject.toml b/pyproject.toml
+index d3df278..d258c9a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -60,8 +60,6 @@ testpaths = ["tests"]
+
+ [tool.ruff]
+ extend-exclude = [
+-  "02_audiocompose_voicerender_manual_pipeline_implementation_brief.md",
+-  "03_voicerender_renderplan_preflight_and_execution_brief.md",
+ ]
+
+ [tool.mypy]
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index fb9dc97..f3cebc0 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -5,10 +5,11 @@ from __future__ import annotations
+ import subprocess
+ import sys
+ from pathlib import Path
+-from types import ModuleType, SimpleNamespace
++from types import MappingProxyType, ModuleType, SimpleNamespace
+
+ import pytest
+
++from voicerender.engines.api_probe import EngineApiProbe
+ from voicerender.engines.registry import (
+     discover_targets,
+     engine_status,
+@@ -311,6 +312,28 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+     assert fake._probe_discovery_calls == []
+
+
++def test_engine_status_serializes_nested_read_only_probe_details(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    probe = EngineApiProbe(
++        engine="test",
++        package="test-engine",
++        compatible=True,
++        status="ready",
++        details=MappingProxyType(
++            {"catalog": MappingProxyType({"providers": ("CPUExecutionProvider",)})}
++        ),
++    )
++    adapter = SimpleNamespace(id="test", probe_api=lambda: probe)
++    monkeypatch.setattr(
++        "voicerender.engines.registry.get_adapter", lambda _engine: adapter
++    )
++
++    status = engine_status("test")
++
++    assert status["details"] == {"catalog": {"providers": ["CPUExecutionProvider"]}}
++
++
+ def test_inflect_probe_accepts_common_measurement_contract_without_capacity_api(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_jsonutil.py b/tests/test_jsonutil.py
+new file mode 100644
+index 0000000..b8c2d1e
+--- /dev/null
++++ b/tests/test_jsonutil.py
+@@ -0,0 +1,88 @@
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass
++from enum import Enum
++from pathlib import Path
++from types import MappingProxyType
++from typing import Any
++
++import numpy as np
++import pytest
++
++from voicerender.jsonutil import json_value
++
++
++class _Mode(Enum):
++    READY = "ready"
++
++
++@dataclass(frozen=True)
++class _TransportRecord:
++    metadata: Any
++    mode: _Mode
++
++
++def test_json_value_walks_dataclass_fields_and_nested_read_only_mappings() -> None:
++    source = _TransportRecord(
++        metadata=MappingProxyType(
++            {
++                "catalog": MappingProxyType(
++                    {
++                        "profile": MappingProxyType(
++                            {
++                                "providers": ("CPUExecutionProvider",),
++                                "cache": Path("/tmp/model-cache"),
++                            }
++                        )
++                    }
++                )
++            }
++        ),
++        mode=_Mode.READY,
++    )
++
++    payload = json_value(source, label="model metadata")
++
++    assert payload == {
++        "metadata": {
++            "catalog": {
++                "profile": {
++                    "providers": ["CPUExecutionProvider"],
++                    "cache": "/tmp/model-cache",
++                }
++            }
++        },
++        "mode": "ready",
++    }
++    assert payload["metadata"] is not source.metadata
++    assert json.loads(json.dumps(payload)) == payload
++
++
++def test_json_value_preserves_numpy_tolist_transport_support() -> None:
++    assert json_value(
++        {"values": np.asarray([1, 2], dtype=np.int64), "scalar": np.float32(1.5)},
++        label="capacity metadata",
++    ) == {"values": [1, 2], "scalar": pytest.approx(1.5)}
++
++
++def test_json_value_reports_nested_path_for_unsupported_values() -> None:
++    with pytest.raises(
++        TypeError,
++        match=r"model metadata at catalog\.profile\.session contains unsupported JSON value object",
++    ):
++        json_value(
++            MappingProxyType({"catalog": {"profile": {"session": object()}}}),
++            label="model metadata",
++        )
++
++
++def test_json_value_rejects_non_finite_floats_with_nested_path() -> None:
++    with pytest.raises(
++        ValueError,
++        match=r"capacity metadata at measure\.details\.value contains non-finite float",
++    ):
++        json_value(
++            {"measure": {"details": {"value": float("nan")}}},
++            label="capacity metadata",
++        )
+diff --git a/tests/test_model_management_api.py b/tests/test_model_management_api.py
+index 2e87e28..4dd9027 100644
+--- a/tests/test_model_management_api.py
++++ b/tests/test_model_management_api.py
+@@ -4,6 +4,8 @@ import json
+ from pathlib import Path
+ from types import MappingProxyType, SimpleNamespace
+
++import pytest
++
+ from voicerender.engines.assets import (
+     ModelArtifact,
+     ModelInstallRequest,
+@@ -130,7 +132,7 @@ def test_remove_and_verify_delegate_to_public_asset_manager(
+     assert verified.status == "verified" and verified.verified
+
+
+-def test_model_artifact_to_dict_supports_nested_read_only_metadata() -> None:
++def test_model_artifact_serialization_does_not_use_deepcopy_asdict_semantics() -> None:
+     model = ModelArtifact(
+         engine="sopro",
+         target_id="model-v1",
+@@ -188,3 +190,23 @@ def test_model_result_to_dict_serializes_nested_read_only_artifact_metadata() ->
+
+     assert payload["artifact"]["metadata"] == {"catalog": {"profile": ["uint8"]}}
+     json.dumps(payload)
++
++
++def test_model_artifact_serializer_error_identifies_metadata_path() -> None:
++    model = ModelArtifact(
++        engine="sopro",
++        target_id="model-v1",
++        display_name="Sopro model v1",
++        installed=True,
++        status="ready",
++        metadata={"catalog": {"profile": {"session": object()}}},
++    )
++
++    with pytest.raises(
++        TypeError,
++        match=(
++            r"model 'sopro' target 'model-v1' metadata at catalog\.profile\.session "
++            r"contains unsupported JSON value object"
++        ),
++    ):
++        model_artifact_to_dict(model)
+diff --git a/tests/test_sopro_release_compatibility.py b/tests/test_sopro_release_compatibility.py
+new file mode 100644
+index 0000000..78032d1
+--- /dev/null
++++ b/tests/test_sopro_release_compatibility.py
+@@ -0,0 +1,43 @@
++from __future__ import annotations
++
++import json
++from collections.abc import Mapping
++
++import pytest
++
++from voicerender.engines.soprosynth import _target_from_bundle
++from voicerender.models_api import _from_target, model_artifact_to_dict
++
++
++def test_released_discovered_bundle_metadata_crosses_model_json_boundary() -> None:
++    soprosynth = pytest.importorskip("soprosynth")
++    bundle = soprosynth.DiscoveredBundle(
++        id="model-v1",
++        ref="sopro:model-v1",
++        display_name="Sopro model v1",
++        languages=("en",),
++        metadata={
++            "catalog": {
++                "profile": {
++                    "precision": "uint8",
++                    "providers": ("CPUExecutionProvider",),
++                }
++            }
++        },
++    )
++
++    target = _target_from_bundle(bundle)
++    artifact = _from_target(target)
++    payload = model_artifact_to_dict(artifact)
++    encoded = json.dumps(payload, allow_nan=False)
++
++    assert isinstance(target.metadata["catalog"], Mapping)
++    assert payload["engine"] == "sopro"
++    assert payload["target_id"] == "model-v1"
++    assert payload["metadata"]["catalog"]["profile"] == {
++        "precision": "uint8",
++        "providers": ["CPUExecutionProvider"],
++    }
++    assert isinstance(payload["metadata"]["catalog"], dict)
++    assert isinstance(payload["metadata"]["catalog"]["profile"]["providers"], list)
++    assert json.loads(encoded) == payload
+diff --git a/tests/test_voice_descriptors.py b/tests/test_voice_descriptors.py
+index 821f4dc..46e7170 100644
+--- a/tests/test_voice_descriptors.py
++++ b/tests/test_voice_descriptors.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+
+ import json
++from dataclasses import replace
++from types import MappingProxyType
+
+ from voicerender import cli
+ from voicerender.engines.catalog import SynthesisTarget, TargetVoice
+@@ -64,6 +66,20 @@ def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
+     assert voice_descriptor_to_dict(inspected)["languages"] == ["en-US"]
+
+
++def test_voice_descriptor_to_dict_serializes_nested_read_only_metadata() -> None:
++    descriptor = replace(
++        _target_descriptor(),
++        metadata=MappingProxyType(
++            {"catalog": MappingProxyType({"providers": ("CPUExecutionProvider",)})}
++        ),
++    )
++
++    payload = voice_descriptor_to_dict(descriptor)
++
++    assert payload["metadata"] == {"catalog": {"providers": ["CPUExecutionProvider"]}}
++    json.dumps(payload)
++
++
+ def test_selector_rejects_noncanonical_delimiters() -> None:
+     try:
+         parse_voice_selector("kokoro:v1.0/a/b")
+diff --git a/voicerender/capacity.py b/voicerender/capacity.py
+index 6898021..fc6ce09 100644
+--- a/voicerender/capacity.py
++++ b/voicerender/capacity.py
+@@ -2,12 +2,9 @@
+
+ from __future__ import annotations
+
+-import math
+ from collections.abc import Iterable, Mapping
+-from dataclasses import asdict, dataclass, field, is_dataclass
+-from enum import Enum
+-from pathlib import Path
+-from typing import Any, Literal, cast
++from dataclasses import dataclass, field
++from typing import Any, Literal
+
+ import numpy as np
+
+@@ -21,6 +18,7 @@ from .engines.base import (
+     validate_rendered_speech,
+ )
+ from .errors import EngineBackendError, SpeechRequestTooLongError
++from .jsonutil import json_value
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -38,25 +36,7 @@ CAPACITY_SCHEMA = "voicerender.capacity-fitting.v1"
+
+
+ def _json_value(value: Any) -> Any:
+-    if is_dataclass(value) and not isinstance(value, type):
+-        return _json_value(asdict(cast(Any, value)))
+-    if isinstance(value, Enum):
+-        return _json_value(value.value)
+-    if isinstance(value, Path):
+-        return str(value)
+-    if isinstance(value, Mapping):
+-        return {str(key): _json_value(item) for key, item in value.items()}
+-    if isinstance(value, (tuple, list)):
+-        return [_json_value(item) for item in value]
+-    if isinstance(value, bool | int | str) or value is None:
+-        return value
+-    if isinstance(value, float):
+-        if math.isfinite(value):
+-            return value
+-        raise ValueError("capacity metadata must contain finite numbers")
+-    if hasattr(value, "tolist"):
+-        return _json_value(value.tolist())
+-    raise TypeError(f"capacity metadata is not JSON-compatible: {type(value).__name__}")
++    return json_value(value, label="capacity metadata")
+
+
+ @dataclass(frozen=True, slots=True)
+diff --git a/voicerender/engines/pipersynth.py b/voicerender/engines/pipersynth.py
+index aea0f56..c507809 100644
+--- a/voicerender/engines/pipersynth.py
++++ b/voicerender/engines/pipersynth.py
+@@ -5,8 +5,8 @@ from __future__ import annotations
+ import math
+ from collections.abc import Mapping
+ from contextlib import AbstractContextManager, contextmanager
+-from dataclasses import asdict, is_dataclass, replace
+-from typing import Any, cast
++from dataclasses import is_dataclass, replace
++from typing import Any
+
+ from ..errors import (
+     EmptySpeechTextError,
+@@ -21,6 +21,7 @@ from ..errors import (
+     SpeechRequestTooLongError,
+     UnsupportedSynthesisFeatureError,
+ )
++from ..jsonutil import json_value
+ from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
+ from .base import (
+     EngineCapabilities,
+@@ -320,7 +321,9 @@ class PiperSynthEngineSession:
+         if is_dataclass(frontend_diagnostics) and not isinstance(
+             frontend_diagnostics, type
+         ):
+-            metadata["frontend_diagnostics"] = asdict(cast(Any, frontend_diagnostics))
++            metadata["frontend_diagnostics"] = json_value(
++                frontend_diagnostics, label="Piper frontend diagnostics"
++            )
+         metadata["voice_level"] = voice_level_metadata(
+             metadata.get("voice_level"),
+             str(self._selection.options.get("voice_level", "off")),
+diff --git a/voicerender/engines/registry.py b/voicerender/engines/registry.py
+index 15de6b6..f3f883d 100644
+--- a/voicerender/engines/registry.py
++++ b/voicerender/engines/registry.py
+@@ -14,6 +14,7 @@ from ..errors import (
+     EngineUnavailableError,
+     ProfileError,
+ )
++from ..jsonutil import json_value
+ from .assets import EngineAssetManager
+ from .base import (
+     EngineAdapter,
+@@ -199,7 +200,10 @@ def engine_status(engine: str) -> dict[str, Any]:
+     """Probe the installed public API without opening a model or runtime."""
+     adapter = get_adapter(engine)
+     probe = adapter.probe_api()
+-    return asdict(probe)
++    return cast(
++        dict[str, Any],
++        json_value(probe, label=f"engine {adapter.id!r} API probe"),
++    )
+
+
+ def discover_targets(
+@@ -269,7 +273,9 @@ def open_session(selection: EngineSelection) -> Iterator[EngineSession]:
+     adapter = get_adapter(selection.engine)
+     probe = adapter.probe_api()
+     if not probe.compatible:
+-        details: dict[str, object] = {"probe": asdict(probe)}
++        details: dict[str, object] = {
++            "probe": json_value(probe, label=f"engine {adapter.id!r} API probe")
++        }
+         if probe.status == "package_missing":
+             raise EngineUnavailableError(
+                 f"Engine {adapter.id!r} runtime package is unavailable",
+@@ -290,7 +296,7 @@ def open_session(selection: EngineSelection) -> Iterator[EngineSession]:
+             "schema": "voicerender.engine-session-identity.v1",
+             "engine": adapter.id,
+             "engine_version": adapter.version() or probe.distribution_version,
+-            "api_probe": asdict(probe),
++            "api_probe": json_value(probe, label=f"engine {adapter.id!r} API probe"),
+             "engine_identity": dict(adapter.canonical_synthesis_identity(selection)),
+         }
+         manager = adapter.open(selection)
+diff --git a/voicerender/jsonutil.py b/voicerender/jsonutil.py
+new file mode 100644
+index 0000000..81a3bf4
+--- /dev/null
++++ b/voicerender/jsonutil.py
+@@ -0,0 +1,67 @@
++"""Safe JSON transport conversion for VoiceRender-owned boundaries."""
++
++from __future__ import annotations
++
++import math
++from collections.abc import Mapping
++from dataclasses import fields, is_dataclass
++from enum import Enum
++from pathlib import Path
++from typing import Any
++
++
++def json_value(value: Any, *, label: str = "value") -> Any:
++    """Return a detached JSON-compatible projection of a supported value.
++
++    Dataclasses are walked by field access rather than ``dataclasses.asdict`` so
++    engine-owned mappings are never deep-copied before Mapping recursion.
++    """
++    return _json_value(value, label=label, path=())
++
++
++def _json_value(value: Any, *, label: str, path: tuple[str, ...]) -> Any:
++    if isinstance(value, Enum):
++        return _json_value(value.value, label=label, path=path)
++    if isinstance(value, Path):
++        return str(value)
++    if is_dataclass(value) and not isinstance(value, type):
++        return {
++            item.name: _json_value(
++                getattr(value, item.name), label=label, path=(*path, item.name)
++            )
++            for item in fields(value)
++        }
++    if isinstance(value, Mapping):
++        return {
++            str(key): _json_value(item, label=label, path=(*path, str(key)))
++            for key, item in value.items()
++        }
++    if isinstance(value, (tuple, list)):
++        return [
++            _json_value(item, label=label, path=(*path, str(index)))
++            for index, item in enumerate(value)
++        ]
++    tolist = getattr(value, "tolist", None)
++    if callable(tolist):
++        return _json_value(tolist(), label=label, path=path)
++    if value is None or isinstance(value, (str, bool, int)):
++        return value
++    if isinstance(value, float):
++        if math.isfinite(value):
++            return value
++        raise ValueError(
++            f"{_location(label, path)} contains non-finite float {value!r}"
++        )
++    raise TypeError(
++        f"{_location(label, path)} contains unsupported JSON value "
++        f"{type(value).__name__}"
++    )
++
++
++def _location(label: str, path: tuple[str, ...]) -> str:
++    if not path:
++        return label
++    return f"{label} at {'.'.join(path)}"
++
++
++__all__ = ["json_value"]
+diff --git a/voicerender/models_api.py b/voicerender/models_api.py
+index a66cc24..1362e1e 100644
+--- a/voicerender/models_api.py
++++ b/voicerender/models_api.py
+@@ -2,7 +2,6 @@
+
+ from __future__ import annotations
+
+-from collections.abc import Mapping
+ from pathlib import Path
+ from typing import Any
+
+@@ -18,6 +17,7 @@ from .engines.assets import (
+ )
+ from .engines.registry import discover_targets, get_asset_manager, normalize_engine_id
+ from .errors import ProfileError
++from .jsonutil import json_value
+
+
+ def _unsupported(engine: str, operation: str, target_id: str) -> str:
+@@ -241,20 +241,6 @@ def verify_model(
+         )
+
+
+-def _json_value(value: Any) -> Any:
+-    if isinstance(value, Path):
+-        return str(value)
+-    if isinstance(value, Mapping):
+-        return {str(key): _json_value(item) for key, item in value.items()}
+-    if isinstance(value, (tuple, list)):
+-        return [_json_value(item) for item in value]
+-    if value is None or isinstance(value, (str, int, float, bool)):
+-        return value
+-    raise TypeError(
+-        f"model metadata contains unsupported JSON value {type(value).__name__}"
+-    )
+-
+-
+ def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
+     """Return the stable JSON representation of a model artifact."""
+     return {
+@@ -269,7 +255,10 @@ def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
+         "source": model.source,
+         "revision": model.revision,
+         "path": str(model.path) if model.path is not None else None,
+-        "metadata": _json_value(model.metadata),
++        "metadata": json_value(
++            model.metadata,
++            label=f"model {model.engine!r} target {model.target_id!r} metadata",
++        ),
+     }
+
+
+diff --git a/voicerender/preflight.py b/voicerender/preflight.py
+index e29097c..02d5a4e 100644
+--- a/voicerender/preflight.py
++++ b/voicerender/preflight.py
+@@ -3,7 +3,6 @@
+ from __future__ import annotations
+
+ import json
+-from dataclasses import asdict
+ from importlib.metadata import PackageNotFoundError, version
+ from pathlib import Path
+ from typing import Any, Literal
+@@ -22,6 +21,7 @@ from .engines.base import EngineSelection
+ from .engines.registry import get_adapter
+ from .errors import PlanError
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
++from .jsonutil import json_value
+ from .progress import ProgressTracker
+ from .renderplan_input import (
+     EmphasisPolicy,
+@@ -339,7 +339,7 @@ def _session_compatibility_key(adapter: Any, selection: EngineSelection) -> str:
+     identity = {
+         "engine": adapter.id,
+         "engine_version": adapter.version() or probe.distribution_version,
+-        "api_probe": asdict(probe),
++        "api_probe": json_value(probe, label=f"engine {adapter.id!r} API probe"),
+         "target_id": selection.target_id,
+         "language": selection.language,
+         "voice": selection.voice,
+diff --git a/voicerender/renderplan_input.py b/voicerender/renderplan_input.py
+index 6ce65c5..2c72119 100644
+--- a/voicerender/renderplan_input.py
++++ b/voicerender/renderplan_input.py
+@@ -3,7 +3,7 @@
+ from __future__ import annotations
+
+ from collections.abc import Mapping
+-from dataclasses import asdict, dataclass, replace
++from dataclasses import dataclass, replace
+ from enum import Enum
+ from typing import Any
+
+@@ -30,6 +30,7 @@ from .errors import (
+     SpeechRequestTooLongError,
+     UnsupportedSynthesisFeatureError,
+ )
++from .jsonutil import json_value
+
+
+ class PreflightDisposition(str, Enum):
+@@ -114,7 +115,9 @@ def engine_selection_from_binding(
+     adapter = get_adapter(renderer)
+     probe = adapter.probe_api()
+     if not probe.compatible:
+-        details: dict[str, object] = {"probe": asdict(probe)}
++        details: dict[str, object] = {
++            "probe": json_value(probe, label=f"engine {adapter.id!r} API probe")
++        }
+         if probe.status == "package_missing":
+             raise EngineUnavailableError(
+                 f"Engine {adapter.id!r} runtime package is unavailable",
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 2607d87..9bec69b 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -8,7 +8,7 @@ import re
+ import shutil
+ import tempfile
+ from collections.abc import Callable, Collection, Mapping
+-from dataclasses import asdict, dataclass
++from dataclasses import dataclass
+ from pathlib import Path
+ from time import monotonic, sleep
+ from typing import Any, Literal
+@@ -44,6 +44,7 @@ from .errors import (
+     UnsupportedSynthesisFeatureError,
+ )
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
++from .jsonutil import json_value
+ from .preflight import _session_compatibility_key
+ from .progress import ProgressTracker, TerminalOutcome
+ from .render_lock import exclusive_render_lock as _exclusive_render
+@@ -916,7 +917,9 @@ def _prepare_speech(
+         adapter = get_adapter(selection.engine)
+         session_key = _session_compatibility_key(adapter, selection)
+         adapter_version = adapter.version()
+-        api_probe = asdict(adapter.probe_api())
++        api_probe = json_value(
++            adapter.probe_api(), label=f"engine {adapter.id!r} API probe"
++        )
+         synthesis_identity = dict(adapter.canonical_synthesis_identity(selection))
+         identity = {
+             "schema": _CACHE_SCHEMA,
+diff --git a/voicerender/voices_api.py b/voicerender/voices_api.py
+index 22923a6..7e9678d 100644
+--- a/voicerender/voices_api.py
++++ b/voicerender/voices_api.py
+@@ -3,11 +3,12 @@
+ from __future__ import annotations
+
+ from collections.abc import Mapping
+-from dataclasses import asdict, dataclass, field
++from dataclasses import dataclass, field
+ from typing import Any, Literal
+
+ from .engines.registry import discover_targets, list_engines, normalize_engine_id
+ from .errors import ProfileError
++from .jsonutil import json_value
+
+ VoiceKind = Literal["builtin", "speaker", "managed-reference", "reference-capable"]
+
+@@ -162,7 +163,11 @@ def _target_descriptors(target: Any) -> list[VoiceDescriptor]:
+                 else None,
+                 gender=detail.gender if detail else "unknown",
+                 locale=detail.locale if detail else "unknown",
+-                metadata={"voice": asdict(detail)} if detail else {},
++                metadata={
++                    "voice": json_value(detail, label=f"voice {voice!r} metadata")
++                }
++                if detail
++                else {},
+             )
+         )
+         voices.append((voice, detail))
+@@ -203,7 +208,13 @@ def _target_descriptors(target: Any) -> list[VoiceDescriptor]:
+                         else None,
+                         gender=detail.gender if detail else "unknown",
+                         locale=detail.locale if detail else "unknown",
+-                        metadata={"voice": asdict(detail)} if detail else {},
++                        metadata={
++                            "voice": json_value(
++                                detail, label=f"voice {voice!r} metadata"
++                            )
++                        }
++                        if detail
++                        else {},
+                     )
+                 )
+     managed = target.metadata.get("managed_references", ())
+@@ -281,10 +292,22 @@ def inspect_voice(selector: str, *, language: str | None = None) -> VoiceDescrip
+
+ def voice_descriptor_to_dict(descriptor: VoiceDescriptor) -> dict[str, Any]:
+     """Return the stable JSON representation of a voice descriptor."""
+-    value = asdict(descriptor)
+-    value["languages"] = list(descriptor.languages)
+-    value["metadata"] = dict(descriptor.metadata)
+-    return value
++    return {
++        "selector": descriptor.selector,
++        "engine": descriptor.engine,
++        "target_id": descriptor.target_id,
++        "voice": descriptor.voice,
++        "speaker": descriptor.speaker,
++        "kind": descriptor.kind,
++        "languages": list(descriptor.languages),
++        "gender": descriptor.gender,
++        "locale": descriptor.locale,
++        "installed": descriptor.installed,
++        "metadata": json_value(
++            descriptor.metadata,
++            label=f"voice {descriptor.selector!r} metadata",
++        ),
++    }
+
+
+ __all__ = [

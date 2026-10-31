@@ -1,0 +1,2032 @@
+ README.md                               |  23 +-
+ docs/renderprofile.md                   |  16 +-
+ pyproject.toml                          |   2 +-
+ tests/test_document_contract.py         |  25 +-
+ tests/test_engine_registry.py           |  66 ++-
+ tests/test_kittensynth_engine.py        |   4 +
+ tests/test_kittensynth_pronunciation.py | 438 ++++++++++++++++++
+ tests/test_lexicons_cli.py              | 152 +++++++
+ tests/test_preflight.py                 |  30 +-
+ voicerender/bundle_inspect.py           |   1 +
+ voicerender/cli.py                      |  11 +-
+ voicerender/engines/kittensynth.py      | 770 ++++++++++++++++++++++++++++++--
+ voicerender/lexicons.py                 |   6 +
+ 13 files changed, 1481 insertions(+), 63 deletions(-)
+
+diff --git a/README.md b/README.md
+index 4abe0dd..ab5c636 100644
+--- a/README.md
++++ b/README.md
+@@ -29,7 +29,28 @@ Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `sup
+
+ ### Kitten request measurement
+
+-KittenSynth owns Kitten text tokenization. VoiceRender delegates to `KittenVoice.measure_prepared()` and does not re-tokenize Kitten text. Kitten provides exact `model_tokens` measurement for preflight; a hard maximum is only available when the engine/model declares one. An unknown maximum means capacity is unknown, not infinite. The `.[kitten]` extra requires KittenSynth 0.1.4 or newer, which provides this measurement API.
++KittenSynth owns Kitten text tokenization. VoiceRender delegates to `KittenVoice.measure_prepared()` and does not re-tokenize Kitten text. Kitten provides exact `model_tokens` measurement for preflight; a hard maximum is only available when the engine/model declares one. An unknown maximum means capacity is unknown, not infinite. The `.[kitten]` extra requires KittenSynth `>=0.1.8,<0.2` and Kitteng2p `>=0.1.2,<0.2`; the Kitten request API probe rejects older contracts instead of silently dropping pronunciation inputs.
++
++### Kitten G2Lex selection and heteronyms
++
++Kitten remains eSpeak-only when no pronunciation sources are configured. To inspect the available named sources and a local G2Lex file:
++
++```bash
++voicerender lexicons list --engine kitten --lang en-US
++voicerender lexicons inspect-file ./custom-pronunciations.g2lex
++```
++
++Select sources in order when creating or binding a profile:
++
++```bash
++voicerender profile create \
++  --role narrator --engine kitten --target nano-0.8-int8 --voice Jasper \
++  --language en-US --lexicon public-en \
++  --g2lex ./custom-pronunciations.g2lex \
++  --lexicon-data-policy auto -o kitten.renderprofile.toml
++```
++
++Request-local IPA overrides take precedence over ordered local G2Lex files, then ordered named lexicons, contextual heteronym rules, and finally eSpeak. Local files are pinned by content and logical SHA-256; profile inspection and preflight report the effective stack and reject changed, invalid, or incompatible sources. `lexicon_data_policy` accepts `auto` or `installed-only` (offline rendering requires installed data), and `heteronym_policy` accepts `auto` or `off`. With `auto`, context-aware heteronym handling remains enabled without changing the default eSpeak fallback.
+
+ ### Piper request measurement
+
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index c51dfa3..7e2aba5 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -45,7 +45,7 @@ Review refreshed bindings and policy before using the proposal. If identity-bear
+ profile semantics change, regenerate the associated RenderPlan using the refreshed
+ profile. Keep the original profile with its plans for provenance and inspection.
+
+-### Repairing a stale profile identity
++## Repairing a stale profile identity
+
+ Manual edits to identity-bearing content (for example, adding a role or changing an engine option such as `quality`) make the stored `profile_id` stale. Ordinary profile loading remains strict: `inspect`, `show`, `validate`, and `refresh` reject a stale ID rather than silently changing the identity.
+
+@@ -126,6 +126,20 @@ voicerender profile role remove printer-cast.proposed.renderprofile.toml narrato
+
+ The RenderPlan schema is unchanged: plans continue to carry the same profile identity and resolved per-role bindings.
+
++### Kitten G2Lex sources and pronunciation identity
++
++Kitten profiles may bind ordered named lexicons and local G2Lex files. The CLI inspects and pins local files when creating or binding a profile:
++
++```bash
++voicerender lexicons list --engine kitten --lang en-US
++voicerender lexicons inspect-file ./custom-pronunciations.g2lex
++voicerender profile bind printer-cast.renderprofile.toml guest \
++  --engine kitten --target nano-0.8-int8 --voice Jasper --language en-US \
++  --lexicon public-en --g2lex ./custom-pronunciations.g2lex --in-place
++```
++
++Kitten remains on its historical eSpeak-only path when no lexicon sources are configured. Request-local IPA spans, local files, named sources, contextual heteronym rules, and eSpeak fallback are reported in effective precedence by `profile show`/`inspect` and preflight. Local source identity uses content and logical SHA-256 values rather than filesystem paths; the ordered named asset IDs, versions, and digests are also part of the synthesis identity. Moving an unchanged local file does not change that source identity, while changing its content does. Offline profiles require their selected named lexicons to be installed.
++
+ ## UtterPlan bundle projection
+
+ [UtterPlan](https://pypi.org/project/utterplan/) can project saved book chapter plans into one RenderPlan variant per RenderProfile. It does not call VoiceRender or preflight during projection. The collection index `renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned workspace metadata, not RenderPlan artifacts.
+diff --git a/pyproject.toml b/pyproject.toml
+index 455af0d..25cb418 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -24,7 +24,7 @@ dependencies = [
+ [project.optional-dependencies]
+ chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+-kitten = ["kittensynth[cpu]>=0.1.7,<0.2"]
++kitten = ["kittensynth[cpu]>=0.1.8,<0.2"]
+ kokoro = ["pykokoro>=0.10.6,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index fe1d751..2fed15c 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -425,7 +425,7 @@ def test_document_model_download_failure_persists_reject_without_speech_artifact
+     from types import ModuleType, SimpleNamespace
+     from typing import Any
+
+-    from renderplan import load_plan, load_preflight, save_plan
++    from renderplan import TokenBundle, load_plan, load_preflight, save_plan
+
+     import voicerender.document as document_module
+     from voicerender.engines.kittensynth import KittenSynthEngineAdapter
+@@ -458,6 +458,13 @@ def test_document_model_download_failure_persists_reject_without_speech_artifact
+             "options": {},
+         },
+         segment_id=None,
++        tokens=TokenBundle(
++            span=((0, len(plan.speech[0].text)),),
++            pos=("NOUN",),
++            tag=("NN",),
++            lemma=((0, plan.speech[0].text),),
++            morph=((0, "Number=Sing"),),
++        ),
+     )
+     plan = replace(plan, flow=(speech,), plan_id=None).with_identity()
+     save_plan(plan, plan_path)
+@@ -515,19 +522,29 @@ def test_document_model_download_failure_persists_reject_without_speech_artifact
+     module = ModuleType("kittensynth")
+     module.__version__ = "0.1.7"
+     module.__file__ = "/fake/kittensynth/__init__.py"
+-    module.REQUEST_API_VERSION = 1
++    module.REQUEST_API_VERSION = 2
+     module.ModelDownloadError = error_type  # type: ignore[attr-defined]
+     module.KittenVoice = FakeVoice
+     module.SynthesisMeasure = object
+     module.SynthesisConfig = object
+     module.SynthesisResult = object
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.G2LexFileRef = object
++    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.PronunciationTrace = object
+     module.discover_models = lambda **kwargs: (model,)
+-    module.runtime_identity = lambda: {"engine_version": "0.1.7"}
++    module.discover_lexicons = lambda **kwargs: ()
++    module.inspect_g2lex_file = lambda path: {}
++    module.runtime_identity = lambda: {"engine_version": "0.1.8"}
+     module.request_api_contract = lambda: {
+-        "version": 1,
++        "version": 2,
+         "supports_request_measurement": True,
+         "measurement_entrypoint": "KittenVoice.measure_prepared",
+         "measurement_metric": "model_tokens",
++        "supports_linguistic_tokens": True,
++        "supports_pronunciation_overrides": True,
++        "supports_lexicons": True,
+     }
+     monkeypatch.setitem(sys.modules, "kittensynth", module)
+     monkeypatch.setitem(_ADAPTERS, "kitten", KittenSynthEngineAdapter())
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index 65f768d..68e1c1c 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -179,6 +179,11 @@ def _fake_package(package: str) -> ModuleType:
+         "RequestMeasure",
+         "discover_bundles",
+         "KittenVoice",
++        "KittenG2PConfig",
++        "G2LexFileRef",
++        "PronunciationTrace",
++        "discover_lexicons",
++        "inspect_g2lex_file",
+         "SynthesisMeasure",
+         "discover_models",
+         "runtime_identity",
+@@ -232,6 +237,20 @@ def _fake_package(package: str) -> ModuleType:
+     return module
+
+
++def _kitten_contract(**overrides: object) -> dict[str, object]:
++    contract: dict[str, object] = {
++        "version": 2,
++        "supports_request_measurement": True,
++        "measurement_entrypoint": "KittenVoice.measure_prepared",
++        "measurement_metric": "model_tokens",
++        "supports_linguistic_tokens": True,
++        "supports_pronunciation_overrides": True,
++        "supports_lexicons": True,
++    }
++    contract.update(overrides)
++    return contract
++
++
+ def test_registry_lists_ten_engines_without_probing() -> None:
+     listed = list_engines()
+     assert {item["id"] for item in listed} == ENGINE_IDS
+@@ -267,12 +286,8 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+             "measurement_metric": "model_tokens",
+         }
+     elif engine == "kitten":
+-        fake.request_api_contract = lambda: {
+-            "version": 1,
+-            "supports_request_measurement": True,
+-            "measurement_entrypoint": "KittenVoice.measure_prepared",
+-            "measurement_metric": "model_tokens",
+-        }
++        fake.REQUEST_API_VERSION = 2
++        fake.request_api_contract = _kitten_contract
+     if engine == "qwen3":
+         fake.request_api_contract = lambda: SimpleNamespace(
+             supports_reference_voice=True,
+@@ -431,6 +446,8 @@ def test_kitten_probe_requires_measure_prepared(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     fake = _fake_package("kittensynth")
++    fake.REQUEST_API_VERSION = 2
++    fake.request_api_contract = _kitten_contract
+     delattr(fake.KittenVoice, "measure_prepared")
+     monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+@@ -444,10 +461,10 @@ def test_kitten_probe_rejects_measurement_disabled_contract(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     fake = _fake_package("kittensynth")
+-    fake.request_api_contract = lambda: {
+-        "version": 1,
+-        "supports_request_measurement": False,
+-    }
++    fake.REQUEST_API_VERSION = 2
++    fake.request_api_contract = lambda: _kitten_contract(
++        supports_request_measurement=False
++    )
+     monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+     probe = get_adapter("kitten").probe_api()
+@@ -466,12 +483,13 @@ def test_kitten_probe_fails_closed_when_measurement_contract_raises(
+ ) -> None:
+     fake = _fake_package("kittensynth")
+     calls = 0
++    fake.REQUEST_API_VERSION = 2
+
+     def request_api_contract() -> dict[str, object]:
+         nonlocal calls
+         calls += 1
+         if calls == 1:
+-            return {"version": 1, "supports_request_measurement": True}
++            return _kitten_contract()
+         raise RuntimeError("contract unavailable")
+
+     fake.request_api_contract = request_api_contract
+@@ -481,7 +499,7 @@ def test_kitten_probe_fails_closed_when_measurement_contract_raises(
+
+     assert not probe.compatible
+     assert probe.status == "api_probe_failed"
+-    assert probe.failed_stage == "request_measurement_contract"
++    assert probe.failed_stage == "pronunciation_capability_contract"
+     assert probe.error_type == "RuntimeError"
+
+
+@@ -489,6 +507,7 @@ def test_kitten_probe_reports_measurement_stage_for_contract_error(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     fake = _fake_package("kittensynth")
++    fake.REQUEST_API_VERSION = 2
+
+     def request_api_contract() -> dict[str, object]:
+         raise RuntimeError("contract unavailable")
+@@ -500,7 +519,7 @@ def test_kitten_probe_reports_measurement_stage_for_contract_error(
+
+     assert not probe.compatible
+     assert probe.status == "api_probe_failed"
+-    assert probe.failed_stage == "request_measurement_contract"
++    assert probe.failed_stage == "pronunciation_capability_contract"
+     assert probe.error_type == "RuntimeError"
+
+
+@@ -512,6 +531,8 @@ def test_kitten_probe_requires_synthesis_measure_symbol(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     fake = _fake_package("kittensynth")
++    fake.REQUEST_API_VERSION = 2
++    fake.request_api_contract = _kitten_contract
+     delattr(fake, "SynthesisMeasure")
+     monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+@@ -521,13 +542,26 @@ def test_kitten_probe_requires_synthesis_measure_symbol(
+     assert "SynthesisMeasure" in probe.missing_symbols
+
+
++def test_kitten_probe_rejects_old_request_api_with_pronunciation_diagnostic(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    fake = _fake_package("kittensynth")
++    monkeypatch.setitem(sys.modules, "kittensynth", fake)
++
++    probe = get_adapter("kitten").probe_api()
++
++    assert not probe.compatible
++    assert probe.api_version == 1
++    assert probe.expected_api_version == 2
++    assert any("lexicon-aware G2P requires" in warning for warning in probe.warnings)
++
++
+ def test_kitten_probe_accepts_attribute_measurement_contract(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     fake = _fake_package("kittensynth")
+-    fake.request_api_contract = lambda: SimpleNamespace(
+-        supports_request_measurement=True
+-    )
++    fake.REQUEST_API_VERSION = 2
++    fake.request_api_contract = lambda: SimpleNamespace(**_kitten_contract())
+     monkeypatch.setitem(sys.modules, "kittensynth", fake)
+
+     probe = get_adapter("kitten").probe_api()
+diff --git a/tests/test_kittensynth_engine.py b/tests/test_kittensynth_engine.py
+index d5be830..49ad9a2 100644
+--- a/tests/test_kittensynth_engine.py
++++ b/tests/test_kittensynth_engine.py
+@@ -308,6 +308,7 @@ def test_managed_dependency_error_is_a_non_replanable_runtime_reject(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     module = ModuleType("kittensynth")
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+     native_error_type = type("ManagedModelDependencyError", (Exception,), {})
+     module.ManagedModelDependencyError = native_error_type  # type: ignore[attr-defined]
+     native_error = native_error_type("managed download transport unavailable")
+@@ -338,6 +339,7 @@ def test_model_download_error_preserves_safe_transport_diagnostics(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     module = ModuleType("kittensynth")
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+     download_error_type = type("ModelDownloadError", (RuntimeError,), {})
+     transport_error_type = type("AssetTransportError", (RuntimeError,), {})
+     module.ModelDownloadError = download_error_type  # type: ignore[attr-defined]
+@@ -405,6 +407,7 @@ def test_open_error_fallbacks_do_not_claim_model_download_or_xet(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     module = ModuleType("kittensynth")
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+     module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
+     native_error = ValueError("generic options failure")
+
+@@ -430,6 +433,7 @@ def test_arbitrary_asset_download_error_keeps_generic_backend_code(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     module = ModuleType("kittensynth")
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+     module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
+     asset_error_type = type("AssetDownloadError", (RuntimeError,), {})
+     native_error = asset_error_type("unrelated asset failure")
+diff --git a/tests/test_kittensynth_pronunciation.py b/tests/test_kittensynth_pronunciation.py
+new file mode 100644
+index 0000000..6424baf
+--- /dev/null
++++ b/tests/test_kittensynth_pronunciation.py
+@@ -0,0 +1,438 @@
++from __future__ import annotations
++
++import hashlib
++import sys
++from dataclasses import replace
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from typing import Any
++
++import numpy as np
++import pytest
++
++from voicerender.engines.base import (
++    EngineSelection,
++    PronunciationSpan,
++    SpeechRequest,
++    SpeechToken,
++)
++from voicerender.engines.kittensynth import (
++    KittenSynthEngineAdapter,
++    KittenSynthEngineSession,
++)
++from voicerender.lexicons import LexiconCatalogEntry
++
++
++def _named_source(
++    *,
++    installed: bool = True,
++    model_support: bool = True,
++    encoding: str = "ipa",
++) -> SimpleNamespace:
++    return SimpleNamespace(
++        selector="public-en",
++        language="en",
++        asset_id="asset-en-v1",
++        backend="lexphon",
++        default=True,
++        installed=installed,
++        model_support=model_support,
++        display_name="Public English",
++        phoneme_encoding=encoding,
++        data_version="2025-01",
++        content_sha256="a" * 64,
++        logical_sha256="b" * 64,
++        compatibility_reason=None if model_support else "unsupported encoding",
++    )
++
++
++def _selection(**options: Any) -> EngineSelection:
++    return EngineSelection(
++        engine="kitten",
++        target_id="nano-0.8-int8",
++        language="en-US",
++        voice="Jasper",
++        options=options,
++    )
++
++
++def test_kitten_capabilities_and_option_descriptors_advertise_pronunciation() -> None:
++    adapter = KittenSynthEngineAdapter()
++
++    capabilities = adapter.capabilities()
++    descriptors = adapter.option_descriptors()
++
++    assert capabilities.supports_lexicons
++    assert capabilities.supports_linguistic_tokens
++    assert capabilities.supports_pronunciation_overrides
++    assert capabilities.pronunciation_alphabets == frozenset({"ipa"})
++    assert {
++        "lexicons",
++        "g2lex_files",
++        "lexicon_data_policy",
++        "heteronym_policy",
++    } <= set(descriptors)
++    assert descriptors["lexicon_data_policy"].choices == ("auto", "installed-only")
++    assert descriptors["heteronym_policy"].choices == ("auto", "off")
++    assert adapter.renderprofile_fragment(_selection()).token_fields == (
++        "span",
++        "pos",
++        "tag",
++        "lemma",
++        "morph",
++    )
++
++
++def test_request_tokens_and_ipa_overrides_are_forwarded_to_measure_and_synthesis(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
++    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++
++    class Voice:
++        def __init__(self) -> None:
++            self.measure_args: list[tuple[str, dict[str, Any]]] = []
++            self.synthesis_args: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
++
++        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
++            self.measure_args.append((text, kwargs))
++            return SimpleNamespace(
++                token_count=3,
++                max_tokens=32,
++                fits=True,
++                model_id="nano-0.8-int8",
++                metadata={},
++            )
++
++        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
++            self.synthesis_args.append((args, kwargs))
++            return SimpleNamespace(
++                audio=np.array([0.0, 0.25], dtype=np.float32),
++                sample_rate=24000,
++                voice="Jasper",
++                model_ref="nano-0.8-int8",
++                speed=1.0,
++                metadata={},
++            )
++
++    voice = Voice()
++    request = SpeechRequest(
++        id="request-1",
++        text="read",
++        language="en-US",
++        tokens=(
++            SpeechToken(
++                start=0,
++                end=4,
++                text="read",
++                pos="VERB",
++                tag="VB",
++                lemma="read",
++                morph="Tense=Pres",
++                language="en",
++            ),
++        ),
++        pronunciation_overrides=(
++            PronunciationSpan(
++                start=0,
++                end=4,
++                phonemes="ɹ iː d",
++                language="en",
++                alphabet="ipa",
++            ),
++        ),
++    )
++    session = KittenSynthEngineSession(voice, _selection())
++
++    session.measure(request)
++    session.synthesize(request)
++
++    measured_kwargs = voice.measure_args[0][1]
++    synthesized_kwargs = voice.synthesis_args[0][1]
++    for forwarded in (measured_kwargs, synthesized_kwargs):
++        assert forwarded["tokens"][0].text == "read"
++        assert forwarded["tokens"][0].pos == "VERB"
++        assert forwarded["tokens"][0].morph == "Tense=Pres"
++        assert forwarded["pronunciation_overrides"][0].phonemes == "ɹ iː d"
++        assert forwarded["pronunciation_overrides"][0].alphabet == "ipa"
++
++
++def test_open_forwards_g2p_configuration_and_forces_installed_only_offline(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
++    captured: dict[str, Any] = {}
++
++    class Voice:
++        @classmethod
++        def from_pretrained(cls, target_id: str, **kwargs: Any) -> Voice:
++            captured["target_id"] = target_id
++            captured.update(kwargs)
++            return cls()
++
++        def close(self) -> None:
++            captured["closed"] = True
++
++    module.KittenVoice = Voice  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    selection = EngineSelection(
++        engine="kitten",
++        target_id="nano-0.8-int8",
++        language="en-US",
++        voice="Jasper",
++        offline=True,
++        options={"lexicons": ("public-en",), "heteronym_policy": "off"},
++    )
++
++    with KittenSynthEngineAdapter().open(selection):
++        config = captured["g2p_config"]
++        assert config.language == "en-US"
++        assert config.lexicons == ("public-en",)
++        assert config.lexicon_data_policy == "installed-only"
++        assert config.heteronym_policy == "off"
++    assert captured["closed"] is True
++
++
++def test_lexicon_discovery_and_g2lex_inspection_are_bridged(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    source = _named_source()
++    discovery = SimpleNamespace(entries=(source,))
++    calls: list[dict[str, Any]] = []
++    module = ModuleType("kittensynth")
++
++    def discover_lexicons(**kwargs: Any) -> Any:
++        calls.append(kwargs)
++        return discovery
++
++    module.discover_lexicons = discover_lexicons  # type: ignore[attr-defined]
++    module.inspect_g2lex_file = lambda path: {  # type: ignore[attr-defined]
++        "valid": True,
++        "path": path,
++        "sha256": "a" * 64,
++        "logical_sha256": "b" * 64,
++        "language": "en",
++        "phoneme_encoding": "ipa",
++        "compatible": True,
++        "metadata": {"language": "en"},
++    }
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    adapter = KittenSynthEngineAdapter()
++
++    entries, result = adapter.discover_lexicons(
++        language="en-US", offline=True, refresh=True, preference="catalog"
++    )
++    inspection = adapter.inspect_g2lex_file("local.g2lex")
++
++    assert isinstance(entries[0], LexiconCatalogEntry)
++    assert entries[0].selector == "public-en"
++    assert entries[0].content_sha256 == "a" * 64
++    assert entries[0].logical_sha256 == "b" * 64
++    assert entries[0].compatibility_reason is None
++    assert result is discovery
++    assert calls == [
++        {
++            "language": "en-US",
++            "offline": True,
++            "refresh": True,
++            "preference": "catalog",
++        }
++    ]
++    assert inspection["valid"] is True
++    assert inspection["metadata"] == {"language": "en"}
++
++
++def test_local_g2lex_validation_checks_language_encoding_and_content_pins(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    content = b"a G2Lex fixture"
++    path = tmp_path / "local.g2lex"
++    path.write_bytes(content)
++    digest = hashlib.sha256(content).hexdigest()
++    inspection = {
++        "valid": True,
++        "compatible": True,
++        "language": "en",
++        "phoneme_encoding": "ipa",
++        "sha256": digest,
++        "logical_sha256": "b" * 64,
++    }
++    adapter = KittenSynthEngineAdapter()
++    monkeypatch.setattr(adapter, "inspect_g2lex_file", lambda _path: inspection)
++
++    valid = adapter._validate_pronunciation_sources(
++        _selection(g2lex_files=({"path": str(path), "sha256": digest},))
++    )
++    changed = adapter._validate_pronunciation_sources(
++        _selection(g2lex_files=({"path": str(path), "sha256": "c" * 64},))
++    )
++    inspection["language"] = "fr"
++    inspection["phoneme_encoding"] = "arpabet"
++    incompatible = adapter._validate_pronunciation_sources(
++        _selection(g2lex_files=(str(path),))
++    )
++
++    assert valid == ()
++    assert {item.code for item in changed} == {"kitten.g2lex_pin_changed"}
++    assert {item.code for item in incompatible} >= {
++        "kitten.g2lex_language_incompatible",
++        "kitten.g2lex_encoding_incompatible",
++    }
++
++
++def test_named_lexicon_validation_checks_compatibility_and_install_policy(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = KittenSynthEngineAdapter()
++    source = _named_source(installed=False)
++    entries = (
++        LexiconCatalogEntry(
++            selector=source.selector,
++            engine="kitten",
++            language=source.language,
++            locale="en",
++            asset_id=source.asset_id,
++            data_backend=source.backend,
++            default=source.default,
++            installed=source.installed,
++            model_support="known",
++            phoneme_encoding=source.phoneme_encoding,
++            content_sha256=source.content_sha256,
++            logical_sha256=source.logical_sha256,
++        ),
++    )
++    monkeypatch.setattr(
++        adapter,
++        "discover_lexicons",
++        lambda **kwargs: (entries, SimpleNamespace(entries=entries)),
++    )
++
++    automatic = adapter._validate_pronunciation_sources(
++        _selection(lexicons=("public-en",))
++    )
++    installed_only = adapter._validate_pronunciation_sources(
++        _selection(lexicons=("public-en",), lexicon_data_policy="installed-only")
++    )
++    offline = adapter._validate_pronunciation_sources(
++        EngineSelection(
++            engine="kitten",
++            target_id="nano-0.8-int8",
++            language="en-US",
++            options={"lexicons": ("public-en",)},
++            offline=True,
++        )
++    )
++    wrong_entries = (replace(entries[0], language="fr"),)
++    monkeypatch.setattr(
++        adapter,
++        "discover_lexicons",
++        lambda **kwargs: (wrong_entries, SimpleNamespace(entries=wrong_entries)),
++    )
++    wrong_language = adapter._validate_pronunciation_sources(
++        _selection(lexicons=("public-en",))
++    )
++
++    assert automatic == ()
++    assert [item.code for item in installed_only] == ["kitten.lexicon_not_installed"]
++    assert [item.code for item in offline] == ["kitten.lexicon_not_installed"]
++    assert [item.code for item in wrong_language] == [
++        "kitten.lexicon_language_incompatible"
++    ]
++
++
++def test_pronunciation_stack_reports_effective_order_and_sources(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    source = _named_source()
++    named_entries = SimpleNamespace(entries=(source,))
++    module = ModuleType("kittensynth")
++    module.discover_lexicons = lambda **kwargs: named_entries  # type: ignore[attr-defined]
++    module.inspect_g2lex_file = lambda path: {  # type: ignore[attr-defined]
++        "valid": True,
++        "compatible": True,
++        "path": path,
++        "sha256": "c" * 64,
++        "logical_sha256": "d" * 64,
++        "language": "en",
++        "phoneme_encoding": "ipa",
++        "metadata": {},
++    }
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    stack = KittenSynthEngineAdapter().pronunciation_stack(
++        language="en-US",
++        target_id="nano-0.8-int8",
++        options={
++            "lexicons": ("public-en",),
++            "g2lex_files": (str(tmp_path / "local.g2lex"),),
++            "heteronym_policy": "auto",
++        },
++    )
++
++    assert stack["precedence"] == [
++        "request-local IPA spans",
++        "local G2Lex file 1",
++        "public-en",
++        "contextual heteronym rules",
++        "eSpeak fallback",
++    ]
++    assert stack["local_g2lex"][0]["status"] == "valid"
++    assert stack["named_lexicons"][0]["content_sha256"] == "a" * 64
++    assert stack["g2p_fallback"] == "espeak"
++
++
++def test_synthesis_identity_uses_source_content_not_local_paths(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    source = _named_source()
++    discovery = SimpleNamespace(entries=(source,))
++    module = ModuleType("kittensynth")
++    module.runtime_identity = lambda: {  # type: ignore[attr-defined]
++        "runtime": "kitten",
++        "g2p_revision": "g2p-revision-1",
++        "request_api_version": 2,
++    }
++    module.discover_lexicons = lambda **kwargs: discovery  # type: ignore[attr-defined]
++    module.inspect_g2lex_file = lambda path: {  # type: ignore[attr-defined]
++        "valid": True,
++        "compatible": True,
++        "path": path,
++        "sha256": "c" * 64,
++        "logical_sha256": "d" * 64,
++        "language": "en",
++        "phoneme_encoding": "ipa",
++        "metadata": {},
++    }
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    adapter = KittenSynthEngineAdapter()
++
++    first = adapter.canonical_synthesis_identity(
++        _selection(lexicons=("public-en",), g2lex_files=("/one/local.g2lex",))
++    )
++    same_source_other_path = adapter.canonical_synthesis_identity(
++        _selection(lexicons=("public-en",), g2lex_files=("/two/local.g2lex",))
++    )
++    module.inspect_g2lex_file = lambda path: {  # type: ignore[attr-defined]
++        "valid": True,
++        "compatible": True,
++        "path": path,
++        "sha256": "e" * 64,
++        "logical_sha256": "f" * 64,
++        "language": "en",
++        "phoneme_encoding": "ipa",
++        "metadata": {},
++    }
++    changed_source = adapter.canonical_synthesis_identity(
++        _selection(lexicons=("public-en",), g2lex_files=("/one/local.g2lex",))
++    )
++
++    assert first == same_source_other_path
++    assert first != changed_source
++    pronunciation = first["pronunciation_identity"]
++    assert pronunciation["local_g2lex"] == [
++        {"order": 0, "sha256": "c" * 64, "logical_sha256": "d" * 64}
++    ]
++    assert pronunciation["named_lexicons"][0]["asset_id"] == "asset-en-v1"
++    assert pronunciation["frontend_identity"]["kitteng2p_revision"] == "g2p-revision-1"
+diff --git a/tests/test_lexicons_cli.py b/tests/test_lexicons_cli.py
+index 2b2224a..b77c5d1 100644
+--- a/tests/test_lexicons_cli.py
++++ b/tests/test_lexicons_cli.py
+@@ -296,3 +296,155 @@ def test_bind_and_role_set_parsers_expose_dedicated_flags(tmp_path: Path) -> Non
+         assert parsed.lexicon == ["gold"]
+         assert parsed.g2lex == [Path("local.g2lex")]
+         assert parsed.lexicon_data_policy == "auto"
++
++
++def test_kitten_profile_create_pins_local_g2lex_and_preserves_policy(
++    monkeypatch, capsys, tmp_path
++):
++    adapter = _Adapter()
++    monkeypatch.setattr(cli, "get_adapter", lambda engine: adapter)
++    source = tmp_path / "kitten.g2lex"
++    source.write_bytes(b"kitten pronunciation fixture")
++    captured = {}
++
++    def fake_create_render_profile(**kwargs):
++        captured.update(kwargs)
++        role = RoleProfile(
++            language=kwargs["language"],
++            binding={
++                "renderer": kwargs["engine"],
++                "target_id": kwargs["target_id"],
++                "options": dict(kwargs["options"] or {}),
++            },
++        )
++        return RenderProfile(roles={kwargs["role"]: role}, default_role=kwargs["role"])
++
++    monkeypatch.setattr(cli, "create_render_profile", fake_create_render_profile)
++    assert (
++        cli.main(
++            [
++                "profile",
++                "create",
++                "--engine",
++                "kitten",
++                "--target",
++                "nano-0.8-int8",
++                "--language",
++                "en-US",
++                "--voice",
++                "Jasper",
++                "--g2lex",
++                str(source),
++                "--lexicon-data-policy",
++                "installed-only",
++                "--option",
++                'heteronym_policy="off"',
++                "--output",
++                str(tmp_path / "kitten-profile"),
++                "--json",
++            ]
++        )
++        == 0
++    )
++    capsys.readouterr()
++
++    options = captured["options"]
++    assert options["heteronym_policy"] == "off"
++    assert options["lexicon_data_policy"] == "installed-only"
++    assert options["g2lex_files"][0]["path"] == str(source.resolve())
++    assert options["g2lex_files"][0]["sha256"] == adapter.inspection["sha256"]
++
++
++def test_kitten_profile_inspection_includes_effective_pronunciation_stack(
++    monkeypatch, capsys, tmp_path
++):
++    class KittenAdapter(_Adapter):
++        id = "kitten"
++
++        def pronunciation_stack(self, **kwargs):
++            return {
++                "engine": "kitten",
++                "language": kwargs["language"],
++                "precedence": ["local G2Lex", "contextual heteronyms", "eSpeak"],
++                "local_g2lex": [{"path": "local.g2lex", "status": "valid"}],
++            }
++
++    monkeypatch.setattr(cli, "get_adapter", lambda engine: KittenAdapter())
++    role = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "kitten",
++            "target_id": "nano-0.8-int8",
++            "voice": "Jasper",
++            "options": {"g2lex_files": [{"path": "local.g2lex"}]},
++        },
++    )
++    profile = RenderProfile(
++        roles={"narrator": role}, default_role="narrator"
++    ).with_identity()
++    path = tmp_path / "kitten.renderprofile.toml"
++    cli.save_render_profile(profile, path)
++
++    assert cli.main(["profile", "inspect", str(path), "--json"]) == 0
++    payload = json.loads(capsys.readouterr().out)
++    stack = payload["roles"][0]["pronunciation_stack"]
++    assert stack["precedence"] == ["local G2Lex", "contextual heteronyms", "eSpeak"]
++    assert stack["local_g2lex"][0]["status"] == "valid"
++
++
++def test_inspect_file_preserves_adapter_invalidity(monkeypatch, capsys, tmp_path):
++    adapter = _Adapter()
++    adapter.inspection["valid"] = False
++    adapter.inspection["compatible"] = False
++    adapter.inspection["reason"] = "invalid G2Lex"
++    monkeypatch.setattr(cli, "get_adapter", lambda engine: adapter)
++    source = tmp_path / "invalid.g2lex"
++    source.write_bytes(b"invalid")
++
++    assert cli.main(["lexicons", "inspect-file", str(source), "--json"]) == 0
++    payload = json.loads(capsys.readouterr().out)
++    assert payload["valid"] is False
++    assert payload["compatible"] is False
++    assert payload["reason"] == "invalid G2Lex"
++
++
++def test_profile_create_rejects_invalid_local_g2lex_before_pinning(
++    monkeypatch, capsys, tmp_path
++):
++    adapter = _Adapter()
++    adapter.inspection["valid"] = False
++    adapter.inspection["reason"] = "invalid G2Lex"
++    monkeypatch.setattr(cli, "get_adapter", lambda engine: adapter)
++    monkeypatch.setattr(
++        cli,
++        "create_render_profile",
++        lambda **kwargs: (_ for _ in ()).throw(
++            AssertionError("invalid G2Lex must stop profile creation")
++        ),
++    )
++    source = tmp_path / "invalid.g2lex"
++    source.write_bytes(b"invalid")
++
++    assert (
++        cli.main(
++            [
++                "profile",
++                "create",
++                "--engine",
++                "kitten",
++                "--target",
++                "nano-0.8-int8",
++                "--language",
++                "en-US",
++                "--g2lex",
++                str(source),
++                "--output",
++                str(tmp_path / "invalid-profile"),
++                "--json",
++            ]
++        )
++        == 1
++    )
++    payload = json.loads(capsys.readouterr().out)
++    assert payload["status"] == "error"
++    assert "invalid G2Lex" in payload["error"]
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 8e4b673..beb53e5 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -16,6 +16,7 @@ from renderplan import (
+     SourceSpan,
+     SpeechControl,
+     SpeechItem,
++    TokenBundle,
+     load_manifest,
+     load_preflight,
+     save_plan,
+@@ -316,7 +317,7 @@ def _install_fake_kittensynth(
+                 raise open_error
+             return cls()
+
+-        def measure_prepared(self, text: str) -> Any:
++        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
+             events.append(("measure", text))
+             return SimpleNamespace(
+                 token_count=amount,
+@@ -337,12 +338,15 @@ def _install_fake_kittensynth(
+     module = ModuleType("kittensynth")
+     module.__version__ = "0.1.4"
+     module.__file__ = "/fake/kittensynth/__init__.py"
+-    module.REQUEST_API_VERSION = 1
++    module.REQUEST_API_VERSION = 2
+     module.request_api_contract = lambda: {
+-        "version": 1,
++        "version": 2,
+         "supports_request_measurement": True,
+         "measurement_entrypoint": "KittenVoice.measure_prepared",
+         "measurement_metric": "model_tokens",
++        "supports_linguistic_tokens": True,
++        "supports_pronunciation_overrides": True,
++        "supports_lexicons": True,
+     }
+     module.KittenVoice = FakeVoice
+     if open_error is not None:
+@@ -350,6 +354,13 @@ def _install_fake_kittensynth(
+     module.SynthesisMeasure = object
+     module.SynthesisConfig = object
+     module.SynthesisResult = object
++    module.KittenG2PConfig = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.G2LexFileRef = object
++    module.PronunciationTrace = object
++    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)
++    module.discover_lexicons = lambda **kwargs: ()
++    module.inspect_g2lex_file = lambda path: {}
+     module.discover_models = lambda **kwargs: (model,)
+     module.runtime_identity = lambda: {"engine_version": "0.1.4"}
+     monkeypatch.setitem(sys.modules, "kittensynth", module)
+@@ -372,16 +383,27 @@ def _plan(
+             )
+             for index in range(source_count)
+         )
++        item_binding = dict(binding or _BINDING)
++        token_bundle = None
++        if item_binding.get("renderer") == "kitten" and text:
++            token_bundle = TokenBundle(
++                span=((0, len(text)),),
++                pos=("NOUN",),
++                tag=("NN",),
++                lemma=((0, text),),
++                morph=((0, "Number=Sing"),),
++            )
+         flow.append(
+             SpeechItem(
+                 number=number,
+                 text=text,
+                 language="en-US",
+                 role="narrator",
+-                binding=dict(binding or _BINDING),
++                binding=item_binding,
+                 source=source,
+                 planning_level=level,
+                 preflight_required=required,
++                tokens=token_bundle,
+             )
+         )
+     return RenderPlan(
+diff --git a/voicerender/bundle_inspect.py b/voicerender/bundle_inspect.py
+index 00b5426..bf69ad8 100644
+--- a/voicerender/bundle_inspect.py
++++ b/voicerender/bundle_inspect.py
+@@ -291,6 +291,7 @@ def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+ def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
+     kind = source.get("kind") or source.get("type")
+     safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
++    fields: tuple[str, ...]
+     if kind == "managed_reference":
+         ref = source.get("value", source.get("ref", source.get("reference")))
+         if isinstance(ref, str):
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 36a26cc..406df5f 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -1024,6 +1024,14 @@ def _pin_g2lex_files(adapter: Any, files: Any, language: str) -> list[dict[str,
+             raise ValueError(f"Duplicate G2Lex file path: {path}")
+         seen_paths.add(path_key)
+         details = _inspection_to_dict(inspector(str(path)))
++        if details.get("valid") is False:
++            raise ValueError(
++                str(details.get("reason") or f"G2Lex file {path} is invalid")
++            )
++        if details.get("compatible") is False:
++            raise ValueError(
++                str(details.get("reason") or f"G2Lex file {path} is incompatible")
++            )
+         metadata = details.get("metadata")
+         if not isinstance(metadata, Mapping):
+             raise TypeError(f"G2Lex inspection for {path} has no metadata table")
+@@ -2395,7 +2403,8 @@ def main(argv: list[str] | None = None) -> int:
+                         f"Engine {adapter.id!r} does not support local G2Lex inspection"
+                     )
+                 payload = _inspection_to_dict(inspector(str(args.path)))
+-                payload["valid"] = True
++                if "valid" not in payload:
++                    payload["valid"] = True
+                 if args.json:
+                     print(
+                         json.dumps(
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index 5c0c880..e5dbbe0 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -6,7 +6,8 @@ import importlib
+ import math
+ from collections.abc import Mapping
+ from contextlib import AbstractContextManager, contextmanager
+-from dataclasses import replace
++from dataclasses import asdict, is_dataclass, replace
++from pathlib import Path
+ from typing import Any, Literal
+
+ from ..error_diagnostics import sanitize_error_message
+@@ -19,11 +20,13 @@ from ..errors import (
+     InvalidEngineOptionError,
+     InvalidEngineVoiceError,
+     SpeechRequestTooLongError,
++    UnsupportedSynthesisFeatureError,
+ )
+-from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
++from .api_probe import EngineApiProbe, probe_public_api
+ from .base import (
+     PCM_RANGE_POLICY,
+     EngineCapabilities,
++    EngineOption,
+     EngineSelection,
+     RenderedSpeech,
+     RenderProfileFragment,
+@@ -53,8 +56,13 @@ KITTEN_OPTION_NAMES = frozenset(
+         "providers",
+         "provider_options",
+         "session_options",
++        "lexicons",
++        "g2lex_files",
++        "lexicon_data_policy",
++        "heteronym_policy",
+     }
+ )
++KITTEN_REQUEST_API_VERSION = 2
+
+ KITTEN_PCM_RANGE_POLICY = PCM_RANGE_POLICY
+
+@@ -65,9 +73,95 @@ class KittenSelectionError(ValueError):
+     def __init__(self, code: str, message: str, field: str) -> None:
+         super().__init__(message)
+         self.diagnostic_code = code
++
+         self.diagnostic_field = field
+
+
++def _kitten_request_inputs(
++    request: SpeechRequest, module: Any
++) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
++    tokens = tuple(
++        module.LinguisticToken(
++            start=item.start,
++            end=item.end,
++            text=item.text,
++            pos=item.pos,
++            tag=item.tag,
++            lemma=item.lemma,
++            morph=item.morph,
++            language=item.language,
++        )
++        for item in request.tokens
++    )
++    overrides: list[Any] = []
++    for item in request.pronunciation_overrides:
++        alphabet = item.alphabet or "ipa"
++        if alphabet.casefold() != "ipa":
++            raise UnsupportedSynthesisFeatureError(
++                f"KittenSynth supports IPA pronunciation overrides, not {alphabet!r}",
++                engine="kitten",
++                language=item.language or request.language,
++            )
++        if not isinstance(item.phonemes, str) or not item.phonemes.strip():
++            raise InvalidEngineOptionError(
++                "Kitten pronunciation spans require non-empty IPA phonemes",
++                engine="kitten",
++                language=item.language or request.language,
++            )
++        overrides.append(
++            module.PronunciationOverride(
++                start=item.start,
++                end=item.end,
++                phonemes=item.phonemes,
++                language=item.language,
++                alphabet="ipa",
++            )
++        )
++    return tokens, tuple(overrides)
++
++
++def _source_entries(value: Any) -> tuple[Any, ...]:
++    if value is None:
++        return ()
++    if (
++        isinstance(value, (Mapping, str, Path))
++        or getattr(value, "path", None) is not None
++    ):
++        return (value,)
++    try:
++        return tuple(value)
++    except TypeError:
++        return (value,)
++
++
++def _source_field(source: Any, name: str) -> Any:
++    return (
++        source.get(name) if isinstance(source, Mapping) else getattr(source, name, None)
++    )
++
++
++def _requested_selectors(value: Any) -> tuple[str, ...]:
++    if value is None:
++        return ()
++    if isinstance(value, Mapping):
++        raise TypeError("lexicons must be a selector or sequence of selector strings")
++    values = (value,) if isinstance(value, str) else tuple(value)
++    if any(not isinstance(item, str) or not item.strip() for item in values):
++        raise ValueError("lexicons must contain non-empty selector strings")
++    return tuple(item.strip() for item in values)
++
++
++def _sha256_key(value: Any) -> str | None:
++    if not isinstance(value, str):
++        return None
++    normalized = value.strip().casefold().removeprefix("sha256:")
++    if len(normalized) != 64 or any(
++        char not in "0123456789abcdef" for char in normalized
++    ):
++        return None
++    return normalized
++
++
+ def _is_english(language: str) -> bool:
+     normalized = normalize_language_key(language)
+     return normalized == "english" or language_base(normalized) == "en"
+@@ -307,7 +401,15 @@ class KittenSynthEngineSession:
+                 source="kittensynth.no_capacity_measurement",
+             )
+         try:
+-            measured = measure_method(request.text)
++            import kittensynth
++
++            tokens, overrides = _kitten_request_inputs(request, kittensynth)
++            request_inputs: dict[str, Any] = {}
++            if request.tokens:
++                request_inputs["tokens"] = tokens
++            if request.pronunciation_overrides:
++                request_inputs["pronunciation_overrides"] = overrides
++            measured = measure_method(request.text, **request_inputs)
+         except EngineSynthesisError:
+             raise
+         except Exception as exc:
+@@ -379,10 +481,19 @@ class KittenSynthEngineSession:
+     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
+         speed = float(self._selection.options.get("speed", 1.0))
+         try:
++            import kittensynth
++
++            tokens, overrides = _kitten_request_inputs(request, kittensynth)
++            request_inputs: dict[str, Any] = {}
++            if request.tokens:
++                request_inputs["tokens"] = tokens
++            if request.pronunciation_overrides:
++                request_inputs["pronunciation_overrides"] = overrides
+             result = self._voice.synthesize_prepared(
+                 request.text,
+                 voice=request.voice or self._selection.voice or DEFAULT_KITTEN_VOICE,
+                 speed=speed,
++                **request_inputs,
+             )
+         except EngineSynthesisError:
+             raise
+@@ -440,6 +551,13 @@ class KittenSynthEngineAdapter:
+                 "SynthesisConfig",
+                 "SynthesisResult",
+                 "discover_models",
++                "KittenG2PConfig",
++                "G2LexFileRef",
++                "LinguisticToken",
++                "PronunciationOverride",
++                "PronunciationTrace",
++                "discover_lexicons",
++                "inspect_g2lex_file",
+                 "runtime_identity",
+             ),
+             required_methods={
+@@ -450,17 +568,34 @@ class KittenSynthEngineAdapter:
+                     "from_local",
+                     "close",
+                 ),
+-                "__module__": ("discover_models", "runtime_identity"),
++                "__module__": (
++                    "discover_models",
++                    "runtime_identity",
++                    "discover_lexicons",
++                    "inspect_g2lex_file",
++                ),
+             },
+-            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
++            expected_api_version=KITTEN_REQUEST_API_VERSION,
+         )
+         if not probe.compatible:
++            diagnostic = (
++                "KittenSynth does not support request measurement. "
++                "Kitten lexicon-aware G2P requires kittensynth>=0.1.8 and "
++                "kitteng2p>=0.1.2."
++                if probe.failed_stage == "request_measurement_contract"
++                else "Kitten lexicon-aware G2P requires kittensynth>=0.1.8 and "
++                "kitteng2p>=0.1.2."
++            )
+             if (
+                 probe.failed_stage == "contract_inspection"
+                 and probe.failed_symbol == "request_api_contract"
+             ):
+-                return replace(probe, failed_stage="request_measurement_contract")
+-            return probe
++                return replace(
++                    probe,
++                    failed_stage="pronunciation_capability_contract",
++                    warnings=probe.warnings + (diagnostic,),
++                )
++            return replace(probe, warnings=probe.warnings + (diagnostic,))
+
+         try:
+             kittensynth = importlib.import_module(self.package_name)
+@@ -468,49 +603,93 @@ class KittenSynthEngineAdapter:
+             if not callable(contract_factory):
+                 raise TypeError("request_api_contract is not callable")
+             contract = contract_factory()
+-            missing = object()
+-            if isinstance(contract, Mapping):
+-                supports_measurement = contract.get(
+-                    "supports_request_measurement", missing
+-                )
+-            else:
+-                supports_measurement = getattr(
+-                    contract, "supports_request_measurement", missing
+-                )
+         except Exception as exc:  # noqa: BLE001 - Contract inspection must fail closed.
+             return replace(
+                 probe,
+                 compatible=False,
+                 status="api_probe_failed",
+-                failed_stage="request_measurement_contract",
++                failed_stage="pronunciation_capability_contract",
+                 failed_symbol="request_api_contract",
+                 error_type=type(exc).__name__,
+                 error_message=str(exc),
++                warnings=probe.warnings
++                + (
++                    (
++                        "Kitten lexicon-aware G2P requires kittensynth>=0.1.8 and "
++                        "kitteng2p>=0.1.2."
++                    ),
++                ),
+             )
+
+-        if supports_measurement is not True:
++        required_capabilities = (
++            ("supports_request_measurement", "request_measurement_contract"),
++            ("supports_linguistic_tokens", "pronunciation_capability_contract"),
++            ("supports_pronunciation_overrides", "pronunciation_capability_contract"),
++            ("supports_lexicons", "pronunciation_capability_contract"),
++        )
++        for name, stage in required_capabilities:
++            value = (
++                contract.get(name)
++                if isinstance(contract, Mapping)
++                else getattr(contract, name, None)
++            )
++            if value is True:
++                continue
++            shown_value = "missing" if value is None else value
++            diagnostic = (
++                "KittenSynth does not support request measurement. Install "
++                "kittensynth>=0.1.8 with kitteng2p>=0.1.2."
++                if name == "supports_request_measurement"
++                else "KittenSynth does not advertise the required pronunciation "
++                "capabilities. Install kittensynth>=0.1.8 with kitteng2p>=0.1.2."
++            )
+             return replace(
+                 probe,
+                 compatible=False,
+                 status="api_incompatible",
+-                failed_stage="request_measurement_contract",
+-                warnings=probe.warnings
+-                + (
+-                    "KittenSynth request API contract does not support request measurement.",
+-                ),
+-                details={
+-                    "supports_request_measurement": (
+-                        "missing"
+-                        if supports_measurement is missing
+-                        else supports_measurement
+-                    )
+-                },
++                failed_stage=stage,
++                failed_symbol=name,
++                warnings=probe.warnings + (diagnostic,),
++                details={name: shown_value, "required": True},
+             )
+         return probe
+
+     def compatible_api(self) -> bool:
+         return self.probe_api().compatible
+
++    def option_descriptors(
++        self, *, target_id: str | None = None
++    ) -> Mapping[str, EngineOption]:
++        del target_id
++        return {
++            "lexicons": EngineOption(
++                name="lexicons",
++                value_type="string|array[string]",
++                default=None,
++                description="Ordered named Kitten-compatible IPA pronunciation sources.",
++            ),
++            "g2lex_files": EngineOption(
++                name="g2lex_files",
++                value_type="array[table]",
++                default=None,
++                description="Ordered local G2Lex files pinned by content and logical SHA-256.",
++            ),
++            "lexicon_data_policy": EngineOption(
++                name="lexicon_data_policy",
++                value_type="string",
++                default="auto",
++                choices=("auto", "installed-only"),
++                description="Provision selected named sources automatically or require installation.",
++            ),
++            "heteronym_policy": EngineOption(
++                name="heteronym_policy",
++                value_type="string",
++                default="auto",
++                choices=("auto", "off"),
++                description="Enable or disable deterministic English contextual heteronym rules.",
++            ),
++        }
++
+     def capabilities(self) -> EngineCapabilities:
+         return EngineCapabilities(
+             id=self.id,
+@@ -520,10 +699,11 @@ class KittenSynthEngineAdapter:
+             supports_named_voices=True,
+             supports_reference_voice=False,
+             supports_speakers=False,
+-            supports_pronunciation_overrides=False,
+-            supports_linguistic_tokens=False,
++            supports_pronunciation_overrides=True,
++            pronunciation_alphabets=frozenset({"ipa"}),
++            supports_linguistic_tokens=True,
+             supports_whole_request_phonemes=False,
+-            supports_lexicons=False,
++            supports_lexicons=True,
+             supports_model_sources=False,
+             supports_qualities=True,
+             supports_live=True,
+@@ -538,8 +718,9 @@ class KittenSynthEngineAdapter:
+         return make_renderprofile_fragment(
+             self,
+             selection,
++            token_fields=("span", "pos", "tag", "lemma", "morph"),
+             frontend="kittensynth",
+-            pronunciation="unsupported",
++            pronunciation="kitteng2p.ipa",
+             capacity_key="max_tokens",
+             capacity_metric="model_tokens",
+         )
+@@ -550,6 +731,218 @@ class KittenSynthEngineAdapter:
+         except ImportError:
+             return ()
+
++    def discover_lexicons(
++        self,
++        *,
++        language: str | None = None,
++        model: str | None = None,
++        offline: bool = False,
++        refresh: bool = False,
++        preference: str = "auto",
++    ) -> tuple[tuple[Any, ...], Any]:
++        import kittensynth
++
++        from ..lexicons import LexiconCatalogEntry
++
++        del model  # Kitteng2p's catalog exposes encoding-based Kitten compatibility.
++        result = kittensynth.discover_lexicons(
++            language=language or "en-us",
++            offline=offline,
++            refresh=refresh,
++            preference=preference,
++        )
++        entries = tuple(
++            LexiconCatalogEntry(
++                selector=item.selector,
++                engine=self.id,
++                language=item.language,
++                locale=normalize_locale_tag(item.language) or item.language,
++                asset_id=item.asset_id,
++                data_backend=item.backend,
++                default=item.default,
++                installed=item.installed,
++                models=(),
++                model_support="known" if item.model_support else "unsupported",
++                display_name=item.display_name,
++                phoneme_encoding=item.phoneme_encoding,
++                data_version=item.data_version,
++                content_sha256=item.content_sha256,
++                logical_sha256=item.logical_sha256,
++                compatibility_reason=item.compatibility_reason,
++            )
++            for item in result.entries
++        )
++        return entries, result
++
++    def inspect_g2lex_file(self, path: str) -> Mapping[str, Any]:
++        import kittensynth
++
++        inspection = kittensynth.inspect_g2lex_file(path)
++        if is_dataclass(inspection) and not isinstance(inspection, type):
++            value = asdict(inspection)
++        elif isinstance(inspection, Mapping):
++            value = dict(inspection)
++        else:
++            raise TypeError("Kitteng2p returned an invalid G2Lex inspection record")
++        metadata = value.get("metadata")
++        if not isinstance(metadata, Mapping):
++            value["metadata"] = {}
++        else:
++            value["metadata"] = dict(metadata)
++        return value
++
++    def pronunciation_stack(
++        self,
++        *,
++        language: str,
++        target_id: str,
++        options: Mapping[str, Any] | None = None,
++    ) -> Mapping[str, Any]:
++        selected_options = dict(options or {})
++        policy = selected_options.get("lexicon_data_policy", "auto")
++        heteronym_policy = selected_options.get("heteronym_policy", "auto")
++        selectors = _requested_selectors(selected_options.get("lexicons"))
++        local_records: list[dict[str, Any]] = []
++        for source in _source_entries(selected_options.get("g2lex_files")):
++            raw_path = (
++                source
++                if isinstance(source, (str, Path))
++                else _source_field(source, "path")
++            )
++            record: dict[str, Any] = {
++                "path": str(raw_path) if raw_path is not None else None,
++                "sha256": _source_field(source, "sha256"),
++                "logical_sha256": _source_field(source, "logical_sha256"),
++                "status": "invalid",
++            }
++            if isinstance(raw_path, (str, Path)):
++                try:
++                    inspection = self.inspect_g2lex_file(str(raw_path))
++                except (ImportError, OSError, TypeError, ValueError) as exc:
++                    record["error"] = str(exc)
++                else:
++                    record["path"] = inspection.get("path", str(raw_path))
++                    record["current_sha256"] = inspection.get("sha256")
++                    record["current_logical_sha256"] = inspection.get("logical_sha256")
++                    record["language"] = inspection.get("language")
++                    record["phoneme_encoding"] = inspection.get("phoneme_encoding")
++                    if inspection.get("valid") is not True:
++                        record["status"] = "invalid"
++                        record["error"] = inspection.get("reason")
++                    elif inspection.get("compatible") is not True:
++                        record["status"] = "incompatible"
++                        record["error"] = inspection.get("reason")
++                    else:
++                        expected = _source_field(source, "sha256")
++                        expected_logical = _source_field(source, "logical_sha256")
++                        actual = inspection.get("sha256")
++                        actual_logical = inspection.get("logical_sha256")
++                        invalid_pin = (
++                            expected is not None and _sha256_key(expected) is None
++                        ) or (
++                            expected_logical is not None
++                            and _sha256_key(expected_logical) is None
++                        )
++                        changed = (
++                            _sha256_key(expected) is not None
++                            and _sha256_key(expected) != _sha256_key(actual)
++                        ) or (
++                            _sha256_key(expected_logical) is not None
++                            and _sha256_key(expected_logical)
++                            != _sha256_key(actual_logical)
++                        )
++                        source_language = inspection.get("language")
++                        try:
++                            if not isinstance(source_language, str):
++                                raise TypeError("G2Lex language must be a string")
++                            source_key = normalize_language_key(source_language)
++                            request_key = normalize_language_key(language)
++                            language_matches = language_base(
++                                source_key
++                            ) == language_base(request_key)
++                        except (TypeError, ValueError):
++                            language_matches = False
++                        record["status"] = (
++                            "invalid-pin"
++                            if invalid_pin
++                            else "changed"
++                            if changed
++                            else "incompatible"
++                            if not language_matches
++                            else "valid"
++                        )
++                        if not language_matches:
++                            record["error"] = (
++                                "G2Lex language does not match the synthesis request."
++                            )
++            local_records.append(record)
++
++        catalog_available = True
++        catalog_error: str | None = None
++        named_info: dict[str, Any] = {}
++        if selectors:
++            try:
++                _entries, discovery = self.discover_lexicons(
++                    language=language,
++                    offline=True,
++                    preference="auto",
++                )
++                named_info = {
++                    item.selector.casefold(): item for item in discovery.entries
++                }
++            except (
++                EngineError,
++                ImportError,
++                OSError,
++                RuntimeError,
++                TypeError,
++                ValueError,
++            ) as exc:
++                catalog_available = False
++                catalog_error = str(exc)
++
++        named_records: list[dict[str, Any]] = []
++        for selector in selectors:
++            item = named_info.get(selector.casefold())
++            named_records.append(
++                {
++                    "selector": selector,
++                    "available": item is not None,
++                    "installed": None if item is None else item.installed,
++                    "model_support": False if item is None else item.model_support,
++                    "phoneme_encoding": None if item is None else item.phoneme_encoding,
++                    "asset_id": None if item is None else item.asset_id,
++                    "data_version": None if item is None else item.data_version,
++                    "content_sha256": None if item is None else item.content_sha256,
++                    "logical_sha256": None if item is None else item.logical_sha256,
++                    "compatibility_reason": (
++                        None if item is None else item.compatibility_reason
++                    ),
++                }
++            )
++
++        precedence = ["request-local IPA spans"]
++        precedence.extend(
++            f"local G2Lex file {index + 1}" for index in range(len(local_records))
++        )
++        precedence.extend(selectors)
++        if heteronym_policy == "auto":
++            precedence.append("contextual heteronym rules")
++        precedence.append("eSpeak fallback")
++        return {
++            "engine": self.id,
++            "language": language,
++            "target_id": target_id,
++            "precedence": precedence,
++            "local_g2lex": local_records,
++            "named_lexicons": named_records,
++            "lexicon_catalog_available": catalog_available,
++            "lexicon_catalog_error": catalog_error,
++            "lexicon_data_policy": policy,
++            "heteronym_policy": heteronym_policy,
++            "g2p_fallback": "espeak",
++        }
++
+     def resolve(self, request: Any) -> tuple[EngineSelection, tuple[Any, ...]]:
+         language = normalize_language_key(getattr(request, "language", None) or "en-us")
+         if not _is_english(language):
+@@ -688,7 +1081,220 @@ class KittenSynthEngineAdapter:
+                     field="render.options.quality",
+                 ),
+             )
+-        return ()
++        return self._validate_pronunciation_sources(selection)
++
++    def _validate_pronunciation_sources(
++        self, selection: EngineSelection
++    ) -> tuple[Any, ...]:
++        from .base import EngineDiagnostic
++
++        options = selection.options
++        diagnostics: list[EngineDiagnostic] = []
++
++        def add(code: str, message: str, field: str) -> None:
++            diagnostics.append(
++                EngineDiagnostic(
++                    code=code,
++                    severity="error",
++                    message=message,
++                    field=field,
++                )
++            )
++
++        policy = options.get("lexicon_data_policy", "auto")
++        if not isinstance(policy, str) or policy not in {"auto", "installed-only"}:
++            add(
++                "kitten.lexicon_policy_invalid",
++                "lexicon_data_policy must be 'auto' or 'installed-only'.",
++                "render.options.lexicon_data_policy",
++            )
++        heteronym_policy = options.get("heteronym_policy", "auto")
++        if not isinstance(heteronym_policy, str) or heteronym_policy not in {
++            "auto",
++            "off",
++        }:
++            add(
++                "kitten.heteronym_policy_invalid",
++                "heteronym_policy must be 'auto' or 'off'.",
++                "render.options.heteronym_policy",
++            )
++        try:
++            selectors = _requested_selectors(options.get("lexicons"))
++        except (TypeError, ValueError) as exc:
++            add(
++                "kitten.lexicon_selector_invalid",
++                str(exc),
++                "render.options.lexicons",
++            )
++            selectors = ()
++        if len({selector.casefold() for selector in selectors}) != len(selectors):
++            add(
++                "kitten.lexicon_selector_duplicate",
++                "Named lexicon selectors must be unique, ignoring case.",
++                "render.options.lexicons",
++            )
++
++        local_sources = _source_entries(options.get("g2lex_files"))
++        seen_paths: set[str] = set()
++        for index, source in enumerate(local_sources):
++            field = f"render.options.g2lex_files[{index}]"
++            raw_path = (
++                source
++                if isinstance(source, (str, Path))
++                else _source_field(source, "path")
++            )
++            if not isinstance(raw_path, (str, Path)) or not str(raw_path).strip():
++                add(
++                    "kitten.g2lex_file_invalid",
++                    "G2Lex file reference requires a path.",
++                    field,
++                )
++                continue
++            path = Path(raw_path).expanduser()
++            path_key = str(path.resolve()).casefold()
++            if path_key in seen_paths:
++                add(
++                    "kitten.g2lex_file_duplicate",
++                    "G2Lex file paths must be unique.",
++                    field,
++                )
++                continue
++            seen_paths.add(path_key)
++            try:
++                inspection = self.inspect_g2lex_file(str(path))
++            except (ImportError, OSError, TypeError, ValueError) as exc:
++                add(
++                    "kitten.g2lex_file_invalid",
++                    f"Cannot inspect G2Lex file: {exc}",
++                    field,
++                )
++                continue
++            if inspection.get("valid") is not True:
++                add(
++                    "kitten.g2lex_file_invalid",
++                    str(
++                        inspection.get("reason") or "File is not a valid G2Lex lexicon."
++                    ),
++                    field,
++                )
++                continue
++            source_language = inspection.get("language")
++            try:
++                if not isinstance(source_language, str):
++                    raise TypeError("G2Lex language must be a string")
++                source_key = normalize_language_key(source_language)
++                request_key = normalize_language_key(selection.language)
++                language_matches = language_base(source_key) == language_base(
++                    request_key
++                )
++            except (TypeError, ValueError):
++                language_matches = False
++            if not language_matches:
++                add(
++                    "kitten.g2lex_language_incompatible",
++                    f"G2Lex file language {source_language!r} does not match "
++                    f"{selection.language!r}.",
++                    field,
++                )
++            encoding = inspection.get("phoneme_encoding")
++            if not isinstance(encoding, str) or encoding.casefold() != "ipa":
++                add(
++                    "kitten.g2lex_encoding_incompatible",
++                    f"Kitten requires IPA G2Lex values, not {encoding!r}.",
++                    field,
++                )
++            if inspection.get("compatible") is not True:
++                reason = inspection.get("reason")
++                add(
++                    "kitten.g2lex_incompatible",
++                    str(reason)
++                    if isinstance(reason, str) and reason
++                    else "G2Lex file is not compatible with KittenSynth.",
++                    field,
++                )
++            for pin_name, actual_name in (
++                ("sha256", "sha256"),
++                ("logical_sha256", "logical_sha256"),
++            ):
++                expected = _source_field(source, pin_name)
++                if expected is None:
++                    continue
++                expected_hash = _sha256_key(expected)
++                actual_hash = _sha256_key(inspection.get(actual_name))
++                if expected_hash is None:
++                    add(
++                        "kitten.g2lex_pin_invalid",
++                        f"G2Lex {pin_name} pin must be a SHA-256 digest.",
++                        field,
++                    )
++                elif expected_hash != actual_hash:
++                    add(
++                        "kitten.g2lex_pin_changed",
++                        f"G2Lex file no longer matches its pinned {pin_name}.",
++                        field,
++                    )
++
++        if selectors:
++            try:
++                _entries, discovery = self.discover_lexicons(
++                    language=selection.language,
++                    offline=selection.offline,
++                    refresh=selection.refresh,
++                )
++            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
++                add(
++                    "kitten.lexicon_catalog_unavailable",
++                    f"Cannot verify selected Kitten lexicons: {exc}",
++                    "render.options.lexicons",
++                )
++                return tuple(diagnostics)
++            by_selector = {item.selector.casefold(): item for item in discovery.entries}
++            for index, selector in enumerate(selectors):
++                field = f"render.options.lexicons[{index}]"
++                entry = by_selector.get(selector.casefold())
++                if entry is None:
++                    add(
++                        "kitten.lexicon_not_found",
++                        f"Named lexicon {selector!r} is unavailable for {selection.language!r}.",
++                        field,
++                    )
++                    continue
++                try:
++                    source_key = normalize_language_key(entry.language)
++                    request_key = normalize_language_key(selection.language)
++                    language_matches = language_base(source_key) == language_base(
++                        request_key
++                    )
++                except (TypeError, ValueError):
++                    language_matches = False
++                if not language_matches:
++                    add(
++                        "kitten.lexicon_language_incompatible",
++                        f"Named lexicon {selector!r} language {entry.language!r} does not "
++                        f"match {selection.language!r}.",
++                        field,
++                    )
++                if (
++                    entry.model_support not in {"known", "supported"}
++                    or not isinstance(entry.phoneme_encoding, str)
++                    or entry.phoneme_encoding.casefold() != "ipa"
++                ):
++                    add(
++                        "kitten.lexicon_incompatible",
++                        entry.compatibility_reason
++                        or f"Named lexicon {selector!r} is not Kitten-compatible IPA.",
++                        field,
++                    )
++                if entry.installed is not True and (
++                    policy == "installed-only" or selection.offline
++                ):
++                    add(
++                        "kitten.lexicon_not_installed",
++                        f"Named lexicon {selector!r} is not installed and cannot be "
++                        "provisioned under the current policy/offline setting.",
++                        field,
++                    )
++        return tuple(diagnostics)
+
+     def target_metadata(self, selection: EngineSelection) -> Mapping[str, Any]:
+         targets = self.discover(
+@@ -717,6 +1323,88 @@ class KittenSynthEngineAdapter:
+             "source_revision": target.metadata.get("source_revision"),
+         }
+
++    def _pronunciation_identity(self, selection: EngineSelection) -> Mapping[str, Any]:
++        import kittensynth
++
++        options = selection.options
++        selectors = _requested_selectors(options.get("lexicons"))
++        named_identity: list[dict[str, Any]] = []
++        if selectors:
++            try:
++                _entries, discovery = self.discover_lexicons(
++                    language=selection.language,
++                    offline=selection.offline,
++                    refresh=selection.refresh,
++                )
++            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
++                raise InvalidEngineOptionError(
++                    f"Cannot identify selected Kitten lexicons: {exc}",
++                    engine="kitten",
++                    language=selection.language,
++                    code="kitten.lexicon_identity_unavailable",
++                ) from exc
++            by_selector = {item.selector.casefold(): item for item in discovery.entries}
++            for index, selector in enumerate(selectors):
++                item = by_selector.get(selector.casefold())
++                if item is None:
++                    raise InvalidEngineOptionError(
++                        f"Selected Kitten lexicon {selector!r} is unavailable.",
++                        engine="kitten",
++                        language=selection.language,
++                        code="kitten.lexicon_identity_unavailable",
++                    )
++                named_identity.append(
++                    {
++                        "order": index,
++                        "selector": item.selector,
++                        "asset_id": item.asset_id or item.id,
++                        "data_version": item.data_version,
++                        "sha256": item.content_sha256,
++                        "logical_sha256": item.logical_sha256,
++                    }
++                )
++
++        local_identity: list[dict[str, Any]] = []
++        for index, source in enumerate(_source_entries(options.get("g2lex_files"))):
++            raw_path = (
++                source
++                if isinstance(source, (str, Path))
++                else _source_field(source, "path")
++            )
++            if not isinstance(raw_path, (str, Path)):
++                raise InvalidEngineOptionError(
++                    "Each local G2Lex source must include a file path.",
++                    engine="kitten",
++                    language=selection.language,
++                    code="kitten.g2lex_reference_invalid",
++                )
++            inspection = self.inspect_g2lex_file(str(raw_path))
++            if inspection.get("valid") is not True:
++                raise InvalidEngineOptionError(
++                    str(inspection.get("reason") or "Local G2Lex source is invalid."),
++                    engine="kitten",
++                    language=selection.language,
++                    code="kitten.g2lex_file_invalid",
++                )
++            local_identity.append(
++                {
++                    "order": index,
++                    "sha256": inspection.get("sha256"),
++                    "logical_sha256": inspection.get("logical_sha256"),
++                }
++            )
++
++        runtime = dict(kittensynth.runtime_identity())
++        return {
++            "named_lexicons": named_identity,
++            "local_g2lex": local_identity,
++            "heteronym_policy": options.get("heteronym_policy", "auto"),
++            "frontend_identity": {
++                "kitteng2p_revision": runtime.get("g2p_revision"),
++                "request_api_version": runtime.get("request_api_version"),
++            },
++        }
++
+     def canonical_synthesis_identity(
+         self, selection: EngineSelection
+     ) -> Mapping[str, Any]:
+@@ -741,6 +1429,7 @@ class KittenSynthEngineAdapter:
+             "voice": selection.voice,
+             "language": selection.language,
+             "options": pcm_options,
++            "pronunciation_identity": self._pronunciation_identity(selection),
+             "model_revision": selection.metadata.get("source_revision"),
+             "pcm_range_policy": KITTEN_PCM_RANGE_POLICY,
+         }
+@@ -752,6 +1441,16 @@ class KittenSynthEngineAdapter:
+
+         options = dict(selection.options)
+         try:
++            lexicon_policy = options.get("lexicon_data_policy", "auto")
++            if selection.offline and lexicon_policy == "auto":
++                lexicon_policy = "installed-only"
++            g2p_config = kittensynth.KittenG2PConfig(
++                language=selection.language,
++                lexicons=options.get("lexicons"),
++                g2lex_files=options.get("g2lex_files"),
++                lexicon_data_policy=lexicon_policy,
++                heteronym_policy=options.get("heteronym_policy", "auto"),
++            )
+             voice = kittensynth.KittenVoice.from_pretrained(
+                 selection.target_id,
+                 quality=options.get("quality"),
+@@ -762,6 +1461,7 @@ class KittenSynthEngineAdapter:
+                 providers=options.get("providers"),
+                 provider_options=options.get("provider_options"),
+                 session_options=options.get("session_options"),
++                g2p_config=g2p_config,
+             )
+         except Exception as exc:
+             raise _translate_kitten_error(exc, selection, opening=True) from exc
+diff --git a/voicerender/lexicons.py b/voicerender/lexicons.py
+index c63d597..29e6dec 100644
+--- a/voicerender/lexicons.py
++++ b/voicerender/lexicons.py
+@@ -23,6 +23,9 @@ class LexiconCatalogEntry:
+     display_name: str | None = None
+     phoneme_encoding: str | None = None
+     data_version: str | None = None
++    content_sha256: str | None = None
++    logical_sha256: str | None = None
++    compatibility_reason: str | None = None
+
+     def to_dict(self) -> dict[str, Any]:
+         return {
+@@ -39,4 +42,7 @@ class LexiconCatalogEntry:
+             "display_name": self.display_name,
+             "phoneme_encoding": self.phoneme_encoding,
+             "data_version": self.data_version,
++            "content_sha256": self.content_sha256,
++            "logical_sha256": self.logical_sha256,
++            "compatibility_reason": self.compatibility_reason,
+         }

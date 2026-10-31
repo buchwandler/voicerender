@@ -1,0 +1,15 @@
+ pyproject.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 6ad8a4d..69c8754 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,7 +18,7 @@ dependencies = [
+   "tomlkit>=0.13",
+   "tomli>=2; python_version < '3.11'",
+   "renderplan>=0.2.1,<0.3",
+-  "voicefolio>=0.1.1,<0.2",
++  "voicefolio>=0.1.2,<0.2",
+   "onnxvoice>=0.2.14,<0.3",
+ ]

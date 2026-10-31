@@ -1,0 +1,259 @@
+rows:
+  - sha: facf1522283965a9ae643c9d76d358a8321b2ce4
+    inspected: true
+    inspected_paths:
+      [voicerender/engines/pocketsynth.py, tests/test_pocketsynth_managed.py]
+    observed_behavior: PocketSynth rendered audio is adapted to the shared full-scale PCM policy and clipping metadata is recorded
+    public_impact: public
+    decision: accepted
+    notes: Covered by the PocketSynth PCM safety entry
+  - sha: 5b4f1f2e3c65ebcc617ca8f35624b42540a61bbe
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/models_api.py,
+        voicerender/cli.py,
+        tests/test_model_management_api.py,
+        tests/test_model_management_cli.py,
+      ]
+    observed_behavior: Model artifacts report installed quality state accurately and model metadata is serialized through stable JSON-safe fields
+    public_impact: public
+    decision: accepted
+    notes: Covered by the stable metadata entry
+  - sha: a929bbd8428c30924ec014eae6eceadda3ee0da6
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/jsonutil.py,
+        voicerender/models_api.py,
+        voicerender/voices_api.py,
+        voicerender/engines/registry.py,
+        voicerender/preflight.py,
+      ]
+    observed_behavior: Engine, model, voice, and render metadata use a shared JSON-safe serializer instead of leaking unsupported dataclass values
+    public_impact: public
+    decision: accepted
+    notes: Covered by the stable metadata entry
+  - sha: 58f64e96e492141af1ae00f945ad6fa2d7315dcd
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/soprosynth.py,
+        voicerender/engines/api_probe.py,
+        voicerender/cli.py,
+        tests/test_soprosynth_engine.py,
+      ]
+    observed_behavior: Sopro request contracts are probed and validated explicitly, with legacy-compatible fit handling and actionable measurement diagnostics
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Sopro compatibility entry
+  - sha: a37bba8a8ede3e49941a9aed2a7ace43b1ca8b09
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/kittensynth.py,
+        voicerender/error_diagnostics.py,
+        voicerender/preflight.py,
+      ]
+    observed_behavior: Engine diagnostics bound and redact failure details, including structured Kitten model-download transport context
+    public_impact: public
+    decision: accepted
+    notes: Covered by the diagnostics entry
+  - sha: 3bad4f0a6245ff90034a3eda939e6c1b8fa1a6f5
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/chatterboxsynth.py,
+        tests/test_chatterboxsynth_engine.py,
+      ]
+    observed_behavior: Chatterbox synthesis options omit unset generation overrides so backend defaults remain effective
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Chatterbox management entry
+  - sha: 78759945fd47f5a1970a420472e2f6b00c1a85fa
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/chatterbox_assets.py,
+        voicerender/engines/chatterboxsynth.py,
+        voicerender/models_api.py,
+        voicerender/preflight.py,
+        voicerender/cli.py,
+      ]
+    observed_behavior: Chatterbox exposes canonical target model listing, quality-aware installation, per-quality status, and actionable missing-profile errors
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Chatterbox management entry
+  - sha: 4baf17e7ab9f64d7dfd7e6bbe889de97a703030d
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/renderprofile.py,
+        voicerender/cli.py,
+        docs/renderprofile.md,
+        README.md,
+      ]
+    observed_behavior: Profiles can be reidentified from authored content through a dedicated CLI operation without engine validation
+    public_impact: public
+    decision: accepted
+    notes: Covered by the profile identity entry
+  - sha: 72676e0a95972739f8cad9869aa7b166fe77002b
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/bundle_inspect.py,
+        voicerender/preflight.py,
+        voicerender/cli.py,
+        voicerender/renderprofile.py,
+      ]
+    observed_behavior: Bundle inspection compares authored profiles with immutable variant snapshots and reports structured differences and remediation
+    public_impact: public
+    decision: accepted
+    notes: Covered by the profile identity entry
+  - sha: a561679b1a3082a22c7f0eff937c65522ab57b03
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/kokoro.py,
+        voicerender/cli.py,
+        voicerender/lexicons.py,
+        tests/test_lexicons_cli.py,
+      ]
+    observed_behavior: Kokoro profiles can discover named pronunciation lexicons and pin validated local G2Lex files with deterministic precedence
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Kokoro pronunciation entry
+  - sha: db46ed5760d566a0a1344dc7bc1879d3b6f64f31
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/kittensynth.py,
+        voicerender/lexicons.py,
+        voicerender/cli.py,
+      ]
+    observed_behavior: Kitten profiles support named and local pronunciation sources, pinned G2Lex validation, and pronunciation-stack inspection
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Kitten pronunciation entry
+  - sha: 0eedac5a018a25e0fb7bd244868b46164a0f76d0
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/kittensynth.py,
+        tests/test_kittensynth_pronunciation.py,
+      ]
+    observed_behavior: Kitten forwards available linguistic context without requiring every optional token field
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Kitten pronunciation entry
+  - sha: fd8b266697c70da613ec9b64a86e4656d1bbc33b
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/kittensynth.py,
+        voicerender/preflight.py,
+        voicerender/renderplan_input.py,
+        pyproject.toml,
+      ]
+    observed_behavior: Kitten pronunciation capability contracts and measurement diagnostics require compatible runtime dependencies and preserve source context
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Kitten pronunciation entry
+  - sha: a61d829722b59ae51a0a7c8be54340c94b2a1b49
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/audio_boundaries.py,
+        voicerender/render.py,
+        voicerender/renderplan_render.py,
+        voicerender/engines/kokoro.py,
+      ]
+    observed_behavior: Rendered speech tails are normalized under a versioned policy, timings are clamped safely, and cache metadata records the boundary operation
+    public_impact: public
+    decision: accepted
+    notes: Covered by the audio boundary entry
+  - sha: f9e16602b52bc71da1b5ec735cfcbcd5bcede0f2
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/engines/base.py,
+        voicerender/renderplan_input.py,
+        voicerender/capacity.py,
+        voicerender/engines/kokoro.py,
+      ]
+    observed_behavior: Speech requests support validated say-as spans and Kokoro lowers character interpretation controls through capacity planning and synthesis
+    public_impact: public
+    decision: accepted
+    notes: Covered by the say-as entry
+  - sha: 508918408e9e3611b1ba4f92aac99d9d0df483a8
+    inspected: true
+    inspected_paths:
+      [voicerender/engines/kokoro.py, voicerender/preflight.py, README.md]
+    observed_behavior: Kokoro compatibility checks target the supported runtime contract and preflight diagnostics identify the affected speech item
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Kokoro compatibility entry
+  - sha: 05451ee230e85149052f2f77d4b00ef0b24373bc
+    inspected: true
+    inspected_paths:
+      [voicerender/renderprofile.py, voicerender/cli.py, docs/renderprofile.md]
+    observed_behavior: Manual pause policies support parenthetical boundaries and profile inspection explains normalized speech composition
+    public_impact: public
+    decision: accepted
+    notes: Covered by the pause policy entry
+  - sha: a48ba9be6a4944ecda32046644ecdf1aed359989
+    inspected: true
+    inspected_paths: [pyproject.toml]
+    observed_behavior: Package metadata advances the development version toward the v0.2.8 release line
+    public_impact: internal
+    decision: internal
+    notes: Version metadata is not public release-note prose
+  - sha: f41ea26af53202824169b9b377515b5830d5cf38
+    inspected: true
+    inspected_paths:
+      [voicerender/engines/kittensynth.py, tests/test_renderplan_render.py]
+    observed_behavior: Kitten omits optional request inputs when no linguistic controls are present, preserving compatibility with older prepared voices
+    public_impact: public
+    decision: accepted
+    notes: Covered by the Kitten pronunciation entry
+  - sha: e1011f03ed221393aa5697a73214674a2701d072
+    inspected: true
+    inspected_paths: [voicerender/jsonutil.py, voicerender/models_api.py]
+    observed_behavior: JSON path values use portable POSIX serialization for model metadata and nested diagnostic values
+    public_impact: public
+    decision: accepted
+    notes: Covered by the stable metadata entry
+  - sha: 01e1ff8ce42f723b46628520706e1bd549214531
+    inspected: true
+    inspected_paths:
+      [
+        voicerender/cli.py,
+        voicerender/preflight.py,
+        voicerender/renderprofile.py,
+        tests/test_kokoro_reference.py,
+      ]
+    observed_behavior: Regression coverage and CLI formatting fixes stabilize the profile, preflight, and Kokoro paths without adding user-facing capability
+    public_impact: internal
+    decision: internal
+    notes: Test and formatting maintenance
+  - sha: fecfbffbbfc2d365b13a67abbfc378aa40d4a9b8
+    inspected: true
+    inspected_paths: [.github/workflows/tests.yml]
+    observed_behavior: CI workflow configuration is adjusted for the test matrix
+    public_impact: internal
+    decision: internal
+    notes: CI maintenance
+  - sha: a47820e550aa6f14bb36e6ab9cd21d44efdb0517
+    inspected: true
+    inspected_paths: [.github/workflows/tests.yml]
+    observed_behavior: CI workflow configuration receives a follow-up matrix adjustment
+    public_impact: internal
+    decision: internal
+    notes: CI maintenance
+  - sha: 1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+    inspected: true
+    inspected_paths: [tests/test_soprosynth_engine.py]
+    observed_behavior: Regression expectation is aligned with the producer-provided Sopro maximum measurement
+    public_impact: internal
+    decision: internal
+    notes: Test-only maintenance

@@ -1,0 +1,1609 @@
+ README.md                        |  22 ++++++-
+ docs/renderprofile.md            |  28 +++++++--
+ pyproject.toml                   |   1 +
+ tests/test_audio_boundaries.py   | 107 ++++++++++++++++++++++++++++++++
+ tests/test_cli.py                |  42 +++++++++++++
+ tests/test_document_contract.py  |  10 +++
+ tests/test_engine_options.py     |   5 ++
+ tests/test_kokoro_reference.py   |  36 +++++++++++
+ tests/test_profile_roles_cli.py  | 117 +++++++++++++++++++++++++++++++++--
+ tests/test_render_book.py        |  46 ++++++++------
+ tests/test_renderer.py           |  77 ++++++++++++++++++++++-
+ tests/test_renderplan_render.py  | 129 ++++++++++++++++++++++++++++++++++++++-
+ voicerender/audio_boundaries.py  |  87 ++++++++++++++++++++++++++
+ voicerender/cli.py               | 102 ++++++++++++++++++++++++++++---
+ voicerender/engines/kokoro.py    |  23 +++++--
+ voicerender/render.py            |  81 ++++++++++++++++++++++--
+ voicerender/renderplan_render.py | 107 +++++++++++++++++++++++++++++---
+ 17 files changed, 958 insertions(+), 62 deletions(-)
+
+diff --git a/README.md b/README.md
+index ab5c636..95be665 100644
+--- a/README.md
++++ b/README.md
+@@ -187,7 +187,7 @@ RenderProfile is the complete cast for one render variant. Each logical role is
+ ```bash
+ voicerender profile create \
+   --role narrator --engine kokoro --target v1.0 --voice af_heart \
+-  --language en-US --offline -o printer-cast.renderprofile.toml
++  --language en-US --offline --short-sentence phrase -o printer-cast.renderprofile.toml
+ voicerender profile bind printer-cast.renderprofile.toml host \
+   --engine kitten --target mini-0.8 --voice Jasper \
+   --language en-US --offline --in-place
+@@ -198,7 +198,11 @@ voicerender profile show printer-cast.renderprofile.toml
+ voicerender profile validate printer-cast.renderprofile.toml
+ ```
+
+-The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
++The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes normalized speech artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
++
++### Speech artifacts and pause policy
++
++VoiceRender applies engine-neutral, trailing-only silence normalization before it writes a speech WAV or caches it. Leading samples are preserved and all-silent audio remains unchanged. This keeps the speech artifact tight; it does not insert the profile's policy pauses. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for downstream composition after normalized speech. With `mode = "none"`, no policy pause is inserted. `profile show` reports the mode, manual durations, and this composition boundary. Boundary policy is included in artifact identity, so output produced under a missing or different policy is treated as stale rather than silently reused; re-render with `--force` or reset with `--reset-stale`.
+
+ ## ONNX Runtime provider policy
+
+@@ -265,6 +269,18 @@ Preflight validates local content pins and managed catalog metadata, and measure
+
+ Inspect Kokoro's accepted settings and their structured field descriptions with `voicerender engines options kokoro --json`. Existing string shorthand remains supported: `short_sentence` accepts `off`, `wrap`, `phrase`, or `randomized-phrase`; `voice_level` accepts `off` or `calibrated`. The structured forms expose the PyKokoro controls without adding VoiceRender-side audio processing:
+
++For profile creation and binding, `--short-sentence {off,wrap,phrase,randomized-phrase}` is a convenience for setting the Kokoro `short_sentence` option. It is opt-in: omitting it leaves PyKokoro's short-sentence behavior unset, while `--short-sentence off` records an explicit disable. The flag is available on both `profile create` and `profile bind`; do not combine it with `--option short_sentence=...`. Use the generic option for structured settings:
++
++```bash
++voicerender profile create \
++  --engine kokoro --target v1.0 --voice af_heart --language en-US \
++  --short-sentence phrase -o kokoro.renderprofile.toml
++
++voicerender profile bind kokoro.renderprofile.toml narrator \
++  --engine kokoro --target v1.0 --voice af_heart --language en-US \
++  --short-sentence off --in-place
++```
++
+ ```bash
+ voicerender profile create \
+   --engine kokoro --target v1.0 --voice af_heart --language en-US \
+@@ -546,7 +562,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
+ - **No implicit model downloads:** install SDKs and assets through each engine's supported process.
+ - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
+ - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
+-- **No audio post-processing:** VoiceRender writes speech WAV artifacts and a shared manifest only.
++- **Speech artifact boundaries:** VoiceRender trims trailing silence before caching and writing each speech WAV; leading samples and all-silent input are preserved, and profile pauses remain a separate composition policy.
+ - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
+
+ ## Tests
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 98221fa..522caba 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -34,7 +34,7 @@ inside a generated RenderPlan variant remains `renderprofile.toml`.
+ A profile has a canonical `profile_id`; RenderPlans carry that identity and copy
+ the resolved role bindings needed to execute without reopening the profile.
+
+-### Linguistic token requirements
++## Linguistic token requirements
+
+ `requirements.token_fields` lists source fields that must be available on every projected token; it is not a list of every token field a renderer can consume. An adapter may support linguistic tokens while treating all such context as optional. Kitten consumes available linguistic token metadata opportunistically. Missing optional fields fall back to Kitten/Kitteng2p's normal pronunciation path; POS, tag, lemma, and morphology are not hard Kitten RenderProfile requirements.
+ Refreshing engine metadata writes a proposal rather than overwriting user policy:
+@@ -83,7 +83,7 @@ voicerender profile show printer-cast.renderprofile.toml --json
+ voicerender profile role list printer-cast.renderprofile.toml --json
+ ```
+
+-`profile create` makes the initial/default role. `profile bind` adds or replaces a binding and supports voice, Voicefolio, reference WAV, prepared voice, voice-source, speaker, and engine-option selectors. The human view shows each role's engine, target, language, and actual voice/speaker/source identity without dumping renderer metadata.
++`profile create` makes the initial/default role. `profile bind` adds or replaces a binding and supports voice, Voicefolio, reference WAV, prepared voice, voice-source, speaker, and engine-option selectors. The human view shows each role's engine, target, language, and actual voice/speaker/source identity without dumping renderer metadata. For Kokoro roles, `profile show` also distinguishes short-sentence processing that is off implicitly, off explicitly, or enabled with a mode and phoneme threshold.
+
+ Use VoiceRender's public role helpers when building or editing profiles programmatically:
+
+@@ -144,6 +144,14 @@ voicerender profile bind printer-cast.renderprofile.toml guest \
+
+ Kitten remains on its historical eSpeak-only path when no lexicon sources are configured. Request-local IPA spans, local files, named sources, contextual heteronym rules, and eSpeak fallback are reported in effective precedence by `profile show`/`inspect` and preflight. Local source identity uses content and logical SHA-256 values rather than filesystem paths; the ordered named asset IDs, versions, and digests are also part of the synthesis identity. Moving an unchanged local file does not change that source identity, while changing its content does. Offline profiles require their selected named lexicons to be installed.
+
++## Speech artifact boundaries and pause policy
++
++VoiceRender applies engine-neutral, trailing-only silence normalization before persisting synthesized speech WAVs or cache entries. Leading samples are preserved, and an all-silent waveform remains unchanged. This produces speech-tight artifacts; normalization does not trim leading samples and does not insert profile pauses.
++
++`PausePolicy(mode = "manual")` records clause, sentence, and paragraph durations for downstream composition after speech-tail normalization. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports the mode and manual durations, then states that policy pauses are composed after normalized speech or not inserted.
++
++The boundary policy is part of cache and render identity. Existing output with a missing or different policy is stale and is not silently reused; RenderPlan rendering reports `output.stale_audio_policy` unless the caller re-renders with `--force` or resets it with `--reset-stale`.
++
+ ## UtterPlan bundle projection
+
+ [UtterPlan](https://pypi.org/project/utterplan/) can project saved book chapter plans into one RenderPlan variant per RenderProfile. It does not call VoiceRender or preflight during projection. The collection index `renderplan-set.toml` and invocation report `render-report.toml` are UtterPlan-owned workspace metadata, not RenderPlan artifacts.
+@@ -263,7 +271,19 @@ Profile create, bind, inspect, and validate read VoiceFolio catalog metadata but
+
+ ## Kokoro quality and voice-level options
+
+-`voicerender engines options kokoro --json` lists the adapter's accepted options and structured fields. The compatible shorthand forms remain `short_sentence = "off" | "wrap" | "phrase" | "randomized-phrase"` and `voice_level = "off" | "calibrated"`. These options may also be provided as tables:
++`voicerender engines options kokoro --json` lists the adapter's accepted options and structured fields. The compatible shorthand forms remain `short_sentence = "off" | "wrap" | "phrase" | "randomized-phrase"` and `voice_level = "off" | "calibrated"`. `profile create` and `profile bind` additionally accept `--short-sentence {off,wrap,phrase,randomized-phrase}` as a convenience for the `short_sentence` engine option; do not combine the flag with `--option short_sentence=...`. These options may also be provided as tables:
++
++For example, the shorthand flag can opt in during profile creation or explicitly disable the feature while rebinding:
++
++```bash
++voicerender profile create \
++  --engine kokoro --target v1.0 --voice af_heart --language en-US \
++  --short-sentence randomized-phrase -o kokoro.renderprofile.toml
++
++voicerender profile bind kokoro.renderprofile.toml narrator \
++  --engine kokoro --target v1.0 --voice af_heart --language en-US \
++  --short-sentence off --in-place
++```
+
+ ```toml
+ [roles.narrator.binding.options.short_sentence]
+@@ -279,7 +299,7 @@ mode = "calibrated"
+ # gain_db = -1.5
+ ```
+
+-`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; the defaults are shown above. An omitted setting leaves PyKokoro's short-sentence fix unset, while the `off` shorthand disables it. `voice_level` accepts `mode = "off" | "calibrated"` and optional finite numeric `gain_db`. Calibrated mode uses PyKokoro's static per-model/quality/voice catalog; it is not runtime loudness normalization. Automatically matched catalog calibration is not available for custom enrolled voices, though explicit gain is supported. VoiceRender does not add loudness DSP; its separate PCM boundary adapter clamps finite full-scale overshoots and records diagnostics.
++`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; the defaults are shown above. It is opt-in: omitting the setting leaves PyKokoro's short-sentence fix unset, while the `off` shorthand or `--short-sentence off` explicitly disables it. `profile show` reports the configured state; PyKokoro's resolved runtime `short_sentence_mode` is preserved in render diagnostics and execution fingerprints. `voice_level` accepts `mode = "off" | "calibrated"` and optional finite numeric `gain_db`. Calibrated mode uses PyKokoro's static per-model/quality/voice catalog; it is not runtime loudness normalization. Automatically matched catalog calibration is not available for custom enrolled voices, though explicit gain is supported. VoiceRender does not add loudness DSP; its separate PCM boundary adapter clamps finite full-scale overshoots and records diagnostics.
+
+ Kokoro enrollment modes have different semantics. **Inno** uses reference audio to tune a voice, requires no transcript, and may accept `fmax`. **AkinVox** performs transcript-conditioned cloning: it requires the exact non-empty reference transcript, currently supports English only, and requires synthesis speed `1.0`. The generic `voicerender voice clone --engine kokoro ... --transcript ...` path binds that transcript into AkinVox's enrollment options. Conflicting transcript sources are rejected, and Inno does not accept a transcript. Reference resolution and enrollment remain lazy until rendering; preflight only checks pins/metadata and measures the text request.
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 7e967e5..5718f6e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -13,6 +13,7 @@ authors = [{name = "buchwandler"}]
+ keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
+ dependencies = [
+   "numpy>=1.23",
++  "audiosig>=0.1.8,<0.2",
+   "soundfile>=0.12",
+   "tomlkit>=0.13",
+   "tomli>=2; python_version < '3.11'",
+diff --git a/tests/test_audio_boundaries.py b/tests/test_audio_boundaries.py
+new file mode 100644
+index 0000000..f25f895
+--- /dev/null
++++ b/tests/test_audio_boundaries.py
+@@ -0,0 +1,107 @@
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from voicerender.audio_boundaries import (
++    BOUNDARY_POLICY_ID,
++    BoundaryNormalization,
++    clamp_word_timings_to_audio,
++    trim_renderer_trailing_silence,
++)
++from voicerender.engines.base import SpeechWordTiming
++
++_SAMPLE_RATE = 1000
++
++
++def _speech(frames: int) -> np.ndarray:
++    samples = np.arange(frames, dtype=np.float32)
++    return (0.2 * np.sin(2.0 * np.pi * 120.0 * samples / _SAMPLE_RATE)).astype(
++        np.float32
++    )
++
++
++def test_trailing_zeros_are_removed_with_policy_statistics() -> None:
++    active = _speech(1000)
++    source = np.concatenate((active, np.zeros(500, dtype=np.float32)))
++
++    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
++
++    assert np.array_equal(normalized, active)
++    assert stats == BoundaryNormalization(
++        policy=BOUNDARY_POLICY_ID,
++        input_frames=1500,
++        output_frames=1000,
++        removed_frames=500,
++        removed_seconds=0.5,
++    )
++
++
++def test_audio_without_trailing_silence_is_unchanged() -> None:
++    source = _speech(1000)
++
++    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
++
++    assert np.array_equal(normalized, source)
++    assert stats.removed_frames == 0
++    assert stats.output_frames == source.size
++
++
++def test_leading_silence_is_preserved_while_tail_is_removed() -> None:
++    leading = np.zeros(200, dtype=np.float32)
++    active = _speech(1000)
++    source = np.concatenate((leading, active, np.zeros(500, dtype=np.float32)))
++
++    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
++
++    assert normalized.size == leading.size + active.size
++    assert np.array_equal(normalized[: leading.size], leading)
++    assert np.array_equal(normalized[leading.size :], active)
++    assert stats.removed_frames == 500
++
++
++def test_all_silent_input_is_preserved_without_fabricating_audio() -> None:
++    source = np.zeros(400, dtype=np.float32)
++
++    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
++
++    assert normalized.size == source.size
++    assert np.array_equal(normalized, source)
++    assert stats.removed_frames == 0
++
++
++def test_result_is_mono_float32_and_repeated_calls_are_deterministic() -> None:
++    source = np.concatenate((_speech(1000), np.zeros(500, dtype=np.float64)))
++
++    first, first_stats = trim_renderer_trailing_silence(
++        source, sample_rate=_SAMPLE_RATE
++    )
++    second, second_stats = trim_renderer_trailing_silence(
++        source, sample_rate=_SAMPLE_RATE
++    )
++
++    assert first.dtype == np.float32
++    assert first.ndim == 1
++    assert np.array_equal(first, second)
++    assert first_stats == second_stats
++
++
++def test_clamp_word_timing_ends_without_shifting_starts_and_rejects_invalid_start() -> (
++    None
++):
++    timing = SpeechWordTiming(
++        text="word",
++        char_start=0,
++        char_end=4,
++        start_sample=80,
++        end_sample=110,
++    )
++
++    clamped = clamp_word_timings_to_audio((timing,), frame_count=100)
++
++    assert clamped[0].start_sample == 80
++    assert clamped[0].end_sample == 100
++    with pytest.raises(ValueError, match="starts beyond"):
++        clamp_word_timings_to_audio(
++            (SpeechWordTiming("word", 0, 4, 100, 110),), frame_count=100
++        )
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 291e87a..9600b83 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -275,6 +275,48 @@ def test_cli_profile_create_reference_wav_persists_computed_pin(
+     assert captured["transcript"] == "Exact reference words."
+
+
++@pytest.mark.parametrize("mode", ("off", "wrap", "phrase", "randomized-phrase"))
++def test_cli_profile_create_short_sentence_flag_sets_engine_option(
++    monkeypatch, tmp_path: Path, mode: str
++) -> None:
++    from types import SimpleNamespace
++
++    from voicerender import cli
++
++    captured = {}
++    monkeypatch.setattr(
++        cli,
++        "create_render_profile",
++        lambda **kwargs: (
++            captured.update(kwargs) or SimpleNamespace(profile_id="profile-1")
++        ),
++    )
++    monkeypatch.setattr(cli, "save_render_profile", lambda profile, path: path)
++
++    result = cli.main(
++        [
++            "profile",
++            "create",
++            "--engine",
++            "kokoro",
++            "--target",
++            "kokoro-0.8",
++            "--language",
++            "en-US",
++            "--voice",
++            "af_heart",
++            "--short-sentence",
++            mode,
++            "--output",
++            str(tmp_path / "profile.renderprofile.toml"),
++            "--json",
++        ]
++    )
++
++    assert result == 0
++    assert captured["options"]["short_sentence"] == mode
++
++
+ def test_cli_profile_create_voicefolio_ref_uses_full_pinned_source(
+     monkeypatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index 2fed15c..a69c2d0 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -193,6 +193,7 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
+     from renderplan import Producer, RenderManifest, SpeechArtifact, save_manifest
+
+     import voicerender.document as document_module
++    from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+     from voicerender.storage import atomic_wav
+
+     root = _workspace(tmp_path / "story.ssmd-bundle")
+@@ -230,6 +231,15 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
+     ).with_identity()
+     manifest_path = request.output_dir / "render-manifest.toml"
+     save_manifest(manifest, manifest_path)
++    (request.output_dir / "render-diagnostics.json").write_text(
++        json.dumps(
++            {
++                "schema": "voicerender.render-diagnostics.v1",
++                "audio_boundary_policy": BOUNDARY_POLICY_ID,
++            }
++        ),
++        encoding="utf-8",
++    )
+
+     monkeypatch.setattr(
+         document_module,
+diff --git a/tests/test_engine_options.py b/tests/test_engine_options.py
+index 2a33224..46a356f 100644
+--- a/tests/test_engine_options.py
++++ b/tests/test_engine_options.py
+@@ -44,6 +44,11 @@ def test_engine_options_lists_all_accepted_names_and_optional_metadata(
+ def test_kokoro_options_expose_shorthand_and_structured_capabilities() -> None:
+     options = {option.name: option for option in engine_options("kokoro")}
+
++    assert "opt-in" in options["short_sentence"].description.lower()
++    assert (
++        "conditional default" in options["short_sentence.enabled"].description.lower()
++    )
++    assert "table is present" in options["short_sentence.enabled"].description.lower()
+     assert options["short_sentence"].value_type == "string|table"
+     assert "randomized-phrase" in options["short_sentence"].choices
+     assert options["short_sentence.resolve_mode"].default == "randomized-phrase"
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index d6fe3a8..6727cee 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -113,6 +113,7 @@ def _install(
+         "config": None,
+         "audio": np.ones(24, dtype=np.float32),
+         "diagnostics": (),
++        "short_sentence_mode": None,
+         "measurements": [],
+         "enrollments": [],
+         "syntheses": [],
+@@ -184,6 +185,7 @@ def _install(
+                 phonemes="t e s t",
+                 token_ids=(1, 2),
+                 trace=None,
++                short_sentence_mode=state["short_sentence_mode"],
+                 voice_level_applications=(),
+             )
+
+@@ -722,6 +724,40 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
+     assert rendered.metadata["voice_level"]["mode"] == "off"
+
+
++def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, state = _install(monkeypatch, _model())
++    selection = EngineSelection(
++        engine="kokoro",
++        target_id="kokoro-test",
++        language="en-US",
++        options={},
++    )
++    request = SpeechRequest(id="short-mode", text="A short line.", language="en-US")
++
++    with adapter.open(selection) as session:
++        omitted_config = state["config"]
++        off_rendered = session.synthesize(request)
++    assert omitted_config.short_sentence_config is None
++    assert getattr(omitted_config.generation, "enable_short_sentence", None) is None
++    assert off_rendered.metadata["short_sentence_mode"] == "off"
++
++    state["short_sentence_mode"] = "wrap"
++    with adapter.open(selection) as session:
++        wrap_rendered = session.synthesize(request)
++    assert wrap_rendered.metadata["short_sentence_mode"] == "wrap"
++
++    explicit_off = EngineSelection(
++        engine="kokoro",
++        target_id="kokoro-test",
++        language="en-US",
++        options={"short_sentence": "off"},
++    )
++    with adapter.open(explicit_off):
++        assert state["config"].short_sentence_config.enabled is False
++
++
+ def test_kokoro_forwards_persisted_g2lex_tables_as_public_file_refs(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 6505020..1b642fa 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -6,7 +6,7 @@ from dataclasses import replace
+ from pathlib import Path
+
+ import pytest
+-from renderplan import RenderProfile, RoleProfile
++from renderplan import PausePolicy, RenderProfile, RoleProfile
+
+ from voicerender import cli
+ from voicerender.renderprofile import load_render_profile, save_render_profile
+@@ -290,13 +290,34 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+         roles["narrator"],
+         binding={
+             **roles["narrator"].binding,
++            "renderer": "kokoro",
++            "options": {},
+             "voice": "af_heart",
+             "renderer_metadata": {"private_detail": "not shown"},
+         },
+     )
+     roles["guest"] = replace(
+         roles["guest"],
+-        binding={**roles["guest"].binding, "speaker": "Jasper"},
++        binding={
++            **roles["guest"].binding,
++            "renderer": "kokoro",
++            "speaker": "Jasper",
++            "options": {
++                "short_sentence": {
++                    "enabled": True,
++                    "resolve_mode": "wrap",
++                    "min_phoneme_length": 24,
++                }
++            },
++        },
++    )
++    roles["explicit-off"] = RoleProfile(
++        language="en-US",
++        binding={
++            "renderer": "kokoro",
++            "target_id": "kokoro-test",
++            "options": {"short_sentence": "off"},
++        },
+     )
+     roles["source"] = RoleProfile(
+         language="en-US",
+@@ -319,7 +340,13 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+         },
+     )
+     save_render_profile(
+-        replace(profile, roles=roles, profile_id=None).with_identity(), source
++        replace(
++            profile,
++            roles=roles,
++            pauses=PausePolicy(mode="none"),
++            profile_id=None,
++        ).with_identity(),
++        source,
+     )
+
+     exit_code = cli.main(["profile", "role", "list", str(source)])
+@@ -340,7 +367,14 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+     assert exit_code == 0
+     assert "RenderProfile " in show_output
+     assert "Planning:" in show_output
+-    assert "Pauses:" in show_output
++    assert "Pauses\n  mode: none" in show_output
++    assert "speech artifact tails: trimmed" in show_output
++    assert "no policy pause is inserted" in show_output
++    assert "short sentence: off (implicit)" in show_output
++    assert "short sentence: off (explicit)" in show_output
++    assert "short sentence: wrap" in show_output
++    assert "threshold: <24 phonemes" in show_output
++    assert "enabled: yes" in show_output
+     assert "af_heart" in show_output
+     assert "speaker:Jasper" in show_output
+     assert "source:managed_reference" in show_output
+@@ -371,3 +405,78 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+         item for item in show_payload["roles"] if item["role"] == "narrator"
+     )
+     assert "private_detail" in narrator_role["binding"]["renderer_metadata"]
++
++
++@pytest.mark.parametrize("mode", ("off", "wrap", "phrase", "randomized-phrase"))
++def test_profile_bind_short_sentence_flag_persists_engine_option(
++    tmp_path: Path, monkeypatch, mode: str
++) -> None:
++    source = tmp_path / "source.renderprofile.toml"
++    output = tmp_path / "bound.renderprofile.toml"
++    _write_profile(source)
++    captured: dict[str, object] = {}
++
++    def fake_set_profile_role(profile_path, role, **kwargs):
++        captured.update(kwargs)
++        loaded = load_render_profile(profile_path)
++        roles = dict(loaded.roles)
++        current = roles[role]
++        binding = {
++            **current.binding,
++            "renderer": kwargs["engine"],
++            "target_id": kwargs["target_id"],
++            "options": dict(kwargs["options"] or {}),
++        }
++        roles[role] = replace(current, binding=binding)
++        return replace(loaded, roles=roles, profile_id=None).with_identity()
++
++    monkeypatch.setattr(cli, "set_profile_role", fake_set_profile_role)
++    result = cli.main(
++        [
++            "profile",
++            "bind",
++            str(source),
++            "narrator",
++            "--engine",
++            "kokoro",
++            "--target",
++            "kokoro-0.8",
++            "--language",
++            "en-US",
++            "--short-sentence",
++            mode,
++            "--output",
++            str(output),
++            "--json",
++        ]
++    )
++
++    assert result == 0
++    assert captured["options"]["short_sentence"] == mode
++    bound = load_render_profile(output)
++    assert bound.roles["narrator"].binding["options"]["short_sentence"] == mode
++
++
++def test_profile_show_explains_manual_pauses_follow_normalized_speech(
++    tmp_path: Path, capsys
++) -> None:
++    source = tmp_path / "manual.renderprofile.toml"
++    profile = _write_profile(source)
++    profile = replace(
++        profile,
++        pauses=PausePolicy(
++            mode="manual",
++            durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
++        ),
++        profile_id=None,
++    ).with_identity()
++    save_render_profile(profile, source)
++
++    assert cli.main(["profile", "show", str(source)]) == 0
++    output = capsys.readouterr().out
++    assert "Pauses\n  mode: manual" in output
++    assert "  clause: 180" in output
++    assert "  sentence: 500" in output
++    assert "  paragraph: 800" in output
++    assert "speech artifact tails: trimmed" in output
++    assert "configured pause is inserted after normalized speech" in output
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index 465c335..92c05b5 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -42,6 +42,7 @@ from voicerender import (
+     BookRenderResult,
+     ChapterRenderOutcome,
+ )
++from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+ from voicerender.book import render_book
+ from voicerender.book_contract import load_renderplan_set
+ from voicerender.errors import ArtifactError
+@@ -383,28 +384,33 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+                 for control in item.controls
+             )
+         )
++        diagnostics = {
++            "schema": "voicerender.render-diagnostics.v1",
++            "render_plan_id": plan.plan_id or plan.computed_id(),
++            "audio_boundary_policy": BOUNDARY_POLICY_ID,
++        }
+         if pending_composition:
+-            diagnostics = {
+-                "schema": "voicerender.render-diagnostics.v1",
+-                "render_plan_id": plan.plan_id or plan.computed_id(),
+-                "emphasis_policy": emphasis_policy.value,
+-                "pending_composition": True,
+-                "deferred_controls": [
+-                    {
+-                        "capability": book_module.EMPHASIS_COMPOSITION_CAPABILITY,
+-                        "segment_number": item.number,
+-                        "segment_id": item.segment_id or item.computed_id(),
+-                        "count": sum(
+-                            control.name == "emphasis" for control in item.controls
+-                        ),
+-                    }
+-                    for item in plan.speech
+-                    if any(control.name == "emphasis" for control in item.controls)
+-                ],
+-            }
+-            (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
+-                json.dumps(diagnostics), encoding="utf-8"
++            diagnostics.update(
++                {
++                    "emphasis_policy": emphasis_policy.value,
++                    "pending_composition": True,
++                    "deferred_controls": [
++                        {
++                            "capability": book_module.EMPHASIS_COMPOSITION_CAPABILITY,
++                            "segment_number": item.number,
++                            "segment_id": item.segment_id or item.computed_id(),
++                            "count": sum(
++                                control.name == "emphasis" for control in item.controls
++                            ),
++                        }
++                        for item in plan.speech
++                        if any(control.name == "emphasis" for control in item.controls)
++                    ],
++                }
+             )
++        (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
++            json.dumps(diagnostics), encoding="utf-8"
++        )
+         selected_keys = {
+             (item.number, item.segment_id or item.computed_id()) for item in selected
+         }
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+index fdf9c74..c6e51f6 100644
+--- a/tests/test_renderer.py
++++ b/tests/test_renderer.py
+@@ -34,6 +34,9 @@ class FakeEngine:
+         self.calls = []
+         self.fail_once_for = None
+
++        self.audio = np.full(160, 0.1, dtype=np.float32)
++        self.word_timings = ()
++
+     def version(self):
+         return "1.0"
+
+@@ -52,7 +55,9 @@ class FakeEngine:
+                     owner.fail_once_for = None
+                     raise RuntimeError("injected interruption")
+                 return SynthesisOutput(
+-                    audio=np.full(160, 0.1, dtype=np.float32), sample_rate=16000
++                    audio=owner.audio,
++                    sample_rate=16000,
++                    word_timings=owner.word_timings,
+                 )
+
+         yield Session()
+@@ -154,6 +159,76 @@ def test_corrupt_cache_is_not_reused(tmp_path, mock_engine):
+     assert second.rendered_count == 1 and second.reused_count == 0
+
+
++def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
++    tmp_path, mock_engine
++):
++    from voicerender.render import _identity
++
++    mock_engine.audio = np.concatenate(
++        (np.full(16_000, 0.1, dtype=np.float32), np.zeros(6_400, dtype=np.float32))
++    )
++    mock_engine.word_timings = (
++        {
++            "text": "First.",
++            "char_start": 0,
++            "char_end": 6,
++            "start_sample": 100,
++            "end_sample": 17_000,
++        },
++    )
++    cache = tmp_path / "legacy-cache"
++    output = tmp_path / "legacy-boundary"
++    speech = segments()[:1]
++    legacy_profile = profile()
++
++    result = render(
++        speech,
++        profile=legacy_profile,
++        output_dir=output,
++        cache_dir=cache,
++    )
++    assert result.rendered_count == 1
++    entry = read_manifest(output)["segments"][0]
++    assert entry["wav"]["frames"] == 16_000
++    assert entry["audio_boundary"]["removed_frames"] == 6_400
++    assert entry["timings"][0]["start_sample"] == 100
++    assert entry["timings"][0]["end_sample"] == 16_000
++
++    identity = _identity(legacy_profile.roles["narrator"], engine_version="1.0")
++    assert identity["algorithm"] == "voicerender.batch.v2"
++    assert identity["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    cache_meta = next(cache.glob("*.json"))
++    cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
++    assert cache_data["schema"] == "voicerender.batch-cache.v2"
++    assert cache_data["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++
++    reused = render(
++        speech,
++        profile=legacy_profile,
++        output_dir=tmp_path / "legacy-cache-reuse",
++        cache_dir=cache,
++    )
++    assert reused.reused_count == 1
++    assert (
++        read_manifest(tmp_path / "legacy-cache-reuse")["segments"][0]["audio_boundary"][
++            "output_frames"
++        ]
++        == 16_000
++    )
++    assert len(mock_engine.calls) == 1
++
++    cache_data["schema"] = "voicerender.batch-cache.v1"
++    cache_meta.write_text(json.dumps(cache_data), encoding="utf-8")
++    regenerated = render(
++        speech,
++        profile=legacy_profile,
++        output_dir=tmp_path / "legacy-old-cache",
++        cache_dir=cache,
++    )
++    assert regenerated.rendered_count == 1
++    assert len(mock_engine.calls) == 2
++
++
+ def test_force_disables_cache(tmp_path, mock_engine):
+     out = tmp_path / "o"
+     render(segments(), profile=profile(), output_dir=out, take=1)
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index f9afd6d..8bab5d3 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -99,8 +99,9 @@ class _Session:
+             raise self.adapter.synthesis_error
+         return RenderedSpeech(
+             id=request.id,
+-            audio=[0.0, 0.2, -0.2, 0.1],
++            audio=self.adapter.audio,
+             sample_rate=24000,
++            metadata=self.adapter.metadata,
+         )
+
+
+@@ -118,6 +119,8 @@ class _Adapter:
+         self.measurements: dict[str, RequestMeasure | Exception] = {}
+         self.open_error: Exception | None = None
+         self.synthesis_error: Exception | None = None
++        self.metadata: dict[str, Any] = {}
++        self.audio: Any = [0.0, 0.2, -0.2, 0.1]
+         self.session = _Session(self)
+
+     def probe_api(self) -> EngineApiProbe:
+@@ -534,6 +537,130 @@ def test_verified_cache_reuse_materializes_numbered_wav_and_corruption_regenerat
+     assert wav_info(tmp_path / "third" / "000001.wav")["frames"] > 0
+
+
++def test_renderplan_normalizes_audio_before_cache_and_output_and_rejects_old_cache(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    adapter.metadata = {"short_sentence_mode": "wrap"}
++    adapter.audio = [0.2] * 24_000 + [0.0] * 9_600
++    plan = _plan("speech with renderer tail")
++    report = _report(adapter, plan, tmp_path)
++    cache = tmp_path / "boundary-cache"
++
++    first = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "boundary-first",
++        cache_dir=cache,
++    )
++    assert not first.failed
++    assert first.rendered_count == 1
++    assert first.manifest.speech[0].frames == 24_000
++    assert wav_info(tmp_path / "boundary-first" / "000001.wav")["frames"] == 24_000
++    assert wav_info(next(cache.glob("*.wav")))["frames"] == 24_000
++    fingerprint = first.execution_fingerprint[0]
++    assert fingerprint["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    assert fingerprint["audio_boundary"]["input_frames"] == 33_600
++    assert fingerprint["audio_boundary"]["removed_frames"] == 9_600
++    assert fingerprint["render_result"] == {"short_sentence_mode": "wrap"}
++    diagnostics = json.loads(
++        (tmp_path / "boundary-first" / RENDER_DIAGNOSTICS_FILENAME).read_text(
++            encoding="utf-8"
++        )
++    )
++    assert diagnostics["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    assert (
++        diagnostics["audio_boundary"][first.manifest.speech[0].segment_id][
++            "output_frames"
++        ]
++        == 24_000
++    )
++    assert diagnostics["render_results"][first.manifest.speech[0].segment_id] == {
++        "short_sentence_mode": "wrap"
++    }
++
++    cache_sidecar = next(cache.glob("*.json"))
++    cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
++    assert cache_data["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    assert cache_data["render_result"] == {"short_sentence_mode": "wrap"}
++    assert cache_data["audio_boundary"]["output_frames"] == 24_000
++    reused = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "boundary-reused",
++        cache_dir=cache,
++    )
++    assert reused.reused_count == 1
++    assert reused.execution_fingerprint[0]["audio_boundary"]["removed_frames"] == 9_600
++    assert reused.execution_fingerprint[0]["render_result"] == {
++        "short_sentence_mode": "wrap"
++    }
++    assert wav_info(tmp_path / "boundary-reused" / "000001.wav")["frames"] == 24_000
++
++    cache_data["schema"] = "voicerender.renderplan-cache.v1"
++    cache_sidecar.write_text(json.dumps(cache_data), encoding="utf-8")
++    old_cache = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=tmp_path / "boundary-old-cache",
++        cache_dir=cache,
++    )
++    assert old_cache.rendered_count == 1
++    assert adapter.synthesized_texts == [
++        "speech with renderer tail",
++        "speech with renderer tail",
++    ]
++
++
++@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v0"])
++@pytest.mark.parametrize("use_reset", [False, True])
++def test_stale_audio_boundary_policy_requires_explicit_reset(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++    old_policy: str | None,
++    use_reset: bool,
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("stale boundary output")
++    report = _report(adapter, plan, tmp_path)
++    output = tmp_path / "stale-boundary-output"
++    cache = tmp_path / "stale-boundary-cache"
++    first = render_renderplan(
++        plan, preflight=report, output_dir=output, cache_dir=cache
++    )
++    assert not first.failed
++
++    diagnostics_path = output / RENDER_DIAGNOSTICS_FILENAME
++    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
++    if old_policy is None:
++        diagnostics.pop("audio_boundary_policy")
++    else:
++        diagnostics["audio_boundary_policy"] = old_policy
++    diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
++
++    if not use_reset:
++        with pytest.raises(ArtifactError) as stale:
++            render_renderplan(
++                plan, preflight=report, output_dir=output, cache_dir=cache
++            )
++        assert stale.value.code == "output.stale_audio_policy"
++        assert "--force" in str(stale.value)
++
++    kwargs = {"reset_stale_output": True} if use_reset else {"force": True}
++    refreshed = render_renderplan(
++        plan,
++        preflight=report,
++        output_dir=output,
++        cache_dir=cache,
++        **kwargs,
++    )
++    assert not refreshed.failed
++    updated_diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
++    assert updated_diagnostics["audio_boundary_policy"] == (
++        "voicerender.trailing-silence.v1"
++    )
++
++
+ def test_stale_and_missing_ok_reports_fail_before_synthesis(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/voicerender/audio_boundaries.py b/voicerender/audio_boundaries.py
+new file mode 100644
+index 0000000..2e95a2a
+--- /dev/null
++++ b/voicerender/audio_boundaries.py
+@@ -0,0 +1,87 @@
++"""VoiceRender-owned normalization of renderer-added audio boundaries."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, replace
++from typing import Any
++
++import numpy as np
++from audiosig import trim_trail
++
++from .engines.base import SpeechWordTiming
++
++BOUNDARY_POLICY_ID = "voicerender.trailing-silence.v1"
++
++
++@dataclass(frozen=True, slots=True)
++class BoundaryNormalization:
++    """Facts about trailing-silence normalization for one speech artifact."""
++
++    policy: str
++    input_frames: int
++    output_frames: int
++    removed_frames: int
++    removed_seconds: float
++
++
++def trim_renderer_trailing_silence(
++    audio: Any,
++    *,
++    sample_rate: int,
++) -> tuple[np.ndarray, BoundaryNormalization]:
++    """Remove detected renderer tail silence without changing the leading boundary.
++
++    The caller must pass audio that has already passed its engine adapter's
++    rendered-speech validation. The returned array is mono float32.
++    """
++    if (
++        isinstance(sample_rate, bool)
++        or not isinstance(sample_rate, int)
++        or sample_rate <= 0
++    ):
++        raise ValueError("sample_rate must be a positive integer")
++
++    source = np.asarray(audio, dtype=np.float32).reshape(-1)
++    trimmed = np.asarray(
++        trim_trail(source, sample_rate=sample_rate, trail_seconds=0.0),
++        dtype=np.float32,
++    ).reshape(-1)
++    if trimmed.size > source.size:
++        raise ValueError("trailing-silence normalization must not add audio frames")
++
++    removed = int(source.size - trimmed.size)
++    return trimmed, BoundaryNormalization(
++        policy=BOUNDARY_POLICY_ID,
++        input_frames=int(source.size),
++        output_frames=int(trimmed.size),
++        removed_frames=removed,
++        removed_seconds=removed / float(sample_rate),
++    )
++
++
++def clamp_word_timings_to_audio(
++    timings: tuple[SpeechWordTiming, ...],
++    frame_count: int,
++) -> tuple[SpeechWordTiming, ...]:
++    """Keep legacy word coordinates valid after trailing-only audio trimming.
++
++    Timing starts are never moved. A start outside the new audio boundary is
++    an invariant failure; an end extending only into the removed tail is
++    clamped to the final frame boundary.
++    """
++    if (
++        isinstance(frame_count, bool)
++        or not isinstance(frame_count, int)
++        or frame_count <= 0
++    ):
++        raise ValueError("frame_count must be a positive integer")
++
++    normalized: list[SpeechWordTiming] = []
++    for timing in timings:
++        if timing.start_sample >= frame_count:
++            raise ValueError("word timing starts beyond the trimmed audio boundary")
++        if timing.end_sample > frame_count:
++            normalized.append(replace(timing, end_sample=frame_count))
++        else:
++            normalized.append(timing)
++    return tuple(normalized)
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 406df5f..79b83fc 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -146,6 +146,11 @@ def _add_profile_role_binding_arguments(parser: argparse.ArgumentParser) -> None
+         help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
+     )
+     parser.add_argument("--speaker")
++    parser.add_argument(
++        "--short-sentence",
++        choices=("off", "wrap", "phrase", "randomized-phrase"),
++        help="Explicitly configure Kokoro short-sentence processing",
++    )
+     parser.add_argument(
+         "--option",
+         action="append",
+@@ -353,6 +358,11 @@ def build_parser() -> argparse.ArgumentParser:
+         help="Exact reference transcript; fallback when VoiceFolio has no catalog transcript",
+     )
+     profile_create.add_argument("--speaker")
++    profile_create.add_argument(
++        "--short-sentence",
++        choices=("off", "wrap", "phrase", "randomized-phrase"),
++        help="Explicitly configure Kokoro short-sentence processing",
++    )
+     profile_create.add_argument(
+         "--option",
+         action="append",
+@@ -1125,6 +1135,31 @@ def _profile_pronunciation_options(
+     return result
+
+
++def _profile_short_sentence_option(
++    engine: str,
++    options: Mapping[str, Any],
++    mode: str | None,
++) -> dict[str, Any]:
++    """Merge the Kokoro convenience mode into its canonical engine option."""
++    result = dict(options)
++    if mode is None:
++        return result
++    if engine.strip().casefold() != "kokoro":
++        raise InvalidEngineOptionError(
++            "--short-sentence is only supported for Kokoro profiles",
++            code="kokoro.short_sentence_engine_invalid",
++            engine=engine,
++        )
++    if "short_sentence" in result:
++        raise InvalidEngineOptionError(
++            "--short-sentence conflicts with --option short_sentence=...",
++            code="kokoro.short_sentence_option_conflict",
++            engine=engine,
++        )
++    result["short_sentence"] = mode
++    return result
++
++
+ def _pronunciation_stack_for_binding(
+     binding: Mapping[str, Any], language: str
+ ) -> dict[str, Any] | None:
+@@ -1233,7 +1268,34 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
+     ]
+
+
+-def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
++def _kokoro_short_sentence_lines(options: Any) -> tuple[str, ...]:
++    if not isinstance(options, Mapping) or "short_sentence" not in options:
++        return ("short sentence: off (implicit)",)
++
++    setting = options["short_sentence"]
++    if setting == "off" or setting is None:
++        return ("short sentence: off (explicit)",)
++    if isinstance(setting, Mapping):
++        if setting.get("enabled", True) is False:
++            return ("short sentence: off (explicit)",)
++        mode = setting.get("resolve_mode", "randomized-phrase")
++        threshold = setting.get("min_phoneme_length", 30)
++    elif isinstance(setting, str):
++        mode = setting
++        threshold = 30
++    else:
++        return ("short sentence: configured (invalid)",)
++
++    lines = [f"short sentence: {mode}"]
++    if isinstance(threshold, int) and not isinstance(threshold, bool):
++        lines.append(f"threshold: <{threshold} phonemes")
++    lines.append("enabled: yes")
++    return tuple(lines)
++
++
++def _print_profile_role_items(
++    roles: list[dict[str, Any]], *, show_engine_details: bool = False
++) -> None:
+     print(
+         "  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE / ENROLLMENT"
+     )
+@@ -1263,6 +1325,10 @@ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+             f"{marker} {item['role']:<10} {language:<8} {engine:<7} "
+             f"{target:<18} {selector}"
+         )
++        if show_engine_details and binding.get("renderer") == "kokoro":
++            print("    Kokoro")
++            for line in _kokoro_short_sentence_lines(options):
++                print(f"      {line}")
+         pronunciation_stack = item.get("pronunciation_stack")
+         if isinstance(pronunciation_stack, Mapping):
+             precedence = pronunciation_stack.get("precedence", ())
+@@ -2721,6 +2787,9 @@ def main(argv: list[str] | None = None) -> int:
+                     g2lex_paths=args.g2lex,
+                     lexicon_data_policy=args.lexicon_data_policy,
+                 )
++                profile_options = _profile_short_sentence_option(
++                    args.engine, profile_options, args.short_sentence
++                )
+                 input_paths = (
+                     args.reference_wav,
+                     args.prepared_voice,
+@@ -2865,6 +2934,9 @@ def main(argv: list[str] | None = None) -> int:
+                             g2lex_paths=args.g2lex,
+                             lexicon_data_policy=args.lexicon_data_policy,
+                         )
++                        binding_options = _profile_short_sentence_option(
++                            args.engine, binding_options, args.short_sentence
++                        )
+                         profile = set_profile_role(
+                             args.profile,
+                             args.role,
+@@ -2919,7 +2991,10 @@ def main(argv: list[str] | None = None) -> int:
+                     f"RenderProfile {payload['profile_id']} "
+                     f"(default role: {payload['default_role']})"
+                 )
+-                _print_profile_role_items(payload["roles"])
++                _print_profile_role_items(
++                    payload["roles"],
++                    show_engine_details=args.profile_command in {"inspect", "show"},
++                )
+                 if args.profile_command in {"inspect", "show"}:
+                     planning = payload["planning"]
+                     fallbacks = ", ".join(planning["capacity_fallback"]) or "none"
+@@ -2927,14 +3002,21 @@ def main(argv: list[str] | None = None) -> int:
+                         f"Planning: split={planning['split']}; capacity fallback={fallbacks}"
+                     )
+                     pauses = payload["pauses"]
+-                    durations = ", ".join(
+-                        f"{key}={value}"
+-                        for key, value in sorted(pauses.items())
+-                        if key != "mode"
+-                    )
+-                    print(
+-                        f"Pauses: mode={pauses['mode']}; durations={durations or 'none'}"
+-                    )
++                    pause_mode = pauses.get("mode", "none")
++                    print("Pauses")
++                    print(f"  mode: {pause_mode}")
++                    if pause_mode == "manual":
++                        for boundary in ("clause", "sentence", "paragraph"):
++                            if boundary in pauses:
++                                print(f"  {boundary}: {pauses[boundary]}")
++                        print("  speech artifact tails: trimmed")
++                        print(
++                            "  composition semantics: configured pause is inserted "
++                            "after normalized speech"
++                        )
++                    else:
++                        print("  speech artifact tails: trimmed")
++                        print("  composition semantics: no policy pause is inserted")
+             elif args.profile_command == "reidentify":
+                 print(
+                     "RenderProfile reidentified\n"
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index 9935869..1c1f140 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -926,6 +926,11 @@ class PyKokoroEngineSession:
+             "voice": result.voice,
+             "phonemes": result.phonemes,
+             "token_ids": tuple(result.token_ids),
++            "short_sentence_mode": (
++                result.short_sentence_mode
++                if result.short_sentence_mode is not None
++                else "off"
++            ),
+             "pcm_range": {
+                 "policy": PCM_RANGE_POLICY,
+                 "peak_before_clip": adaptation.peak_before_clip,
+@@ -1087,40 +1092,46 @@ class PyKokoroEngineAdapter:
+                 value_type="string|table",
+                 default=None,
+                 choices=("off", "wrap", "phrase", "randomized-phrase"),
+-                description="Mode shorthand or table with enabled, resolve_mode, min_phoneme_length, phoneme_pretext, phrase_fallback_tries.",
++                description=(
++                    "Opt-in: omitted leaves short-sentence processing off; supply a mode "
++                    "shorthand or table to enable it."
++                ),
+             ),
+             "short_sentence.enabled": EngineOption(
+                 name="short_sentence.enabled",
+                 value_type="boolean",
+                 default=True,
+-                description="Enable the short-sentence context quality fix.",
++                description=(
++                    "Conditional default: true when a short_sentence table is present; "
++                    "selecting Kokoro alone does not enable short-sentence processing."
++                ),
+             ),
+             "short_sentence.resolve_mode": EngineOption(
+                 name="short_sentence.resolve_mode",
+                 value_type="string",
+                 default="randomized-phrase",
+                 choices=("wrap", "phrase", "randomized-phrase"),
+-                description="How short requests are expanded into context.",
++                description="Default mode within a supplied short_sentence table.",
+             ),
+             "short_sentence.min_phoneme_length": EngineOption(
+                 name="short_sentence.min_phoneme_length",
+                 value_type="integer",
+                 default=30,
+                 minimum=0,
+-                description="Minimum phoneme count before short-sentence context is added.",
++                description="Default threshold within a supplied short_sentence table.",
+             ),
+             "short_sentence.phoneme_pretext": EngineOption(
+                 name="short_sentence.phoneme_pretext",
+                 value_type="string",
+                 default="—",
+-                description="Text prepended to the short-sentence context.",
++                description="Default pretext within a supplied short_sentence table.",
+             ),
+             "short_sentence.phrase_fallback_tries": EngineOption(
+                 name="short_sentence.phrase_fallback_tries",
+                 value_type="integer",
+                 default=1,
+                 minimum=0,
+-                description="Number of phrase fallback attempts.",
++                description="Default fallback attempts within a supplied short_sentence table.",
+             ),
+             "voice_level": EngineOption(
+                 name="voice_level",
+diff --git a/voicerender/render.py b/voicerender/render.py
+index c11dc83..16c9cad 100644
+--- a/voicerender/render.py
++++ b/voicerender/render.py
+@@ -7,11 +7,24 @@ import os
+ import shutil
+ from collections.abc import Iterable
+ from contextlib import ExitStack
++from dataclasses import asdict
+ from pathlib import Path
+ from time import monotonic
+ from typing import Any
+
++from .audio_boundaries import (
++    BOUNDARY_POLICY_ID,
++    clamp_word_timings_to_audio,
++    trim_renderer_trailing_silence,
++)
+ from .engines import get_engine
++from .engines.base import (
++    RenderedSpeech,
++    SpeechRequest,
++    SpeechWordTiming,
++    validate_rendered_speech,
++    validate_word_timings,
++)
+ from .errors import ArtifactError, PlanError, ProfileError, RenderEventCallbackError
+ from .events import RenderEvent, RenderEventCallback, RenderEventKind, emit_render_event
+ from .models import (
+@@ -26,7 +39,9 @@ from .progress import ProgressTracker
+ from .render_lock import exclusive_render_lock as _exclusive_run
+ from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
+
+-RENDER_ALGORITHM = "voicerender.batch.v1"
++RENDER_ALGORITHM = "voicerender.batch.v2"
++
++_CACHE_SCHEMA = "voicerender.batch-cache.v2"
+
+
+ def _identity(
+@@ -57,6 +72,7 @@ def _identity(
+             key: value for key, value in binding.options.items() if key != "offline"
+         },
+         "algorithm": algorithm,
++        "audio_boundary_policy": BOUNDARY_POLICY_ID,
+     }
+
+
+@@ -106,10 +122,22 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
+         data = json.loads(meta.read_text(encoding="utf-8"))
+     except (OSError, ValueError):
+         return None
+-    if not isinstance(data, dict) or data.get("key") != key:
++    if (
++        not isinstance(data, dict)
++        or data.get("key") != key
++        or data.get("schema") != _CACHE_SCHEMA
++        or data.get("audio_boundary_policy") != BOUNDARY_POLICY_ID
++    ):
+         return None
+     info = data.get("wav")
+-    if not isinstance(info, dict) or not verified_wav(wav, info):
++    boundary = data.get("audio_boundary")
++    if (
++        not isinstance(info, dict)
++        or not verified_wav(wav, info)
++        or not isinstance(boundary, dict)
++        or boundary.get("policy") != BOUNDARY_POLICY_ID
++        or boundary.get("output_frames") != info.get("frames")
++    ):
+         return None
+     return wav, data
+
+@@ -204,6 +232,7 @@ def render(
+                 "wav": None,
+                 "timings": [],
+                 "timing_source": "absent",
++                "audio_boundary": None,
+                 "error": None,
+             }
+         )
+@@ -316,6 +345,7 @@ def render(
+                             wav=old["wav"],
+                             timings=old.get("timings", []),
+                             timing_source=old.get("timing_source", "absent"),
++                            audio_boundary=old.get("audio_boundary"),
+                         )
+                         reused += 1
+                     else:
+@@ -328,6 +358,7 @@ def render(
+                                 wav=sidecar["wav"],
+                                 timings=sidecar.get("timings", []),
+                                 timing_source=sidecar.get("timing_source", "absent"),
++                                audio_boundary=sidecar.get("audio_boundary"),
+                             )
+                             reused += 1
+                         else:
+@@ -372,14 +403,51 @@ def render(
+                             synthesis_seconds = max(
+                                 0.0, monotonic() - synthesis_started
+                             )
++                            timings_with_types = tuple(
++                                item
++                                if isinstance(item, SpeechWordTiming)
++                                else SpeechWordTiming(**dict(item))
++                                for item in result.word_timings
++                            )
++                            validated_result = validate_rendered_speech(
++                                SpeechRequest(
++                                    id=seg.id,
++                                    text=seg.text,
++                                    language=seg.language,
++                                ),
++                                RenderedSpeech(
++                                    id=seg.id,
++                                    audio=result.audio,
++                                    sample_rate=result.sample_rate,
++                                    word_timings=timings_with_types,
++                                ),
++                                engine=binding.engine,
++                                target_id=binding.target_id,
++                            )
++                            normalized_audio, boundary = trim_renderer_trailing_silence(
++                                validated_result.audio,
++                                sample_rate=validated_result.sample_rate,
++                            )
++                            boundary_info = asdict(boundary)
++                            timings_with_types = clamp_word_timings_to_audio(
++                                validated_result.word_timings, boundary.output_frames
++                            )
++                            timings_with_types = validate_word_timings(
++                                text=seg.text,
++                                frame_count=boundary.output_frames,
++                                timings=timings_with_types,
++                            )
++                            timings = [asdict(item) for item in timings_with_types]
+                             info = atomic_wav(
+                                 cache / f"{key}.wav",
+-                                result.audio,
+-                                int(result.sample_rate),
++                                normalized_audio,
++                                validated_result.sample_rate,
+                             )
+-                            timings = [dict(item) for item in result.word_timings]
+                             sidecar = {
++                                "schema": _CACHE_SCHEMA,
+                                 "key": key,
++                                "audio_boundary_policy": BOUNDARY_POLICY_ID,
++                                "audio_boundary": boundary_info,
+                                 "wav": info,
+                                 "timings": timings,
+                                 "timing_source": "provided" if timings else "absent",
+@@ -391,6 +459,7 @@ def render(
+                                 wav=info,
+                                 timings=timings,
+                                 timing_source=sidecar["timing_source"],
++                                audio_boundary=boundary_info,
+                             )
+                             rendered += 1
+                 except RenderEventCallbackError:
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 9bec69b..41044c7 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -8,7 +8,7 @@ import re
+ import shutil
+ import tempfile
+ from collections.abc import Callable, Collection, Mapping
+-from dataclasses import dataclass
++from dataclasses import asdict, dataclass
+ from pathlib import Path
+ from time import monotonic, sleep
+ from typing import Any, Literal
+@@ -30,6 +30,7 @@ from renderplan import (
+     save_preflight,
+ )
+
++from .audio_boundaries import BOUNDARY_POLICY_ID, trim_renderer_trailing_silence
+ from .engines.base import EngineSelection, SpeechRequest
+ from .engines.registry import get_adapter
+ from .error_diagnostics import (
+@@ -67,7 +68,7 @@ from .storage import atomic_json, atomic_wav, digest, verified_wav, wav_info
+
+ RENDER_MANIFEST_FILENAME = "render-manifest.toml"
+ RENDER_DIAGNOSTICS_FILENAME = "render-diagnostics.json"
+-_CACHE_SCHEMA = "voicerender.renderplan-cache.v1"
++_CACHE_SCHEMA = "voicerender.renderplan-cache.v2"
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -257,6 +258,9 @@ def render_renderplan(
+     ]
+     diagnostics: dict[str, Any] = {
+         "schema": "voicerender.render-diagnostics.v1",
++        "audio_boundary_policy": BOUNDARY_POLICY_ID,
++        "audio_boundary": {},
++        "render_results": {},
+         "render_plan_id": parsed_plan.plan_id or parsed_plan.computed_id(),
+         "emphasis_policy": policy.value,
+         "pending_composition": bool(deferred_controls),
+@@ -307,6 +311,27 @@ def render_renderplan(
+             force=force,
+             reset_stale_output=reset_stale_output,
+         )
++        if not stale_output_reset:
++            diagnostics_path = out / RENDER_DIAGNOSTICS_FILENAME
++            try:
++                previous_diagnostics = json.loads(
++                    diagnostics_path.read_text(encoding="utf-8")
++                )
++            except (OSError, ValueError):
++                previous_diagnostics = None
++            if (
++                isinstance(previous_diagnostics, dict)
++                and previous_diagnostics.get("audio_boundary_policy")
++                == BOUNDARY_POLICY_ID
++            ):
++                if isinstance(previous_diagnostics.get("audio_boundary"), dict):
++                    diagnostics["audio_boundary"].update(
++                        previous_diagnostics["audio_boundary"]
++                    )
++                if isinstance(previous_diagnostics.get("render_results"), dict):
++                    diagnostics["render_results"].update(
++                        previous_diagnostics["render_results"]
++                    )
+         if stale_output_reset and reset_stale_output and had_preflight:
+             save_preflight(report, out / "preflight.toml")
+         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
+@@ -418,11 +443,20 @@ def render_renderplan(
+                 try:
+                     cached = None if force else _read_cache(cache, current.cache_key)
+                     if cached is not None:
+-                        source, info = cached
++                        source, info, boundary_info, render_result = cached
+                         _copy_verified(source, target, info)
+                         reused += 1
+                         terminal_outcome = "reused"
+                         fingerprint["execution_status"] = "cache_reused"
++                        fingerprint["audio_boundary"] = boundary_info
++                        diagnostics["audio_boundary"][current.segment_id] = (
++                            boundary_info
++                        )
++                        if render_result:
++                            fingerprint["render_result"] = render_result
++                            diagnostics["render_results"][current.segment_id] = (
++                                render_result
++                            )
+                     else:
+                         fingerprint["execution_status"] = "synthesized"
+                         session = sessions.acquire(
+@@ -542,17 +576,39 @@ def render_renderplan(
+                             raise ArtifactError(
+                                 "Renderer returned an artifact for a different speech request"
+                             )
++                        normalized_audio, boundary = trim_renderer_trailing_silence(
++                            rendered_speech.audio,
++                            sample_rate=rendered_speech.sample_rate,
++                        )
++                        boundary_info = asdict(boundary)
++                        fingerprint["audio_boundary"] = boundary_info
++                        diagnostics["audio_boundary"][current.segment_id] = (
++                            boundary_info
++                        )
++                        render_result = {}
++                        resolved_mode = rendered_speech.metadata.get(
++                            "short_sentence_mode"
++                        )
++                        if isinstance(resolved_mode, str):
++                            render_result["short_sentence_mode"] = resolved_mode
++                            fingerprint["render_result"] = render_result
++                            diagnostics["render_results"][current.segment_id] = (
++                                render_result
++                            )
+                         info = atomic_wav(
+                             cache / f"{current.cache_key}.wav",
+-                            rendered_speech.audio,
++                            normalized_audio,
+                             rendered_speech.sample_rate,
+                         )
+                         atomic_json(
+                             cache / f"{current.cache_key}.json",
+                             {
+                                 "schema": _CACHE_SCHEMA,
++                                "audio_boundary_policy": BOUNDARY_POLICY_ID,
+                                 "key": current.cache_key,
+                                 "wav": info,
++                                "audio_boundary": boundary_info,
++                                "render_result": render_result,
+                             },
+                         )
+                         if not verified_wav(cache / f"{current.cache_key}.wav", info):
+@@ -822,6 +878,29 @@ def _load_existing_artifacts(
+             _reset_owned_artifacts(output_dir)
+             return {}, True
+         manifest.validate_against(plan)
++        diagnostics_path = output_dir / RENDER_DIAGNOSTICS_FILENAME
++        current_audio_policy = False
++        if diagnostics_path.is_file() and not diagnostics_path.is_symlink():
++            try:
++                diagnostics_data = json.loads(
++                    diagnostics_path.read_text(encoding="utf-8")
++                )
++            except (OSError, ValueError):
++                diagnostics_data = None
++            current_audio_policy = (
++                isinstance(diagnostics_data, dict)
++                and diagnostics_data.get("audio_boundary_policy") == BOUNDARY_POLICY_ID
++            )
++        if not current_audio_policy:
++            if not (force or reset_stale_output):
++                raise ArtifactError(
++                    "Existing render output uses an older audio-boundary policy. "
++                    f"Current policy: {BOUNDARY_POLICY_ID}. "
++                    "Re-render with --force or reset the stale output.",
++                    code="output.stale_audio_policy",
++                )
++            _reset_owned_artifacts(output_dir)
++            return {}, True
+         expected = {
+             (item.number, item.segment_id or item.computed_id()): item
+             for item in plan.speech
+@@ -923,6 +1002,7 @@ def _prepare_speech(
+         synthesis_identity = dict(adapter.canonical_synthesis_identity(selection))
+         identity = {
+             "schema": _CACHE_SCHEMA,
++            "audio_boundary_policy": BOUNDARY_POLICY_ID,
+             "segment_id": item.segment_id or item.computed_id(),
+             "engine": adapter.id,
+             "engine_version": adapter_version,
+@@ -936,6 +1016,7 @@ def _prepare_speech(
+         }
+         execution_fingerprint = {
+             "voicerender_version": _voicerender_version(),
++            "audio_boundary_policy": BOUNDARY_POLICY_ID,
+             "adapter_id": adapter.id,
+             "adapter_version": adapter_version,
+             "api_probe_signature": digest(api_probe),
+@@ -984,7 +1065,9 @@ def _finalize_execution_fingerprint(fingerprint: dict[str, Any]) -> dict[str, An
+     return result
+
+
+-def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None:
++def _read_cache(
++    cache_dir: Path, key: str
++) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+     wav = cache_dir / f"{key}.wav"
+     sidecar = cache_dir / f"{key}.json"
+     try:
+@@ -995,12 +1078,22 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
+         not isinstance(data, dict)
+         or data.get("schema") != _CACHE_SCHEMA
+         or data.get("key") != key
++        or data.get("audio_boundary_policy") != BOUNDARY_POLICY_ID
+     ):
+         return None
+     info = data.get("wav")
+-    if not isinstance(info, dict) or not verified_wav(wav, info):
++    boundary = data.get("audio_boundary")
++    render_result = data.get("render_result", {})
++    if (
++        not isinstance(info, dict)
++        or not verified_wav(wav, info)
++        or not isinstance(boundary, dict)
++        or boundary.get("policy") != BOUNDARY_POLICY_ID
++        or boundary.get("output_frames") != info.get("frames")
++        or not isinstance(render_result, dict)
++    ):
+         return None
+-    return wav, info
++    return wav, info, boundary, render_result
+
+
+ def _replace_file(source: Path, target: Path) -> None:

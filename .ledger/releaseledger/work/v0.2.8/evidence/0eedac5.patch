@@ -1,0 +1,381 @@
+ docs/renderprofile.md                   |  4 ++
+ tests/test_kittensynth_pronunciation.py | 92 +++++++++++++++++++++++++++++----
+ tests/test_preflight.py                 | 30 +++++++++--
+ tests/test_renderplan_input.py          | 54 ++++++++++++++++++-
+ tests/test_renderprofile.py             | 27 +++++++++-
+ voicerender/engines/kittensynth.py      |  5 +-
+ 6 files changed, 197 insertions(+), 15 deletions(-)
+
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 7e2aba5..98221fa 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -33,6 +33,10 @@ semantics of `profile validate`, `inspect`, `show`, and `refresh`. The snapshot
+ inside a generated RenderPlan variant remains `renderprofile.toml`.
+ A profile has a canonical `profile_id`; RenderPlans carry that identity and copy
+ the resolved role bindings needed to execute without reopening the profile.
++
++### Linguistic token requirements
++
++`requirements.token_fields` lists source fields that must be available on every projected token; it is not a list of every token field a renderer can consume. An adapter may support linguistic tokens while treating all such context as optional. Kitten consumes available linguistic token metadata opportunistically. Missing optional fields fall back to Kitten/Kitteng2p's normal pronunciation path; POS, tag, lemma, and morphology are not hard Kitten RenderProfile requirements.
+ Refreshing engine metadata writes a proposal rather than overwriting user policy:
+
+ ```bash
+diff --git a/tests/test_kittensynth_pronunciation.py b/tests/test_kittensynth_pronunciation.py
+index 6424baf..c7008f3 100644
+--- a/tests/test_kittensynth_pronunciation.py
++++ b/tests/test_kittensynth_pronunciation.py
+@@ -56,14 +56,14 @@ def _selection(**options: Any) -> EngineSelection:
+     )
+
+
+-def test_kitten_capabilities_and_option_descriptors_advertise_pronunciation() -> None:
++def test_kitten_advertises_linguistic_support_without_hard_token_requirements() -> None:
+     adapter = KittenSynthEngineAdapter()
+
+     capabilities = adapter.capabilities()
+     descriptors = adapter.option_descriptors()
+
+     assert capabilities.supports_lexicons
+-    assert capabilities.supports_linguistic_tokens
++    assert capabilities.supports_linguistic_tokens is True
+     assert capabilities.supports_pronunciation_overrides
+     assert capabilities.pronunciation_alphabets == frozenset({"ipa"})
+     assert {
+@@ -74,13 +74,8 @@ def test_kitten_capabilities_and_option_descriptors_advertise_pronunciation() ->
+     } <= set(descriptors)
+     assert descriptors["lexicon_data_policy"].choices == ("auto", "installed-only")
+     assert descriptors["heteronym_policy"].choices == ("auto", "off")
+-    assert adapter.renderprofile_fragment(_selection()).token_fields == (
+-        "span",
+-        "pos",
+-        "tag",
+-        "lemma",
+-        "morph",
+-    )
++    fragment = adapter.renderprofile_fragment(_selection())
++    assert fragment.token_fields == ()
+
+
+ def test_request_tokens_and_ipa_overrides_are_forwarded_to_measure_and_synthesis(
+@@ -152,13 +147,92 @@ def test_request_tokens_and_ipa_overrides_are_forwarded_to_measure_and_synthesis
+     measured_kwargs = voice.measure_args[0][1]
+     synthesized_kwargs = voice.synthesis_args[0][1]
+     for forwarded in (measured_kwargs, synthesized_kwargs):
++        assert forwarded["tokens"][0].start == 0
++        assert forwarded["tokens"][0].end == 4
+         assert forwarded["tokens"][0].text == "read"
++        assert forwarded["tokens"][0].tag == "VB"
++        assert forwarded["tokens"][0].lemma == "read"
++        assert forwarded["tokens"][0].language == "en"
+         assert forwarded["tokens"][0].pos == "VERB"
+         assert forwarded["tokens"][0].morph == "Tense=Pres"
+         assert forwarded["pronunciation_overrides"][0].phonemes == "ɹ iː d"
+         assert forwarded["pronunciation_overrides"][0].alphabet == "ipa"
+
+
++def test_kitten_forwards_partial_tokens_to_measurement_and_synthesis(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    module.LinguisticToken = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
++    module.PronunciationOverride = lambda **kwargs: SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++
++    class Voice:
++        def __init__(self) -> None:
++            self.measure_calls: list[tuple[str, dict[str, Any]]] = []
++            self.synthesis_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
++
++        def measure_prepared(self, text: str, **kwargs: Any) -> Any:
++            self.measure_calls.append((text, kwargs))
++            return SimpleNamespace(
++                token_count=3,
++                max_tokens=32,
++                fits=True,
++                model_id="nano-0.8-int8",
++                metadata={},
++            )
++
++        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
++            self.synthesis_calls.append((args, kwargs))
++            return SimpleNamespace(
++                audio=np.array([0.0, 0.25], dtype=np.float32),
++                sample_rate=24000,
++                voice="Jasper",
++                model_ref="nano-0.8-int8",
++                speed=1.0,
++                metadata={},
++            )
++
++    voice = Voice()
++    session = KittenSynthEngineSession(voice, _selection())
++    partial = SpeechRequest(
++        id="partial-token-request",
++        text="read",
++        language="en-US",
++        tokens=(
++            SpeechToken(
++                start=0,
++                end=4,
++                text="read",
++                lemma="read",
++                pos=None,
++                tag=None,
++                morph=None,
++                language="en-US",
++            ),
++        ),
++    )
++    session.measure(partial)
++    session.synthesize(partial)
++
++    measured_token = voice.measure_calls[0][1]["tokens"][0]
++    synthesized_token = voice.synthesis_calls[0][1]["tokens"][0]
++    for token in (measured_token, synthesized_token):
++        assert token.start == 0
++        assert token.end == 4
++        assert token.text == "read"
++        assert token.lemma == "read"
++        assert token.pos is None
++        assert token.tag is None
++        assert token.morph is None
++
++    no_tokens = replace(partial, id="no-token-request", tokens=())
++    session.measure(no_tokens)
++    session.synthesize(no_tokens)
++    assert "tokens" not in voice.measure_calls[1][1]
++    assert "tokens" not in voice.synthesis_calls[1][1]
++
++
+ def test_open_forwards_g2p_configuration_and_forces_installed_only_offline(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index beb53e5..ef14b56 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -318,7 +318,18 @@ def _install_fake_kittensynth(
+             return cls()
+
+         def measure_prepared(self, text: str, **kwargs: Any) -> Any:
+-            events.append(("measure", text))
++            events.append(
++                (
++                    "measure",
++                    SimpleNamespace(
++                        text=text,
++                        tokens=kwargs.get("tokens", ()),
++                        pronunciation_overrides=kwargs.get(
++                            "pronunciation_overrides", ()
++                        ),
++                    ),
++                )
++            )
+             return SimpleNamespace(
+                 token_count=amount,
+                 max_tokens=maximum,
+@@ -536,6 +547,16 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+     }
+     plan = _plan(("Kitten preflight", True, "sentence"), binding=binding)
+
++    sparse_item = replace(
++        plan.flow[0],
++        tokens=TokenBundle(
++            span=((0, 6), (7, 16)),
++            lemma=((0, "kitten"), (1, "preflight")),
++            morph=(),
++        ),
++        segment_id=None,
++    )
++    plan = replace(plan, flow=(sparse_item,), plan_id=None).with_identity()
+     report = preflight_render_plan(plan, tmp_path / "kitten-preflight.toml")
+
+     check = report.checks[0]
+@@ -546,7 +567,10 @@ def test_kitten_preflight_uses_exact_frontend_measurement_without_synthesis(
+     assert check.maximum == 256
+     assert check.source == "kittensynth.measure_prepared"
+     assert [event[0] for event in events] == ["measure", "close"]
+-    assert events[0][1] == "Kitten preflight"
++    assert events[0][1].text == "Kitten preflight"
++    assert [
++        (token.text, token.lemma, token.morph) for token in events[0][1].tokens
++    ] == [("Kitten", "kitten", None), ("preflight", "preflight", None)]
+
+
+ def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(
+@@ -674,7 +698,7 @@ def test_kitten_preflight_defers_emphasis_to_composition(
+     assert "audiocompose.emphasis.gain.v1" in check.detail
+     assert "pending composition" in check.detail
+     assert [event[0] for event in events] == ["measure", "close"]
+-    assert events[0][1] == item.text
++    assert events[0][1].text == item.text
+
+
+ def test_piper_render_defers_emphasis_to_composition_without_native_option(
+diff --git a/tests/test_renderplan_input.py b/tests/test_renderplan_input.py
+index f2d116d..21b391f 100644
+--- a/tests/test_renderplan_input.py
++++ b/tests/test_renderplan_input.py
+@@ -31,6 +31,7 @@ from voicerender.engines.inflectsynth import (
+     InflectSynthEngineAdapter,
+     InflectSynthEngineSession,
+ )
++from voicerender.engines.kittensynth import KittenSynthEngineAdapter
+ from voicerender.engines.kokoro import PyKokoroEngineAdapter
+ from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+ from voicerender.engines.pocketsynth import (
+@@ -240,6 +241,31 @@ def test_optional_tokens_are_preserved_for_supporting_adapter(
+     assert [token.pos for token in request.tokens] == ["NOUN", "PUNCT", "NOUN"]
+
+
++def test_sparse_optional_kitten_tokens_convert_without_morphology(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = _install(monkeypatch)
++    adapter.supports_tokens = True
++    adapter.required_fields = ()
++    item = _item(
++        text="read",
++        tokens=TokenBundle(
++            span=((0, 4),),
++            lemma=((0, "read"),),
++            morph=(),
++        ),
++    )
++
++    request = speech_request_from_renderplan(item)
++
++    assert len(request.tokens) == 1
++    assert request.tokens[0].text == "read"
++    assert request.tokens[0].lemma == "read"
++    assert request.tokens[0].pos is None
++    assert request.tokens[0].tag is None
++    assert request.tokens[0].morph is None
++
++
+ def test_required_tokens_rejected_when_adapter_declares_no_token_support(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -256,6 +282,8 @@ def _builtin_renderplan_request(
+     adapter: Any,
+     *,
+     speaker: str | int | None = 2,
++    tokens: TokenBundle | None = None,
++    text: str = "  Hello, world!  ",
+ ) -> SpeechRequest:
+     from voicerender import renderplan_input
+
+@@ -287,13 +315,37 @@ def _builtin_renderplan_request(
+     monkeypatch.setattr(adapter, "probe_api", lambda: probe)
+     monkeypatch.setattr(adapter, "target_metadata", lambda selection: {})
+     item = _item(
+-        tokens=_complete_tokens(),
++        tokens=tokens if tokens is not None else _complete_tokens(),
++        text=text,
+         binding_extra={"renderer": adapter.id},
+         speaker=speaker,
+     )
+     return speech_request_from_renderplan(item)
+
+
++def test_kittensynth_profile_contract_converts_sparse_optional_context(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = KittenSynthEngineAdapter()
++    assert adapter.capabilities().supports_linguistic_tokens is True
++    request = _builtin_renderplan_request(
++        monkeypatch,
++        adapter,
++        speaker=None,
++        text="read",
++        tokens=TokenBundle(
++            span=((0, 4),),
++            lemma=((0, "read"),),
++            morph=(),
++        ),
++    )
++
++    assert len(request.tokens) == 1
++    assert request.tokens[0].text == "read"
++    assert request.tokens[0].lemma == "read"
++    assert request.tokens[0].morph is None
++
++
+ @pytest.mark.parametrize(
+     ("adapter_factory", "supports_tokens"),
+     [
+diff --git a/tests/test_renderprofile.py b/tests/test_renderprofile.py
+index 3fcf933..8828c99 100644
+--- a/tests/test_renderprofile.py
++++ b/tests/test_renderprofile.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+
+ from contextlib import contextmanager
+ from dataclasses import replace
++from pathlib import Path
+ from typing import Any
+
+ import pytest
+@@ -351,6 +352,7 @@ def test_kokoro_fragment_uses_discovered_capacity_and_exact_token_contract(
+
+ def test_kittensynth_authoritative_capacity_survives_profile_refresh(
+     monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
+ ) -> None:
+     adapter = KittenSynthEngineAdapter()
+     metadata = {
+@@ -378,13 +380,36 @@ def test_kittensynth_authoritative_capacity_survives_profile_refresh(
+         role="narrator",
+         voice="Jasper",
+     )
++    assert adapter.capabilities().supports_linguistic_tokens is True
++    assert profile.roles["narrator"].requirements.token_fields == ()
++    new_profile_path = tmp_path / "kitten-new.renderprofile.toml"
++    save_render_profile(profile, new_profile_path)
++    assert "token_fields = []" in new_profile_path.read_text(encoding="utf-8")
++
++    old_role = replace(
++        profile.roles["narrator"],
++        requirements=replace(
++            profile.roles["narrator"].requirements,
++            token_fields=("span", "pos", "tag", "lemma", "morph"),
++        ),
++    )
++    old_profile = replace(
++        profile,
++        roles={"narrator": old_role},
++        profile_id=None,
++    ).with_identity()
+     metadata.update(
+         max_tokens=128,
+         capacity_policy_revision="kitten.capacity.v2",
+     )
+-    refreshed = refresh_render_profile(profile)
++    refreshed = refresh_render_profile(old_profile)
+
+     role = refreshed.roles["narrator"]
++    assert refreshed.profile_id != old_profile.profile_id
++    assert role.requirements.token_fields == ()
++    refreshed_path = tmp_path / "kitten-refreshed.renderprofile.toml"
++    save_render_profile(refreshed, refreshed_path)
++    assert "token_fields = []" in refreshed_path.read_text(encoding="utf-8")
+     assert role.renderer_capacity == CapacityConstraint(
+         metric="model_tokens", maximum=128, guarantee="hard"
+     )
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index e5dbbe0..cb7b55d 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -718,7 +718,10 @@ class KittenSynthEngineAdapter:
+         return make_renderprofile_fragment(
+             self,
+             selection,
+-            token_fields=("span", "pos", "tag", "lemma", "morph"),
++            # Kitten can use caller-provided linguistic context, but none of the
++            # token fields is a hard renderability requirement. Available token
++            # metadata is forwarded opportunistically.
++            token_fields=(),
+             frontend="kittensynth",
+             pronunciation="kitteng2p.ipa",
+             capacity_key="max_tokens",

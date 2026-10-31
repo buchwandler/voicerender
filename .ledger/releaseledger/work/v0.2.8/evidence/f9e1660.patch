@@ -1,0 +1,1115 @@
+ docs/index.md                         |   2 +
+ pyproject.toml                        |   2 +-
+ tests/test_capacity.py                |  90 ++++++++++++++++++++++
+ tests/test_control_surface_exports.py |   1 +
+ tests/test_engine_contracts.py        |  29 ++++++++
+ tests/test_engine_registry.py         |   5 ++
+ tests/test_kokoro_reference.py        | 113 ++++++++++++++++++++++++++--
+ tests/test_renderplan_input.py        | 136 ++++++++++++++++++++++++++++++++++
+ voicerender/__init__.py               |   2 +
+ voicerender/audio_boundaries.py       |  10 ++-
+ voicerender/capacity.py               |  18 +++++
+ voicerender/engines/base.py           |  45 +++++++++++
+ voicerender/engines/kokoro.py         |  38 +++++++++-
+ voicerender/engines/registry.py       |   1 +
+ voicerender/renderplan_input.py       |  97 ++++++++++++++++++++----
+ 15 files changed, 563 insertions(+), 26 deletions(-)
+
+diff --git a/docs/index.md b/docs/index.md
+index 5d93707..9df4869 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -65,6 +65,8 @@ An interrupted renderer's lock is reclaimed automatically only when the same-hos
+
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+
++RenderPlan `say_as` controls lower to typed request-local `SayAsSpan` values. Kokoro forwards those spans and the unchanged canonical text to PyKokoro, which owns character-spelling realization; adapters that do not advertise the requested interpretation reject it during preflight.
++
+ Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
+
+ ## Engine failure diagnostics
+diff --git a/pyproject.toml b/pyproject.toml
+index 5718f6e..964fd31 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -26,7 +26,7 @@ dependencies = [
+ chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.9,<0.2"]
+-kokoro = ["pykokoro>=0.10.6,<0.11"]
++kokoro = ["pykokoro>=0.10.7,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+ sopro = ["soprosynth[cpu]>=0.1.0,<0.2"]
+diff --git a/tests/test_capacity.py b/tests/test_capacity.py
+index b2ad567..2d65445 100644
+--- a/tests/test_capacity.py
++++ b/tests/test_capacity.py
+@@ -7,12 +7,14 @@ from voicerender import synthesize
+ from voicerender.capacity import (
+     CapacityContext,
+     SemanticBoundary,
++    _slice_request,
+     render_atomic_request,
+ )
+ from voicerender.engines.base import (
+     PronunciationSpan,
+     RenderedSpeech,
+     RequestMeasure,
++    SayAsSpan,
+     SpeechRequest,
+     SpeechToken,
+     SpeechWordTiming,
+@@ -25,8 +27,10 @@ class _MeasuredSession:
+         self.maximum = maximum
+         self.sample_rate = sample_rate
+         self.calls: list[SpeechRequest] = []
++        self.measure_calls: list[SpeechRequest] = []
+
+     def measure(self, request: SpeechRequest) -> RequestMeasure:
++        self.measure_calls.append(request)
+         amount = len(request.text)
+         return RequestMeasure(
+             fits=amount <= self.maximum,
+@@ -278,7 +282,93 @@ def test_planned_semantic_boundary_inside_pronunciation_span_is_rejected() -> No
+         item["split"].get("semantic_boundary_id") != boundary.semantic_boundary_id
+         for item in rendered.manifest["requests"]
+     )
++
++
++def test_capacity_say_as_span_is_atomic_rebased_and_serialized() -> None:
++    text = "one two A R T three four"
++    span_start = text.index("A R T")
++    span = SayAsSpan(span_start, span_start + len("A R T"), "characters")
++    request = _request(text, say_as=(span,))
++    session = _MeasuredSession(10)
++
++    rendered = render_atomic_request(session, request)
++
+     assert "".join(child.text for child in session.calls) == text
++    assert len(rendered.requests) > 1
++    span_children = [
++        child.request for child in rendered.requests if child.request.say_as
++    ]
++    assert len(span_children) == 1
++    child = span_children[0]
++    child_span = child.say_as[0]
++    assert child.text[child_span.start : child_span.end] == "A R T"
++    assert child_span.start == span_start - next(
++        item.char_start for item in rendered.requests if item.request is child
++    )
++
++    child_by_id = {item.request.id: item.request for item in rendered.requests}
++    for request_id, child_request in child_by_id.items():
++        measured = [item for item in session.measure_calls if item.id == request_id]
++        assert measured
++        assert all(
++            (item.text, item.say_as) == (child_request.text, child_request.say_as)
++            for item in measured
++        )
++
++    diagnostic = next(
++        item.to_dict() for item in rendered.requests if item.request.say_as
++    )
++    assert diagnostic["request"]["say_as"] == [
++        {
++            "start": child_span.start,
++            "end": child_span.end,
++            "interpret_as": "characters",
++            "format": None,
++            "detail": None,
++        }
++    ]
++
++    with pytest.raises(ValueError, match="partially overlaps a say_as span"):
++        _slice_request(request, span_start + 1, len(text))
++
++
++def test_fitting_request_with_say_as_stays_one_child() -> None:
++    text = "A R T fits."
++    request = _request(
++        text,
++        say_as=(SayAsSpan(0, len("A R T"), "characters"),),
++    )
++    session = _MeasuredSession(100)
++
++    rendered = render_atomic_request(session, request)
++
++    assert len(session.calls) == 1
++    assert session.calls[0].text == text
++    assert session.calls[0].say_as == request.say_as
++    assert rendered.requests[0].request.say_as == request.say_as
++    assert "".join(child.text for child in session.calls) == text
++
++
++def test_live_acoustic_request_identity_includes_say_as() -> None:
++    request = _request(
++        "A R T",
++        say_as=(SayAsSpan(0, 5, "characters", format="spell-out"),),
++    )
++    session = _MeasuredSession(100)
++    session.synthesis_identity = {"engine": "test"}
++
++    result = synthesize(session, request)
++
++    identity = result.metadata["acoustic_identity"]["request"]
++    assert identity["say_as"] == [
++        {
++            "start": 0,
++            "end": 5,
++            "interpret_as": "characters",
++            "format": "spell-out",
++            "detail": None,
++        }
++    ]
+
+
+ def test_capacity_fitting_preserves_leading_trailing_and_repeated_whitespace():
+diff --git a/tests/test_control_surface_exports.py b/tests/test_control_surface_exports.py
+index 2e23b57..3186632 100644
+--- a/tests/test_control_surface_exports.py
++++ b/tests/test_control_surface_exports.py
+@@ -23,6 +23,7 @@ def test_control_surface_apis_are_exported_from_package_root() -> None:
+         "ParsedVoiceSelector",
+         "RoleProfile",
+         "VoiceCloneRequest",
++        "SayAsSpan",
+         "VoiceDescriptor",
+         "VoiceKind",
+         "BundleContractError",
+diff --git a/tests/test_engine_contracts.py b/tests/test_engine_contracts.py
+index 0ad904f..6795df9 100644
+--- a/tests/test_engine_contracts.py
++++ b/tests/test_engine_contracts.py
+@@ -4,7 +4,9 @@ import numpy as np
+ import pytest
+
+ from voicerender.engines.base import (
++    PronunciationSpan,
+     RenderedSpeech,
++    SayAsSpan,
+     SpeechRequest,
+     validate_rendered_speech,
+ )
+@@ -17,6 +19,33 @@ def _validate(audio: np.ndarray) -> RenderedSpeech:
+     return validate_rendered_speech(request, result, engine="fake")
+
+
++def test_say_as_span_validates_basic_fields() -> None:
++    span = SayAsSpan(0, 3, "characters", format="spell-out", detail="letters")
++    assert span.start == 0
++    assert span.end == 3
++    assert span.interpret_as == "characters"
++
++    with pytest.raises(TypeError, match="start"):
++        SayAsSpan(True, 3, "characters")
++    with pytest.raises(ValueError, match="range"):
++        SayAsSpan(3, 3, "characters")
++    with pytest.raises(ValueError, match="interpret_as"):
++        SayAsSpan(0, 1, "  ")
++    with pytest.raises(TypeError, match="detail"):
++        SayAsSpan(0, 1, "characters", detail=1)  # type: ignore[arg-type]
++
++
++def test_speech_request_rejects_overlapping_say_as_and_pronunciation() -> None:
++    with pytest.raises(ValueError, match="overlap say_as and pronunciation"):
++        SpeechRequest(
++            id="request-1",
++            text="A R T",
++            language="en-US",
++            pronunciation_overrides=(PronunciationSpan(2, 5, phonemes="ɑːɹ tiː"),),
++            say_as=(SayAsSpan(0, 5, "characters"),),
++        )
++
++
+ def test_rendered_speech_accepts_pcm_full_scale_peak() -> None:
+     rendered = _validate(np.array([-1.0, 0.0, 1.0], dtype=np.float32))
+
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index 68e1c1c..d403c38 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -167,6 +167,7 @@ def _fake_package(package: str) -> ModuleType:
+         "PronunciationOverride",
+         "VoiceLevelConfig",
+         "SynthesisInputTooLongError",
++        "SayAsSpan",
+         "KokoroSynthesizer",
+         "ShortSentenceConfig",
+         "ReferenceVoice",
+@@ -303,10 +304,14 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+             caller_owns_text_boundaries=False,
+         )
+     elif engine == "kokoro":
++        fake.REQUEST_API_VERSION = 2
+         fake.request_api_contract = lambda: SimpleNamespace(
++            version=2,
+             supports_request_measurement=True,
+             supports_reference_voice=True,
+             supports_voice_enrollment=True,
++            supports_say_as=True,
++            say_as_interpretations=("characters",),
+         )
+     original = importlib.import_module
+     calls: list[str] = []
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 6727cee..7cbf13e 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -19,15 +19,18 @@ from voicerender.engines.base import (
+     PCM_RANGE_POLICY,
+     EngineSelection,
+     RenderedSpeech,
++    SayAsSpan,
+     SpeechRequest,
+     validate_rendered_speech,
+ )
+ from voicerender.engines.kokoro import (
++    PYKOKORO_REQUEST_API_VERSION,
+     PYKOKORO_REQUIRED,
+     PyKokoroEngineAdapter,
+     _normalize_short_sentence,
+     _normalize_voice_level,
+     _pykokoro_discovery,
++    _pykokoro_request,
+     _target_from_capabilities,
+     _translate_pykokoro_error,
+     _version_supported,
+@@ -38,9 +41,9 @@ from voicerender.models import ModelDiscoveryError
+ from voicerender.voice_sources import local_reference_source
+
+
+-def test_pykokoro_minimum_version_is_0106() -> None:
+-    assert not _version_supported("0.10.5")
+-    assert _version_supported("0.10.6")
++def test_pykokoro_minimum_version_is_0107() -> None:
++    assert not _version_supported("0.10.6")
++    assert _version_supported("0.10.7")
+     assert _version_supported("0.10.10")
+     assert not _version_supported("0.11.0")
+
+@@ -120,13 +123,17 @@ def _install(
+         "closed": 0,
+     }
+     module = ModuleType("pykokoro")
+-    module.__version__ = "0.10.5"
++    module.__version__ = "0.10.7"
+     module.__file__ = "/fake/pykokoro/__init__.py"
+
+     class FakeSynthesisRequest:
+         def __init__(self, **values: Any) -> None:
+             self.__dict__.update(values)
+
++    class FakeSayAsSpan:
++        def __init__(self, **values: Any) -> None:
++            self.__dict__.update(values)
++
+     class FakeConfig:
+         def __init__(self, **values: Any) -> None:
+             self.__dict__.update(values)
+@@ -193,6 +200,7 @@ def _install(
+             state["closed"] += 1
+
+     module.SynthesisRequest = FakeSynthesisRequest
++    module.SayAsSpan = FakeSayAsSpan
+     module.GenerationConfig = FakeConfig
+     module.TokenizerConfig = FakeConfig
+     module.ShortSentenceConfig = FakeConfig
+@@ -204,6 +212,94 @@ def _install(
+     return PyKokoroEngineAdapter(), state
+
+
++def _api_probe_module(
++    *, api_version: int = 2, supports_say_as: bool = True
++) -> ModuleType:
++    module = ModuleType("pykokoro")
++    module.__version__ = "0.10.7"
++    module.__file__ = "/fake/pykokoro/__init__.py"
++
++    class FakeSynthesizer:
++        pass
++
++    for method in ("prepare", "measure_request", "enroll_voice", "synthesize", "close"):
++        setattr(FakeSynthesizer, method, lambda *args, **kwargs: None)
++    module.KokoroSynthesizer = FakeSynthesizer
++    for name in (
++        "SynthesisConfig",
++        "SynthesisRequest",
++        "PronunciationOverride",
++        "LinguisticToken",
++        "VoiceLevelConfig",
++        "SynthesisInputTooLongError",
++        "ShortSentenceConfig",
++        "RequestMeasure",
++        "ReferenceVoice",
++        "KokoroVoicePack",
++        "InnoEnrollmentOptions",
++        "SayAsSpan",
++    ):
++        setattr(module, name, type(name, (), {}))
++    module.REQUEST_API_VERSION = api_version
++    module.request_api_contract = lambda: SimpleNamespace(
++        supports_request_measurement=True,
++        supports_reference_voice=True,
++        supports_voice_enrollment=True,
++        supports_say_as=supports_say_as,
++        say_as_interpretations=("characters",),
++    )
++    return module
++
++
++def test_kokoro_probe_requires_request_api_v2_and_say_as_capability(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    old_api = _api_probe_module(api_version=1)
++    monkeypatch.setitem(sys.modules, "pykokoro", old_api)
++    old_probe = PyKokoroEngineAdapter().probe_api()
++    assert not old_probe.compatible
++    assert old_probe.expected_api_version == PYKOKORO_REQUEST_API_VERSION == 2
++    assert old_probe.api_version == 1
++
++    no_say_as = _api_probe_module(supports_say_as=False)
++    monkeypatch.setitem(sys.modules, "pykokoro", no_say_as)
++    missing_capability = PyKokoroEngineAdapter().probe_api()
++    assert not missing_capability.compatible
++    assert (
++        missing_capability.details["capability_mismatches"]["supports_say_as"]["actual"]
++        is False
++    )
++
++
++def test_pykokoro_request_forwards_say_as_without_changing_text(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, _ = _install(monkeypatch, _model())
++    del adapter
++    module = sys.modules["pykokoro"]
++    text = "Because someone called A R T finally."
++    start = text.index("A R T")
++    request = SpeechRequest(
++        id="say-as-request",
++        text=text,
++        language="en-US",
++        say_as=(SayAsSpan(start, start + len("A R T"), "characters"),),
++    )
++
++    native = _pykokoro_request(request, module)
++
++    assert native.text == text
++    assert len(native.say_as) == 1
++    forwarded = native.say_as[0]
++    assert (forwarded.start, forwarded.end, forwarded.interpret_as) == (
++        start,
++        start + len("A R T"),
++        "characters",
++    )
++    assert native.text[forwarded.start : forwarded.end] == "A R T"
++    assert "A- R- T" not in native.text
++
++
+ def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> None:
+     static = _target_from_capabilities(
+         SimpleNamespace(
+@@ -690,6 +786,9 @@ def test_kokoro_shorthand_and_equivalent_tables_share_synthesis_identity() -> No
+         == adapter.canonical_synthesis_identity(tables)["options"]
+     )
+
++    assert adapter.capabilities().supports_say_as is True
++    assert adapter.capabilities().say_as_interpretations == frozenset({"characters"})
++
+
+ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
+     monkeypatch: pytest.MonkeyPatch,
+@@ -1181,12 +1280,14 @@ def test_real_pykokoro_public_api_contract_smoke_without_runtime_load() -> None:
+     probe = adapter.probe_api()
+     contract = pykokoro.request_api_contract()
+
+-    assert pykokoro.REQUEST_API_VERSION == 1
++    assert pykokoro.REQUEST_API_VERSION == 2
+     assert probe.compatible, probe
+-    assert probe.api_version == 1
++    assert probe.api_version == 2
+     assert contract.supports_request_measurement is True
+     assert contract.supports_reference_voice is True
+     assert contract.supports_voice_enrollment is True
++    assert contract.supports_say_as is True
++    assert "characters" in contract.say_as_interpretations
+
+
+ class BackendError(Exception):
+diff --git a/tests/test_renderplan_input.py b/tests/test_renderplan_input.py
+index 21b391f..8ec6cf6 100644
+--- a/tests/test_renderplan_input.py
++++ b/tests/test_renderplan_input.py
+@@ -3,12 +3,14 @@ from __future__ import annotations
+ import sys
+ from collections.abc import Iterator
+ from contextlib import contextmanager
++from pathlib import Path
+ from types import ModuleType, SimpleNamespace
+ from typing import Any
+
+ import pytest
+ from renderplan import (
+     CapacityConstraint,
++    RenderPlan,
+     SourceSpan,
+     SpeechControl,
+     SpeechItem,
+@@ -24,6 +26,7 @@ from voicerender.engines.base import (
+     PronunciationSpan,
+     RenderProfileFragment,
+     RequestMeasure,
++    SayAsSpan,
+     SpeechRequest,
+     SpeechToken,
+ )
+@@ -52,6 +55,7 @@ from voicerender.errors import (
+     SpeechRequestTooLongError,
+     UnsupportedSynthesisFeatureError,
+ )
++from voicerender.preflight import preflight_render_plan
+ from voicerender.renderplan_input import (
+     PreflightDisposition,
+     classify_measurement,
+@@ -71,6 +75,8 @@ class _Adapter:
+         self.supports_tokens = True
+         self.native_semantics: frozenset[str] = frozenset()
+         self.pronunciation = True
++        self.supports_say_as = False
++        self.say_as_interpretations: frozenset[str] = frozenset()
+         self.lowered_controls: list[SpeechControl] = []
+
+     def probe_api(self) -> EngineApiProbe:
+@@ -89,6 +95,8 @@ class _Adapter:
+             id=self.id,
+             supports_pronunciation_overrides=self.pronunciation,
+             pronunciation_alphabets=frozenset({"ipa"}),
++            supports_say_as=self.supports_say_as,
++            say_as_interpretations=self.say_as_interpretations,
+             supports_linguistic_tokens=self.supports_tokens,
+             native_semantics=self.native_semantics,
+         )
+@@ -647,6 +655,134 @@ def test_emphasis_without_downstream_policy_and_unknown_controls_fail_closed(
+         speech_request_from_renderplan(extension, emphasis_policy="defer-to-compose")
+
+
++def test_unsupported_say_as_characters_is_rejected_during_preflight(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    adapter.required_fields = ()
++    item = _item(
++        text="A R T",
++        controls=(SpeechControl(0, 5, "say_as", {"interpret_as": "characters"}),),
++    )
++    plan = RenderPlan(
++        source_plan_id="sha256:" + "1" * 64,
++        render_profile_id="sha256:" + "2" * 64,
++        flow=(item,),
++    ).with_identity()
++
++    report = preflight_render_plan(plan, tmp_path / "say-as-preflight.toml")
++
++    assert report.status == "reject"
++    assert len(report.checks) == 1
++    check = report.checks[0]
++    assert check.status == "error"
++    assert check.detail is not None
++    assert "does not support say_as='characters'" in check.detail
++    assert not adapter.lowered_controls
++
++
++def test_say_as_control_lowers_to_typed_span_without_changing_text(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = _install(monkeypatch)
++    adapter.required_fields = ()
++    adapter.supports_say_as = True
++    adapter.say_as_interpretations = frozenset({"characters"})
++    text = "Because someone called A R T finally."
++    start = text.index("A R T")
++    item = _item(
++        text=text,
++        controls=(
++            SpeechControl(
++                start=start,
++                end=start + len("A R T"),
++                name="say_as",
++                params={"interpret_as": "characters"},
++            ),
++        ),
++    )
++
++    request = speech_request_from_renderplan(item)
++
++    assert request.text == text
++    assert request.say_as == (
++        SayAsSpan(
++            start=start,
++            end=start + len("A R T"),
++            interpret_as="characters",
++        ),
++    )
++    assert "renderplan_controls" not in request.options
++
++
++@pytest.mark.parametrize(
++    "params",
++    [
++        {},
++        {"interpret_as": "  "},
++        {"interpret_as": "characters", "format": 1},
++        {"interpret_as": "characters", "detail": None},
++        {"interpret_as": "characters", "extra": "value"},
++    ],
++)
++def test_say_as_invalid_parameters_are_rejected(
++    monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
++) -> None:
++    adapter = _install(monkeypatch)
++    adapter.required_fields = ()
++    adapter.supports_say_as = True
++    adapter.say_as_interpretations = frozenset({"characters"})
++    control = SpeechControl(0, 5, "say_as", {"interpret_as": "characters"})
++    item = _item(text="A R T", controls=(control,))
++    object.__setattr__(control, "params", params)
++
++    with pytest.raises(UnsupportedSynthesisFeatureError, match="say_as"):
++        speech_request_from_renderplan(item)
++
++
++def test_say_as_rejects_unsupported_interpretation_and_pronunciation_overlap(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = _install(monkeypatch)
++    adapter.required_fields = ()
++    adapter.supports_say_as = True
++    adapter.say_as_interpretations = frozenset({"date"})
++    item = _item(
++        text="A R T",
++        controls=(SpeechControl(0, 5, "say_as", {"interpret_as": "characters"}),),
++    )
++    with pytest.raises(
++        UnsupportedSynthesisFeatureError,
++        match="does not support say_as='characters'",
++    ):
++        speech_request_from_renderplan(item)
++
++    adapter.say_as_interpretations = frozenset({"characters"})
++    overlapping = _item(
++        text="A R T",
++        controls=(
++            SpeechControl(0, 5, "say_as", {"interpret_as": "characters"}),
++            SpeechControl(2, 5, "pronunciation", {"phonemes": "ɑːɹ tiː"}),
++        ),
++    )
++    with pytest.raises(
++        UnsupportedSynthesisFeatureError,
++        match="cannot overlap pronunciation",
++    ):
++        speech_request_from_renderplan(overlapping)
++
++
++def test_speech_request_rejects_say_as_with_whole_request_phonemes() -> None:
++    with pytest.raises(ValueError, match="whole-request phonemes"):
++        SpeechRequest(
++            id="request-1",
++            text="A R T",
++            language="en-US",
++            whole_request_phonemes="ɑːɹ tiː",
++            say_as=(SayAsSpan(0, 5, "characters"),),
++        )
++
++
+ @pytest.mark.parametrize(
+     "params",
+     [
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index 23e414f..2951a93 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -60,6 +60,7 @@ from .engines.base import (
+     RenderedSpeech,
+     RenderProfileFragment,
+     RequestMeasure,
++    SayAsSpan,
+     SpeechRequest,
+     SpeechToken,
+     SpeechWordTiming,
+@@ -267,6 +268,7 @@ __all__ = [
+     "RoleVoiceIdentity",
+     "RuntimeControlError",
+     "RuntimeDistribution",
++    "SayAsSpan",
+     "SpeechItem",
+     "SpeechRequest",
+     "SpeechSegment",
+diff --git a/voicerender/audio_boundaries.py b/voicerender/audio_boundaries.py
+index 2e95a2a..e5680e9 100644
+--- a/voicerender/audio_boundaries.py
++++ b/voicerender/audio_boundaries.py
+@@ -2,14 +2,20 @@
+
+ from __future__ import annotations
+
++from collections.abc import Callable
+ from dataclasses import dataclass, replace
+-from typing import Any
++from importlib import import_module
++from typing import Any, cast
+
+ import numpy as np
+-from audiosig import trim_trail
+
+ from .engines.base import SpeechWordTiming
+
++trim_trail = cast(
++    Callable[..., np.ndarray],
++    vars(import_module("audiosig.boundaries"))["trim_trail"],
++)
++
+ BOUNDARY_POLICY_ID = "voicerender.trailing-silence.v1"
+
+
+diff --git a/voicerender/capacity.py b/voicerender/capacity.py
+index fc6ce09..a8c36da 100644
+--- a/voicerender/capacity.py
++++ b/voicerender/capacity.py
+@@ -12,6 +12,7 @@ from .engines.base import (
+     PronunciationSpan,
+     RenderedSpeech,
+     RequestMeasure,
++    SayAsSpan,
+     SpeechRequest,
+     SpeechToken,
+     SpeechWordTiming,
+@@ -92,6 +93,7 @@ class AtomicRequest:
+                     "voice": request.voice,
+                     "speaker": request.speaker,
+                     "pronunciation_overrides": request.pronunciation_overrides,
++                    "say_as": request.say_as,
+                     "tokens": request.tokens,
+                     "whole_request_phonemes": request.whole_request_phonemes,
+                     "options": request.options,
+@@ -289,6 +291,7 @@ def _collect_protected_ranges(
+ ) -> tuple[tuple[int, int], ...]:
+     ranges = [(token.start, token.end) for token in request.tokens]
+     ranges.extend((span.start, span.end) for span in request.pronunciation_overrides)
++    ranges.extend((span.start, span.end) for span in request.say_as)
+     ranges.extend(extra)
+     for start, end in ranges:
+         if start < 0 or start >= end or end > len(request.text):
+@@ -329,6 +332,20 @@ def _slice_request(request: SpeechRequest, start: int, end: int) -> SpeechReques
+         for span in request.pronunciation_overrides
+         if span.start >= start and span.end <= end
+     )
++    say_as: list[SayAsSpan] = []
++    for span in request.say_as:
++        if span.start >= start and span.end <= end:
++            say_as.append(
++                SayAsSpan(
++                    start=span.start - start,
++                    end=span.end - start,
++                    interpret_as=span.interpret_as,
++                    format=span.format,
++                    detail=span.detail,
++                )
++            )
++        elif span.start < end and span.end > start:
++            raise ValueError("capacity child partially overlaps a say_as span")
+     return SpeechRequest(
+         id=child_id,
+         text=text,
+@@ -336,6 +353,7 @@ def _slice_request(request: SpeechRequest, start: int, end: int) -> SpeechReques
+         voice=request.voice,
+         speaker=request.speaker,
+         pronunciation_overrides=overrides,
++        say_as=tuple(say_as),
+         tokens=tokens,
+         whole_request_phonemes=request.whole_request_phonemes,
+         options=dict(request.options),
+diff --git a/voicerender/engines/base.py b/voicerender/engines/base.py
+index 743257f..244fb71 100644
+--- a/voicerender/engines/base.py
++++ b/voicerender/engines/base.py
+@@ -132,6 +132,33 @@ class PronunciationSpan:
+     alphabet: str | None = None
+
+
++@dataclass(frozen=True, slots=True)
++class SayAsSpan:
++    """Portable request-local text-interpretation semantics."""
++
++    start: int
++    end: int
++    interpret_as: str
++    format: str | None = None
++    detail: str | None = None
++
++    def __post_init__(self) -> None:
++        if isinstance(self.start, bool) or not isinstance(self.start, int):
++            raise TypeError("SayAsSpan start must be an integer")
++        if isinstance(self.end, bool) or not isinstance(self.end, int):
++            raise TypeError("SayAsSpan end must be an integer")
++        if self.start < 0 or self.end <= self.start:
++            raise ValueError("SayAsSpan must have a non-empty, non-negative range")
++        if not isinstance(self.interpret_as, str):
++            raise TypeError("SayAsSpan interpret_as must be a string")
++        if not self.interpret_as.strip():
++            raise ValueError("SayAsSpan interpret_as must be non-empty")
++        if self.format is not None and not isinstance(self.format, str):
++            raise TypeError("SayAsSpan format must be a string or None")
++        if self.detail is not None and not isinstance(self.detail, str):
++            raise TypeError("SayAsSpan detail must be a string or None")
++
++
+ @dataclass(frozen=True, slots=True)
+ class SpeechRequest:
+     """Prepared text and optional linguistic context for one engine synthesis."""
+@@ -142,10 +169,25 @@ class SpeechRequest:
+     voice: str | None = None
+     speaker: str | int | None = None
+     pronunciation_overrides: tuple[PronunciationSpan, ...] = ()
++    say_as: tuple[SayAsSpan, ...] = ()
+     tokens: tuple[SpeechToken, ...] = ()
+     whole_request_phonemes: str | None = None
+     options: Mapping[str, Any] = field(default_factory=dict)
+
++    def __post_init__(self) -> None:
++        if self.whole_request_phonemes is not None and self.say_as:
++            raise ValueError(
++                "SpeechRequest cannot combine whole-request phonemes with say_as spans"
++            )
++        if any(
++            max(say_as.start, override.start) < min(say_as.end, override.end)
++            for say_as in self.say_as
++            for override in self.pronunciation_overrides
++        ):
++            raise ValueError(
++                "SpeechRequest cannot overlap say_as and pronunciation spans"
++            )
++
+
+ @dataclass(frozen=True, slots=True)
+ class SpeechWordTiming:
+@@ -195,6 +237,8 @@ class EngineCapabilities:
+     supports_speakers: bool = False
+     supports_pronunciation_overrides: bool = False
+     pronunciation_alphabets: frozenset[str] = frozenset()
++    supports_say_as: bool = False
++    say_as_interpretations: frozenset[str] = frozenset()
+     supports_linguistic_tokens: bool = False
+     supports_whole_request_phonemes: bool = False
+     supports_lexicons: bool = False
+@@ -523,6 +567,7 @@ __all__ = [
+     "RenderProfileFragment",
+     "RenderedSpeech",
+     "RequestMeasure",
++    "SayAsSpan",
+     "SpeechRequest",
+     "SpeechToken",
+     "SpeechWordTiming",
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index 1c1f140..71508d3 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -36,7 +36,7 @@ from ..voice_sources import (
+     validate_voice_source,
+     voice_source_identity,
+ )
+-from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
++from .api_probe import EngineApiProbe, probe_public_api
+ from .base import (
+     PCM_RANGE_POLICY,
+     EngineCapabilities,
+@@ -46,6 +46,7 @@ from .base import (
+     RenderedSpeech,
+     RenderProfileFragment,
+     RequestMeasure,
++    SayAsSpan,
+     SpeechRequest,
+     SpeechToken,
+     SpeechWordTiming,
+@@ -62,7 +63,8 @@ from .registry import normalize_engine_id
+ logger = logging.getLogger(__name__)
+
+
+-PYKOKORO_REQUIRED = ">=0.10.6,<0.11"
++PYKOKORO_REQUIRED = ">=0.10.7,<0.11"
++PYKOKORO_REQUEST_API_VERSION = 2
+ _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
+
+
+@@ -82,7 +84,7 @@ def _version_supported(version: str) -> bool:
+         return False
+     major, minor = int(match.group(1)), int(match.group(2))
+     patch = int(match.group(3) or 0)
+-    return (major, minor, patch) >= (0, 10, 6) and (major, minor) == (0, 10)
++    return (major, minor, patch) >= (0, 10, 7) and (major, minor) == (0, 10)
+
+
+ def _package_metadata() -> str | None:
+@@ -774,6 +776,7 @@ def _pykokoro_request(
+             _pykokoro_override(item, module) for item in request.pronunciation_overrides
+         ),
+         tokens=tuple(_pykokoro_token(item, module) for item in request.tokens),
++        say_as=tuple(_pykokoro_say_as(item, module) for item in request.say_as),
+         phonemes=request.whole_request_phonemes,
+     )
+
+@@ -977,6 +980,16 @@ def _pykokoro_override(item: PronunciationSpan, module: Any) -> Any:
+     )
+
+
++def _pykokoro_say_as(item: SayAsSpan, module: Any) -> Any:
++    return module.SayAsSpan(
++        start=item.start,
++        end=item.end,
++        interpret_as=item.interpret_as,
++        format=item.format,
++        detail=item.detail,
++    )
++
++
+ def _pykokoro_token(item: SpeechToken, module: Any) -> Any:
+     return module.LinguisticToken(
+         start=item.start,
+@@ -1008,6 +1021,7 @@ class PyKokoroEngineAdapter:
+                 "SynthesisConfig",
+                 "SynthesisRequest",
+                 "PronunciationOverride",
++                "SayAsSpan",
+                 "LinguisticToken",
+                 "VoiceLevelConfig",
+                 "SynthesisInputTooLongError",
+@@ -1026,7 +1040,7 @@ class PyKokoroEngineAdapter:
+                     "close",
+                 ),
+             },
+-            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
++            expected_api_version=PYKOKORO_REQUEST_API_VERSION,
+             require_explicit_contract=True,
+             contract_required_symbols=("REQUEST_API_VERSION", "request_api_contract"),
+             contract_required_methods={
+@@ -1043,6 +1057,7 @@ class PyKokoroEngineAdapter:
+                 "supports_request_measurement": True,
+                 "supports_reference_voice": True,
+                 "supports_voice_enrollment": True,
++                "supports_say_as": True,
+             }
+             actual = {
+                 name: (
+@@ -1057,6 +1072,19 @@ class PyKokoroEngineAdapter:
+                 for name, expected in required.items()
+                 if actual[name] is not expected
+             }
++            say_as_interpretations = (
++                contract.get("say_as_interpretations")
++                if isinstance(contract, Mapping)
++                else getattr(contract, "say_as_interpretations", None)
++            )
++            if (
++                not isinstance(say_as_interpretations, (tuple, list))
++                or "characters" not in say_as_interpretations
++            ):
++                mismatches["say_as_interpretations"] = {
++                    "expected": ["characters"],
++                    "actual": say_as_interpretations,
++                }
+         except Exception as exc:  # noqa: BLE001 - API probes must fail closed.
+             return replace(
+                 probe,
+@@ -1211,6 +1239,8 @@ class PyKokoroEngineAdapter:
+             supports_named_voices=True,
+             supports_reference_voice=True,
+             supports_pronunciation_overrides=True,
++            supports_say_as=True,
++            say_as_interpretations=frozenset({"characters"}),
+             pronunciation_alphabets=frozenset({"ipa"}),
+             supports_linguistic_tokens=True,
+             supports_whole_request_phonemes=True,
+diff --git a/voicerender/engines/registry.py b/voicerender/engines/registry.py
+index c7cef8f..d8302d3 100644
+--- a/voicerender/engines/registry.py
++++ b/voicerender/engines/registry.py
+@@ -361,6 +361,7 @@ def synthesize(
+             "pronunciation_overrides": [
+                 asdict(item) for item in request.pronunciation_overrides
+             ],
++            "say_as": [asdict(item) for item in request.say_as],
+             "tokens": [asdict(item) for item in request.tokens],
+             "whole_request_phonemes": request.whole_request_phonemes,
+         }
+diff --git a/voicerender/renderplan_input.py b/voicerender/renderplan_input.py
+index 2111e14..fb5797b 100644
+--- a/voicerender/renderplan_input.py
++++ b/voicerender/renderplan_input.py
+@@ -15,6 +15,7 @@ from .engines.base import (
+     PronunciationSpan,
+     RenderProfileFragment,
+     RequestMeasure,
++    SayAsSpan,
+     SpeechRequest,
+     SpeechToken,
+ )
+@@ -56,6 +57,16 @@ class EmphasisPolicy(str, Enum):
+     DEFER_TO_COMPOSE = "defer-to-compose"
+
+
++@dataclass(frozen=True, slots=True)
++class LoweredControls:
++    """Structured results from lowering all RenderPlan speech controls."""
++
++    pronunciation_overrides: tuple[PronunciationSpan, ...] = ()
++    say_as: tuple[SayAsSpan, ...] = ()
++    native_options: tuple[Mapping[str, Any], ...] = ()
++    deferred_emphasis_count: int = 0
++
++
+ @dataclass(frozen=True, slots=True)
+ class SpeechRequestConversion:
+     """Native speech request plus a trace of controls deferred downstream."""
+@@ -207,28 +218,27 @@ def speech_request_conversion_from_renderplan(
+             f"Engine {adapter.id!r} returned an invalid RenderProfile fragment"
+         )
+     tokens = _tokens_for_engine(item, adapter=adapter, fragment=fragment)
+-    overrides, control_options, deferred_count = _lower_controls(
+-        item, adapter, selection, emphasis_policy=policy
+-    )
++    lowered = _lower_controls(item, adapter, selection, emphasis_policy=policy)
+     options = dict(selection.options)
+-    if control_options:
+-        options["renderplan_controls"] = control_options
++    if lowered.native_options:
++        options["renderplan_controls"] = lowered.native_options
+     request = SpeechRequest(
+         id=item.segment_id or item.computed_id(),
+         text=item.text,
+         language=item.language,
+         voice=selection.voice,
+         speaker=selection.speaker,
+-        pronunciation_overrides=overrides,
++        pronunciation_overrides=lowered.pronunciation_overrides,
++        say_as=lowered.say_as,
+         tokens=tokens,
+         options=options,
+     )
+     return SpeechRequestConversion(
+         request=request,
+         deferred_capability=(
+-            EMPHASIS_COMPOSITION_CAPABILITY if deferred_count else None
++            EMPHASIS_COMPOSITION_CAPABILITY if lowered.deferred_emphasis_count else None
+         ),
+-        deferred_control_count=deferred_count,
++        deferred_control_count=lowered.deferred_emphasis_count,
+     )
+
+
+@@ -364,15 +374,15 @@ def classify_measurement(
+         return MeasurementOutcome(
+             PreflightDisposition.TOO_LONG, measurement=measurement
+         )
+-    source = getattr(value, "source", None)
+-    if isinstance(source, str) and source.strip():
++    unknown_source = getattr(value, "source", None)
++    if isinstance(unknown_source, str) and unknown_source.strip():
+         details = getattr(value, "details", {})
+         measurement = RequestMeasure(
+             fits=None,
+             amount=None,
+             maximum=None,
+             unit="unknown",
+-            source=source,
++            source=unknown_source,
+             details=dict(details) if isinstance(details, Mapping) else {},
+         )
+         return MeasurementOutcome(
+@@ -516,9 +526,10 @@ def _lower_controls(
+     selection: EngineSelection,
+     *,
+     emphasis_policy: EmphasisPolicy,
+-) -> tuple[tuple[PronunciationSpan, ...], tuple[Mapping[str, Any], ...], int]:
++) -> LoweredControls:
+     capabilities = adapter.capabilities()
+     overrides: list[PronunciationSpan] = []
++    say_as: list[SayAsSpan] = []
+     lowered: list[Mapping[str, Any]] = []
+     deferred_emphasis_count = 0
+     for control in item.controls:
+@@ -568,6 +579,51 @@ def _lower_controls(
+             )
+             continue
+
++        if control.name == "say_as":
++            params = control.params
++            if not isinstance(params, Mapping):
++                raise UnsupportedSynthesisFeatureError(
++                    "say_as control parameters must be a table"
++                )
++            unknown = set(params).difference({"interpret_as", "format", "detail"})
++            if unknown:
++                raise UnsupportedSynthesisFeatureError(
++                    "Unsupported say_as control parameter(s): "
++                    + ", ".join(sorted(str(name) for name in unknown))
++                )
++            interpret_as = params.get("interpret_as")
++            if not isinstance(interpret_as, str) or not interpret_as.strip():
++                raise UnsupportedSynthesisFeatureError(
++                    "say_as control requires non-empty interpret_as"
++                )
++            format_value = params.get("format")
++            detail_value = params.get("detail")
++            if "format" in params and not isinstance(format_value, str):
++                raise UnsupportedSynthesisFeatureError(
++                    "say_as format must be a string when present"
++                )
++            if "detail" in params and not isinstance(detail_value, str):
++                raise UnsupportedSynthesisFeatureError(
++                    "say_as detail must be a string when present"
++                )
++            if (
++                not capabilities.supports_say_as
++                or interpret_as not in capabilities.say_as_interpretations
++            ):
++                raise UnsupportedSynthesisFeatureError(
++                    f"Engine {adapter.id!r} does not support say_as={interpret_as!r}"
++                )
++            say_as.append(
++                SayAsSpan(
++                    start=control.start,
++                    end=control.end,
++                    interpret_as=interpret_as,
++                    format=format_value,
++                    detail=detail_value,
++                )
++            )
++            continue
++
+         if control.name == "emphasis":
+             if emphasis_policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
+                 raise UnsupportedSynthesisFeatureError(
+@@ -612,7 +668,22 @@ def _lower_controls(
+                 "options": dict(lowered_options["options"]),
+             }
+         )
+-    return tuple(overrides), tuple(lowered), deferred_emphasis_count
++
++    if any(
++        max(say_span.start, pronunciation.start) < min(say_span.end, pronunciation.end)
++        for say_span in say_as
++        for pronunciation in overrides
++    ):
++        raise UnsupportedSynthesisFeatureError(
++            "say_as spans cannot overlap pronunciation controls"
++        )
++
++    return LoweredControls(
++        pronunciation_overrides=tuple(overrides),
++        say_as=tuple(say_as),
++        native_options=tuple(lowered),
++        deferred_emphasis_count=deferred_emphasis_count,
++    )
+
+
+ def _validate_control_range(item: SpeechItem, control: SpeechControl) -> None:

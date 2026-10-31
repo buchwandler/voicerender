@@ -1,0 +1,95 @@
+ tests/test_kokoro_reference.py  | 8 +++++---
+ tests/test_preflight.py         | 4 +++-
+ tests/test_profile_roles_cli.py | 7 ++++++-
+ tests/test_renderprofile.py     | 1 +
+ voicerender/cli.py              | 7 ++++++-
+ 5 files changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 60b3ef2..ac0ec66 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -346,15 +346,17 @@ def test_measurement_request_validation_error_preserves_source(
+         pass
+
+     state["measure_error"] = InvalidRequestError("invalid say_as request")
+-    with adapter.open(selection) as session, pytest.raises(
+-        InvalidSpeechRequestError
+-    ) as caught:
++    with (
++        adapter.open(selection) as session,
++        pytest.raises(InvalidSpeechRequestError) as caught,
++    ):
+         session.measure(
+             SpeechRequest(id="invalid-measurement", text="A R T", language="en-US")
+         )
+
+     assert getattr(caught.value, "source", None) == "pykokoro.measure_request"
+
++
+ def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> None:
+     static = _target_from_capabilities(
+         SimpleNamespace(
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 0552116..3e5cfb1 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -1024,7 +1024,9 @@ def test_preflight_failure_message_identifies_single_affected_speech_item() -> N
+     assert "Because someone (A R T) finally." not in summary
+
+
+-def test_preflight_failure_message_without_segment_metadata_keeps_compact_cause() -> None:
++def test_preflight_failure_message_without_segment_metadata_keeps_compact_cause() -> (
++    None
++):
+     from voicerender.preflight import preflight_failure_message
+
+     report = SimpleNamespace(
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 4f85021..e523e90 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -466,7 +466,12 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
+         profile,
+         pauses=PausePolicy(
+             mode="manual",
+-            durations_ms={"clause": 180, "parenthetical": 180, "sentence": 500, "paragraph": 800},
++            durations_ms={
++                "clause": 180,
++                "parenthetical": 180,
++                "sentence": 500,
++                "paragraph": 800,
++            },
+         ),
+         profile_id=None,
+     ).with_identity()
+diff --git a/tests/test_renderprofile.py b/tests/test_renderprofile.py
+index 9d8950c..6563754 100644
+--- a/tests/test_renderprofile.py
++++ b/tests/test_renderprofile.py
+@@ -192,6 +192,7 @@ def test_new_profiles_default_to_parenthetical_pause(
+         },
+     )
+
++
+ def test_refresh_updates_only_engine_facts_and_preserves_user_policy(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 6b474e5..dd44fed 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -3006,7 +3006,12 @@ def main(argv: list[str] | None = None) -> int:
+                     print("Pauses")
+                     print(f"  mode: {pause_mode}")
+                     if pause_mode == "manual":
+-                        for boundary in ("clause", "parenthetical", "sentence", "paragraph"):
++                        for boundary in (
++                            "clause",
++                            "parenthetical",
++                            "sentence",
++                            "paragraph",
++                        ):
+                             if boundary in pauses:
+                                 print(f"  {boundary}: {pauses[boundary]}")
+                         print("  speech artifact tails: trimmed")

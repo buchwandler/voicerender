@@ -1,0 +1,164 @@
+ docs/renderprofile.md           |  2 +-
+ pyproject.toml                  |  4 ++--
+ tests/test_profile_roles_cli.py |  3 ++-
+ tests/test_renderprofile.py     | 37 ++++++++++++++++++++++++++++++++++++-
+ voicerender/cli.py              |  2 +-
+ voicerender/renderprofile.py    | 17 ++++++++++++-----
+ 6 files changed, 54 insertions(+), 11 deletions(-)
+
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 522caba..28f31db 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -148,7 +148,7 @@ Kitten remains on its historical eSpeak-only path when no lexicon sources are co
+
+ VoiceRender applies engine-neutral, trailing-only silence normalization before persisting synthesized speech WAVs or cache entries. Leading samples are preserved, and an all-silent waveform remains unchanged. This produces speech-tight artifacts; normalization does not trim leading samples and does not insert profile pauses.
+
+-`PausePolicy(mode = "manual")` records clause, sentence, and paragraph durations for downstream composition after speech-tail normalization. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports the mode and manual durations, then states that policy pauses are composed after normalized speech or not inserted.
++`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for downstream composition after speech-tail normalization. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports the mode and manual durations, then states that policy pauses are composed after normalized speech or not inserted.
+
+ The boundary policy is part of cache and render identity. Existing output with a missing or different policy is stale and is not silently reused; RenderPlan rendering reports `output.stale_audio_policy` unless the caller re-renders with `--force` or resets it with `--reset-stale`.
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 3d9af92..6ad8a4d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -17,8 +17,8 @@ dependencies = [
+   "soundfile>=0.12",
+   "tomlkit>=0.13",
+   "tomli>=2; python_version < '3.11'",
+-  "renderplan>=0.1.3,<0.2",
+-  "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d",
++  "renderplan>=0.2.1,<0.3",
++  "voicefolio>=0.1.1,<0.2",
+   "onnxvoice>=0.2.14,<0.3",
+ ]
+
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 1b642fa..4f85021 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -466,7 +466,7 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
+         profile,
+         pauses=PausePolicy(
+             mode="manual",
+-            durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
++            durations_ms={"clause": 180, "parenthetical": 180, "sentence": 500, "paragraph": 800},
+         ),
+         profile_id=None,
+     ).with_identity()
+@@ -478,5 +478,6 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
+     assert "  clause: 180" in output
+     assert "  sentence: 500" in output
+     assert "  paragraph: 800" in output
++    assert "  parenthetical: 180" in output
+     assert "speech artifact tails: trimmed" in output
+     assert "configured pause is inserted after normalized speech" in output
+diff --git a/tests/test_renderprofile.py b/tests/test_renderprofile.py
+index 8828c99..9d8950c 100644
+--- a/tests/test_renderprofile.py
++++ b/tests/test_renderprofile.py
+@@ -109,6 +109,11 @@ class _ProfileAdapter:
+         yield object()
+
+
++class _KokoroProfileAdapter(_ProfileAdapter):
++    id = "kokoro"
++    package_name = "kokoro"
++
++
+ def _install(monkeypatch: pytest.MonkeyPatch) -> _ProfileAdapter:
+     adapter = _ProfileAdapter()
+     monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
+@@ -148,7 +153,12 @@ def test_profile_create_uses_adapter_facts_and_shared_codec(
+     )
+     assert profile.pauses == PausePolicy(
+         mode="manual",
+-        durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
++        durations_ms={
++            "clause": 180,
++            "parenthetical": 180,
++            "sentence": 500,
++            "paragraph": 800,
++        },
+     )
+
+     path = tmp_path / "profile.renderprofile.toml"
+@@ -157,6 +167,31 @@ def test_profile_create_uses_adapter_facts_and_shared_codec(
+     assert validate_render_profile(path) == profile
+
+
++@pytest.mark.parametrize("engine", ("kokoro", "pykokoro"))
++def test_new_profiles_default_to_parenthetical_pause(
++    monkeypatch: pytest.MonkeyPatch,
++    engine: str,
++) -> None:
++    adapter = _KokoroProfileAdapter()
++    monkeypatch.setitem(_ADAPTERS, adapter.id, adapter)
++
++    profile = create_render_profile(
++        engine=engine,
++        target_id="target-v1",
++        language="en-US",
++        voice="voice-a",
++    )
++
++    assert profile.pauses == PausePolicy(
++        mode="manual",
++        durations_ms={
++            "clause": 180,
++            "parenthetical": 180,
++            "sentence": 500,
++            "paragraph": 800,
++        },
++    )
++
+ def test_refresh_updates_only_engine_facts_and_preserves_user_policy(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 79b83fc..6b474e5 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -3006,7 +3006,7 @@ def main(argv: list[str] | None = None) -> int:
+                     print("Pauses")
+                     print(f"  mode: {pause_mode}")
+                     if pause_mode == "manual":
+-                        for boundary in ("clause", "sentence", "paragraph"):
++                        for boundary in ("clause", "parenthetical", "sentence", "paragraph"):
+                             if boundary in pauses:
+                                 print(f"  {boundary}: {pauses[boundary]}")
+                         print("  speech artifact tails: trimmed")
+diff --git a/voicerender/renderprofile.py b/voicerender/renderprofile.py
+index 8b40631..e9024a6 100644
+--- a/voicerender/renderprofile.py
++++ b/voicerender/renderprofile.py
+@@ -36,10 +36,17 @@ from .voice_sources import (
+     validate_voice_source,
+ )
+
+-_DEFAULT_PAUSES = PausePolicy(
+-    mode="manual",
+-    durations_ms={"clause": 180, "sentence": 500, "paragraph": 800},
+-)
++
++def _default_pauses() -> PausePolicy:
++    return PausePolicy(
++        mode="manual",
++        durations_ms={
++            "clause": 180,
++            "parenthetical": 180,
++            "sentence": 500,
++            "paragraph": 800,
++        },
++    )
+
+
+ def create_render_profile(
+@@ -282,7 +289,7 @@ def create_render_profile(
+         planning=PlanningPolicy(
+             split="sentence", capacity_fallback=("clause", "token")
+         ),
+-        pauses=_DEFAULT_PAUSES,
++        pauses=_default_pauses(),
+     ).with_identity()

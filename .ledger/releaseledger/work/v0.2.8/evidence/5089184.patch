@@ -1,0 +1,331 @@
+ .github/workflows/tests.yml    |  2 +-
+ README.md                      |  2 +-
+ docs/index.md                  |  2 +-
+ pyproject.toml                 |  2 +-
+ tests/test_kokoro_reference.py | 67 ++++++++++++++++++++++++++++++++++++++----
+ tests/test_preflight.py        | 48 ++++++++++++++++++++++++++++++
+ tests/test_render_book.py      |  6 +++-
+ voicerender/engines/kokoro.py  | 14 +++++++--
+ voicerender/preflight.py       | 10 ++++++-
+ 9 files changed, 138 insertions(+), 15 deletions(-)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 81fc94b..cff44f7 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -97,7 +97,7 @@ jobs:
+         run: |
+           python -m pip install --upgrade "pip<26.2" pytest
+           python -m pip install -e . \
+-            "pykokoro==0.10.5" \
++            "pykokoro==0.10.8" \
+             "pipersynth==0.2.5" \
+             "pocketsynth[cpu]==0.2.5" \
+             "kittensynth[cpu]==0.1.4" \
+diff --git a/README.md b/README.md
+index 95be665..e75a8c6 100644
+--- a/README.md
++++ b/README.md
+@@ -134,7 +134,7 @@ On a render-time exception, `render-diagnostics.json` keeps the existing `voicer
+
+ The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
+
+-Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. Older supported versions (including 0.10.5) continue with Python exception chaining and the available metadata; the optional dependency floor remains unchanged until a diagnostics-capable release is confirmed.
++Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. The Kokoro extra requires PyKokoro 0.10.8+, which owns wrapper-aware character frontend projection. VoiceRender forwards canonical `say_as` text and source offsets unchanged—including wrapper punctuation inside an authored span—and does not trim or rewrite them.
+ The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
+
+ Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
+diff --git a/docs/index.md b/docs/index.md
+index 9df4869..22f29e6 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -65,7 +65,7 @@ An interrupted renderer's lock is reclaimed automatically only when the same-hos
+
+ Engine adapters implement the request-level protocol in `voicerender.engines.base`. Engine SDKs are imported lazily and installed through optional extras. The deterministic test suite uses fake adapters and does not download models.
+
+-RenderPlan `say_as` controls lower to typed request-local `SayAsSpan` values. Kokoro forwards those spans and the unchanged canonical text to PyKokoro, which owns character-spelling realization; adapters that do not advertise the requested interpretation reject it during preflight.
++RenderPlan `say_as` controls lower to typed request-local `SayAsSpan` values. Kokoro forwards those spans and the unchanged canonical text to PyKokoro, which owns character-spelling realization. A canonical `(A R T)` span therefore remains parenthesized at the VoiceRender boundary; PyKokoro owns the frontend projection, and VoiceRender does not trim wrapper punctuation. Adapters that do not advertise the requested interpretation reject it during preflight.
+
+ Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 964fd31..3d9af92 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -26,7 +26,7 @@ dependencies = [
+ chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.9,<0.2"]
+-kokoro = ["pykokoro>=0.10.7,<0.11"]
++kokoro = ["pykokoro>=0.10.8,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+ sopro = ["soprosynth[cpu]>=0.1.0,<0.2"]
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 7cbf13e..60b3ef2 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -36,14 +36,18 @@ from voicerender.engines.kokoro import (
+     _version_supported,
+ )
+ from voicerender.engines.selection import EngineRequest
+-from voicerender.errors import EngineBackendError, EngineSelectionError
++from voicerender.errors import (
++    EngineBackendError,
++    EngineSelectionError,
++    InvalidSpeechRequestError,
++)
+ from voicerender.models import ModelDiscoveryError
+ from voicerender.voice_sources import local_reference_source
+
+
+-def test_pykokoro_minimum_version_is_0107() -> None:
+-    assert not _version_supported("0.10.6")
+-    assert _version_supported("0.10.7")
++def test_pykokoro_minimum_version_is_0108() -> None:
++    assert not _version_supported("0.10.7")
++    assert _version_supported("0.10.8")
+     assert _version_supported("0.10.10")
+     assert not _version_supported("0.11.0")
+
+@@ -118,12 +122,13 @@ def _install(
+         "diagnostics": (),
+         "short_sentence_mode": None,
+         "measurements": [],
++        "measure_error": None,
+         "enrollments": [],
+         "syntheses": [],
+         "closed": 0,
+     }
+     module = ModuleType("pykokoro")
+-    module.__version__ = "0.10.7"
++    module.__version__ = "0.10.8"
+     module.__file__ = "/fake/pykokoro/__init__.py"
+
+     class FakeSynthesisRequest:
+@@ -151,6 +156,8 @@ def _install(
+
+         def measure_request(self, request: Any, *, maximum: int | None = None) -> Any:
+             state["measurements"].append((request, maximum))
++            if state["measure_error"] is not None:
++                raise state["measure_error"]
+             return SimpleNamespace(amount=9, maximum=maximum)
+
+         def enroll_voice(
+@@ -216,7 +223,7 @@ def _api_probe_module(
+     *, api_version: int = 2, supports_say_as: bool = True
+ ) -> ModuleType:
+     module = ModuleType("pykokoro")
+-    module.__version__ = "0.10.7"
++    module.__version__ = "0.10.8"
+     module.__file__ = "/fake/pykokoro/__init__.py"
+
+     class FakeSynthesizer:
+@@ -300,6 +307,54 @@ def test_pykokoro_request_forwards_say_as_without_changing_text(
+     assert "A- R- T" not in native.text
+
+
++def test_pykokoro_request_forwards_parenthesized_characters_span_unchanged(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, _ = _install(monkeypatch, _model())
++    del adapter
++    module = sys.modules["pykokoro"]
++    text = "Because someone (A R T) finally."
++    start = text.index("(A R T)")
++    end = start + len("(A R T)")
++    request = SpeechRequest(
++        id="parenthesized-say-as-request",
++        text=text,
++        language="en-US",
++        say_as=(SayAsSpan(start, end, "characters"),),
++    )
++
++    native = _pykokoro_request(request, module)
++
++    assert native.text == text
++    assert native.say_as[0].start == start
++    assert native.say_as[0].end == end
++    assert native.text[start:end] == "(A R T)"
++
++
++def test_measurement_request_validation_error_preserves_source(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, state = _install(monkeypatch, _model())
++    selection = EngineSelection(
++        engine="kokoro",
++        target_id="kokoro-test",
++        language="en-US",
++        voice="af_heart",
++    )
++
++    class InvalidRequestError(ValueError):
++        pass
++
++    state["measure_error"] = InvalidRequestError("invalid say_as request")
++    with adapter.open(selection) as session, pytest.raises(
++        InvalidSpeechRequestError
++    ) as caught:
++        session.measure(
++            SpeechRequest(id="invalid-measurement", text="A R T", language="en-US")
++        )
++
++    assert getattr(caught.value, "source", None) == "pykokoro.measure_request"
++
+ def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> None:
+     static = _target_from_capabilities(
+         SimpleNamespace(
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index c729d7c..0552116 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -1000,6 +1000,54 @@ def test_preflight_failure_message_groups_distinct_causes_and_preserves_details(
+     assert len(payload["check_details"]) == 3
+
+
++def test_preflight_failure_message_identifies_single_affected_speech_item() -> None:
++    from voicerender.preflight import preflight_failure_message
++
++    report = SimpleNamespace(
++        status="reject",
++        checks=(
++            SimpleNamespace(
++                status="error",
++                source="pykokoro.measure_request",
++                detail="say_as characters span has unsupported surface '(A R T)'",
++                segment_number=10,
++                segment_id="sha256:" + "a" * 64,
++            ),
++        ),
++    )
++
++    summary = preflight_failure_message(report)  # type: ignore[arg-type]
++
++    assert "Primary cause:" in summary
++    assert "Affected speech item: segment 10" in summary
++    assert "  id: sha256:" + "a" * 64 in summary
++    assert "Because someone (A R T) finally." not in summary
++
++
++def test_preflight_failure_message_without_segment_metadata_keeps_compact_cause() -> None:
++    from voicerender.preflight import preflight_failure_message
++
++    report = SimpleNamespace(
++        status="reject",
++        checks=(
++            SimpleNamespace(
++                status="error",
++                source="fake.measure_request",
++                detail="request rejected",
++                segment_number=None,
++                segment_id=None,
++            ),
++        ),
++    )
++
++    summary = preflight_failure_message(report)  # type: ignore[arg-type]
++
++    assert summary == (
++        "RenderPlan preflight rejected this plan (1 error checks).\n"
++        "Primary cause: request rejected"
++    )
++
++
+ def test_preflight_failure_message_summarizes_165_identical_checks() -> None:
+     from voicerender.cli import _preflight_payload
+     from voicerender.preflight import preflight_failure_message
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index 92c05b5..ccf3317 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -759,10 +759,14 @@ def test_book_preserves_initial_preflight_report_handoff(
+     assert outcome.error_code == error_code
+     assert outcome.replan_required is replan_required
+     if status == "reject":
+-        assert outcome.error_message == (
++        assert outcome.error_message is not None
++        error_message = outcome.error_message
++        assert error_message.startswith(
+             "RenderPlan preflight rejected this plan (1 error checks).\n"
+             "Primary cause: Chatterbox target 'turbo' requires quality 'q4f16'."
+         )
++        assert "Affected speech item: segment 1" in error_message
++        assert "  id: sha256:" in error_message
+     assert outcome.preflight_report == outcome.output_dir / "preflight.toml"
+     assert outcome.preflight_report.is_file()
+     assert calls["render"] == []
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index 71508d3..df4e9bf 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -63,7 +63,7 @@ from .registry import normalize_engine_id
+ logger = logging.getLogger(__name__)
+
+
+-PYKOKORO_REQUIRED = ">=0.10.7,<0.11"
++PYKOKORO_REQUIRED = ">=0.10.8,<0.11"
+ PYKOKORO_REQUEST_API_VERSION = 2
+ _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
+
+@@ -84,7 +84,7 @@ def _version_supported(version: str) -> bool:
+         return False
+     major, minor = int(match.group(1)), int(match.group(2))
+     patch = int(match.group(3) or 0)
+-    return (major, minor, patch) >= (0, 10, 7) and (major, minor) == (0, 10)
++    return (major, minor, patch) >= (0, 10, 8) and (major, minor) == (0, 10)
+
+
+ def _package_metadata() -> str | None:
+@@ -663,6 +663,7 @@ def _translate_pykokoro_error(
+     *,
+     opening: bool = False,
+     failure_code: str | None = None,
++    source: str | None = None,
+ ) -> EngineError:
+     import pykokoro
+
+@@ -726,6 +727,8 @@ def _translate_pykokoro_error(
+         "request_id": request.id if request is not None else None,
+         "native_error_type": type(error).__name__,
+     }
++    if source is not None:
++        context["source"] = source
+     if error_type is SpeechRequestTooLongError:
+         context.update(
+             amount=getattr(error, "token_count", None),
+@@ -806,7 +809,12 @@ class PyKokoroEngineSession:
+         except EngineSynthesisError:
+             raise
+         except Exception as exc:
+-            raise _translate_pykokoro_error(exc, self._selection, request) from exc
++            raise _translate_pykokoro_error(
++                exc,
++                self._selection,
++                request,
++                source="pykokoro.measure_request",
++            ) from exc
+         amount = getattr(measured, "amount", None)
+         if isinstance(amount, bool) or not isinstance(amount, int):
+             raise EngineBackendError(
+diff --git a/voicerender/preflight.py b/voicerender/preflight.py
+index f673b16..10135e5 100644
+--- a/voicerender/preflight.py
++++ b/voicerender/preflight.py
+@@ -330,7 +330,15 @@ def preflight_failure_message(report: PreflightReport) -> str:
+         group = groups[0]
+         detail = str(group["detail"] or group["source"])
+         if group["affected_count"] == 1:
+-            return f"{heading}\nPrimary cause: {detail}"
++            lines = [f"{heading}\nPrimary cause: {detail}"]
++            first = group["first_segment_number"]
++            first_id = group["first_segment_id"]
++            if first is not None or first_id:
++                label = str(first) if first is not None else "unknown"
++                lines.append(f"Affected speech item: segment {label}")
++                if first_id:
++                    lines.append(f"  id: {first_id}")
++            return "\n".join(lines)
+         first = group["first_segment_number"]
+         first_id = group["first_segment_id"]
+         first_label = f"{first} ({first_id})" if first_id else str(first)

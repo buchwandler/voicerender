@@ -1,0 +1,156 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.2.8
+git_base_ref: bae27535283b1d3be79a22106304898bd8ec723f
+git_base_sha: bae27535283b1d3be79a22106304898bd8ec723f
+git_head_ref: 1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+git_head_sha: 1eac844d39ab920b42059ceb9b9b8ed5b9f56f76
+include_merges: nontrivial
+entries:
+  - kind: fixed
+    summary: Fixed PocketSynth output normalization to the shared full-scale PCM safety policy and clipping metadata recording
+    status: accepted
+    source_refs:
+      - git:facf1522283965a9ae643c9d76d358a8321b2ce4
+    paths: [voicerender/engines/pocketsynth.py]
+    sources: [git:facf1522283965a9ae643c9d76d358a8321b2ce4]
+  - kind: changed
+    summary: Changed JSON metadata for engine, model, voice, and render diagnostics to use portable path serialization
+    status: accepted
+    source_refs:
+      - git:5b4f1f2e3c65ebcc617ca8f35624b42540a61bbe
+      - git:a929bbd8428c30924ec014eae6eceadda3ee0da6
+      - git:e1011f03ed221393aa5697a73214674a2701d072
+    paths:
+      [
+        voicerender/jsonutil.py,
+        voicerender/models_api.py,
+        voicerender/voices_api.py,
+        voicerender/engines/registry.py,
+      ]
+    sources:
+      - git:5b4f1f2e3c65ebcc617ca8f35624b42540a61bbe
+      - git:a929bbd8428c30924ec014eae6eceadda3ee0da6
+      - git:e1011f03ed221393aa5697a73214674a2701d072
+  - kind: changed
+    summary: Changed SoproSynth request-contract compatibility checks and actionable measurement diagnostics
+    status: accepted
+    source_refs:
+      - git:58f64e96e492141af1ae00f945ad6fa2d7315dcd
+    paths:
+      [
+        voicerender/engines/soprosynth.py,
+        voicerender/engines/api_probe.py,
+        voicerender/cli.py,
+      ]
+    sources: [git:58f64e96e492141af1ae00f945ad6fa2d7315dcd]
+  - kind: fixed
+    summary: Fixed engine failure diagnostics with bounded redaction and actionable Kitten model-download context
+    status: accepted
+    source_refs:
+      - git:a37bba8a8ede3e49941a9aed2a7ace43b1ca8b09
+    paths:
+      [
+        voicerender/error_diagnostics.py,
+        voicerender/engines/kittensynth.py,
+        voicerender/preflight.py,
+      ]
+    sources: [git:a37bba8a8ede3e49941a9aed2a7ace43b1ca8b09]
+  - kind: added
+    summary: Added Chatterbox model installation and quality-aware status reporting with actionable missing-profile guidance
+    status: accepted
+    source_refs:
+      - git:3bad4f0a6245ff90034a3eda939e6c1b8fa1a6f5
+      - git:78759945fd47f5a1970a420472e2f6b00c1a85fa
+    paths:
+      [
+        voicerender/engines/chatterbox_assets.py,
+        voicerender/engines/chatterboxsynth.py,
+        voicerender/models_api.py,
+      ]
+    sources:
+      - git:3bad4f0a6245ff90034a3eda939e6c1b8fa1a6f5
+      - git:78759945fd47f5a1970a420472e2f6b00c1a85fa
+  - kind: added
+    summary: Added RenderProfile reidentification and bundle comparison against immutable profile snapshots
+    status: accepted
+    source_refs:
+      - git:4baf17e7ab9f64d7dfd7e6bbe889de97a703030d
+      - git:72676e0a95972739f8cad9869aa7b166fe77002b
+    paths:
+      [
+        voicerender/renderprofile.py,
+        voicerender/bundle_inspect.py,
+        voicerender/cli.py,
+      ]
+    sources:
+      - git:4baf17e7ab9f64d7dfd7e6bbe889de97a703030d
+      - git:72676e0a95972739f8cad9869aa7b166fe77002b
+  - kind: added
+    summary: Added deterministic Kokoro pronunciation lexicon discovery, local G2Lex pinning, and compatibility diagnostics
+    status: accepted
+    source_refs:
+      - git:a561679b1a3082a22c7f0eff937c65522ab57b03
+      - git:508918408e9e3611b1ba4f92aac99d9d0df483a8
+    paths:
+      [
+        voicerender/engines/kokoro.py,
+        voicerender/lexicons.py,
+        voicerender/cli.py,
+      ]
+    sources:
+      - git:a561679b1a3082a22c7f0eff937c65522ab57b03
+      - git:508918408e9e3611b1ba4f92aac99d9d0df483a8
+  - kind: added
+    summary: Added Kitten pronunciation-source support with named lexicons, pinned G2Lex files, and optional linguistic context
+    status: accepted
+    source_refs:
+      - git:db46ed5760d566a0a1344dc7bc1879d3b6f64f31
+      - git:0eedac5a018a25e0fb7bd244868b46164a0f76d0
+      - git:fd8b266697c70da613ec9b64a86e4656d1bbc33b
+      - git:f41ea26af53202824169b9b377515b5830d5cf38
+    paths:
+      [
+        voicerender/engines/kittensynth.py,
+        voicerender/lexicons.py,
+        voicerender/preflight.py,
+      ]
+    sources:
+      - git:db46ed5760d566a0a1344dc7bc1879d3b6f64f31
+      - git:0eedac5a018a25e0fb7bd244868b46164a0f76d0
+      - git:fd8b266697c70da613ec9b64a86e4656d1bbc33b
+      - git:f41ea26af53202824169b9b377515b5830d5cf38
+  - kind: added
+    summary: Added versioned trailing-silence normalization while preserving timings and cache validity
+    status: accepted
+    source_refs:
+      - git:a61d829722b59ae51a0a7c8be54340c94b2a1b49
+    paths:
+      [
+        voicerender/audio_boundaries.py,
+        voicerender/render.py,
+        voicerender/renderplan_render.py,
+      ]
+    sources: [git:a61d829722b59ae51a0a7c8be54340c94b2a1b49]
+  - kind: added
+    summary: Added validated say-as character interpretation controls through planning, capacity splitting, and Kokoro synthesis
+    status: accepted
+    source_refs:
+      - git:f9e16602b52bc71da1b5ec735cfcbcd5bcede0f2
+    paths:
+      [
+        voicerender/engines/base.py,
+        voicerender/renderplan_input.py,
+        voicerender/capacity.py,
+        voicerender/engines/kokoro.py,
+      ]
+    sources: [git:f9e16602b52bc71da1b5ec735cfcbcd5bcede0f2]
+  - kind: added
+    summary: Added parenthetical pause boundaries and exposed normalized speech composition in profile inspection
+    status: accepted
+    source_refs:
+      - git:05451ee230e85149052f2f77d4b00ef0b24373bc
+    paths: [voicerender/renderprofile.py, voicerender/cli.py]
+    sources: [git:05451ee230e85149052f2f77d4b00ef0b24373bc]

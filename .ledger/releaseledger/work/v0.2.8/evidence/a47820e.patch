@@ -1,0 +1,16 @@
+ .github/workflows/tests.yml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 7f49a2d..a631c45 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -209,7 +209,7 @@ jobs:
+                   for value in metadata.get_all("Requires-Dist", [])
+                   if Requirement(value).name.lower() == "renderplan"
+               )
+-              assert {">=0.1.2", "<0.2"} <= {
++              assert {">=0.2.1", "<0.3"} <= {
+                   str(specifier) for specifier in renderplan_requirement.specifier
+               }
+               base_requirements = set()

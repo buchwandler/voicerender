@@ -1,0 +1,30 @@
+ voicerender/jsonutil.py   | 2 +-
+ voicerender/models_api.py | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/voicerender/jsonutil.py b/voicerender/jsonutil.py
+index 81a3bf4..2aa7087 100644
+--- a/voicerender/jsonutil.py
++++ b/voicerender/jsonutil.py
+@@ -23,7 +23,7 @@ def _json_value(value: Any, *, label: str, path: tuple[str, ...]) -> Any:
+     if isinstance(value, Enum):
+         return _json_value(value.value, label=label, path=path)
+     if isinstance(value, Path):
+-        return str(value)
++        return value.as_posix()
+     if is_dataclass(value) and not isinstance(value, type):
+         return {
+             item.name: _json_value(
+diff --git a/voicerender/models_api.py b/voicerender/models_api.py
+index 2e8f6f9..6620596 100644
+--- a/voicerender/models_api.py
++++ b/voicerender/models_api.py
+@@ -274,7 +274,7 @@ def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
+         "installed_qualities": list(model.installed_qualities),
+         "source": model.source,
+         "revision": model.revision,
+-        "path": str(model.path) if model.path is not None else None,
++        "path": model.path.as_posix() if model.path is not None else None,
+         "metadata": json_value(
+             model.metadata,
+             label=f"model {model.engine!r} target {model.target_id!r} metadata",

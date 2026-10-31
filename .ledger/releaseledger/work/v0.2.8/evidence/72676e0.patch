@@ -1,0 +1,1135 @@
+ README.md                        |   1 -
+ docs/renderprofile.md            |   3 +-
+ tests/test_bundle_inspect.py     | 172 ++++++++++++++++++++++-
+ tests/test_preflight.py          |  71 ++++++++--
+ tests/test_profile_reidentify.py |  20 ++-
+ voicerender/bundle_inspect.py    | 295 ++++++++++++++++++++++++++++++++++++++-
+ voicerender/cli.py               | 140 +++++++++----------
+ voicerender/preflight.py         |  99 +++++++++++--
+ voicerender/renderprofile.py     |   6 +-
+ 9 files changed, 693 insertions(+), 114 deletions(-)
+
+diff --git a/README.md b/README.md
+index 11ecf74..9af093f 100644
+--- a/README.md
++++ b/README.md
+@@ -123,7 +123,6 @@ voicerender profile refresh narration.renderprofile.toml \
+   -o narration.refreshed.renderprofile.toml
+ ```
+
+-
+ For deliberate manual edits that make a stored profile ID stale, use the explicit recovery command; normal profile loading remains strict, and this does not refresh engine metadata:
+
+ ```bash
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index a4b7669..c51dfa3 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -45,8 +45,6 @@ Review refreshed bindings and policy before using the proposal. If identity-bear
+ profile semantics change, regenerate the associated RenderPlan using the refreshed
+ profile. Keep the original profile with its plans for provenance and inspection.
+
+-
+-
+ ### Repairing a stale profile identity
+
+ Manual edits to identity-bearing content (for example, adding a role or changing an engine option such as `quality`) make the stored `profile_id` stale. Ordinary profile loading remains strict: `inspect`, `show`, `validate`, and `refresh` reject a stale ID rather than silently changing the identity.
+@@ -61,6 +59,7 @@ voicerender profile reidentify story-cast6.renderprofile.toml \\
+ ```
+
+ `profile reidentify` computes identity from the canonical typed profile; it does not refresh engine-derived facts, validate engine bindings, invoke adapters, fetch VoiceFolio data, or download models. `profile refresh` remains the operation for proposing refreshed engine metadata and capacities. Re-identification does not rewrite RenderPlans or rename variants. Afterward inspect and validate the repaired profile, then recompile or re-project the RenderPlan variant for the new profile identity before rendering.
++
+ ## Inspecting and mutating profile roles
+
+ One RenderProfile is the complete cast for a render variant. Its logical roles may use different engines and targets while sharing planning and pause policy. `profile show` is the preferred human view; JSON retains each full canonical binding:
+diff --git a/tests/test_bundle_inspect.py b/tests/test_bundle_inspect.py
+index 61e36f8..a008f3c 100644
+--- a/tests/test_bundle_inspect.py
++++ b/tests/test_bundle_inspect.py
+@@ -19,6 +19,7 @@ from renderplan import (
+ from voicerender import cli
+ from voicerender.bundle_contract import BundleContractError
+ from voicerender.bundle_inspect import inspect_bundle
++from voicerender.bundle_roles import BundleRolesError
+ from voicerender.variants import list_bundle_variants
+
+
+@@ -83,8 +84,28 @@ def _make_profile(voice: str, *, target: str = "model-a"):
+     ).with_identity()
+
+
+-def _write_variant(root: Path, voice: str) -> tuple[str, Any]:
+-    profile = _make_profile(voice)
++def _make_quality_profile(quality: str) -> Any:
++    from renderplan import RenderProfile
++
++    return RenderProfile(
++        roles={
++            "narrator": RoleProfile(
++                language="en-US",
++                binding={
++                    "renderer": "chatterbox",
++                    "target_id": "turbo",
++                    "options": {"quality": quality},
++                },
++            )
++        },
++        default_role="narrator",
++    ).with_identity()
++
++
++def _write_variant(
++    root: Path, voice: str, *, profile: Any | None = None
++) -> tuple[str, Any]:
++    profile = profile or _make_profile(voice)
+     profile_id = profile.profile_id or profile.computed_id()
+     variant_name = f"narration--{profile_id.removeprefix('sha256:')[:12]}"
+     variant_dir = root / "renderplan" / variant_name
+@@ -174,6 +195,153 @@ def test_selected_variant_uses_immutable_profile_snapshot_not_authored_file(
+     assert current.roles.roles[0].voice_identity.voice == "current-voice"
+
+
++def test_compare_profile_reports_matching_identity_and_is_read_only(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, snapshot = _write_variant(root, "matching-voice")
++    authored_path = tmp_path / "authored.renderprofile.toml"
++    save_profile(snapshot, authored_path)
++    before = authored_path.read_bytes()
++
++    result = inspect_bundle(
++        root,
++        variant=variant_name,
++        compare_profile=authored_path,
++    )
++
++    comparison = result.profile_comparison
++    assert comparison is not None
++    assert comparison.status == "match"
++    assert comparison.identity_match is True
++    assert comparison.authored_profile_id_valid is True
++    assert comparison.differences == ()
++    assert authored_path.read_bytes() == before
++    assert not (root / "voicerender").exists()
++
++
++def test_compare_profile_reports_quality_difference_and_stale_id(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, _ = _write_variant(
++        root,
++        "snapshot-voice",
++        profile=_make_quality_profile("fp32"),
++    )
++    authored = _make_quality_profile("q4f16")
++    authored_path = tmp_path / "authored.renderprofile.toml"
++    save_profile(authored, authored_path)
++    document = tomlkit.parse(authored_path.read_text(encoding="utf-8"))
++    document["profile_id"] = "sha256:" + "f" * 64
++    authored_path.write_text(tomlkit.dumps(document), encoding="utf-8")
++
++    result = inspect_bundle(
++        root,
++        variant=variant_name,
++        compare_profile=authored_path,
++    )
++
++    comparison = result.profile_comparison
++    assert comparison is not None
++    assert comparison.status == "different"
++    assert comparison.identity_match is False
++    assert comparison.authored_profile_id_valid is False
++    assert comparison.authored_profile_id_stale is True
++    quality = [
++        difference
++        for difference in comparison.differences
++        if difference.field == "binding.options.quality"
++    ]
++    assert len(quality) == 1
++    assert quality[0].authored_value == "q4f16"
++    assert quality[0].variant_value == "fp32"
++    assert comparison.recommended_action is not None
++    assert "utterplan bundle render" in comparison.recommended_action
++
++
++def test_compare_profile_redacts_transcript_and_parse_errors_structurally(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, _ = _write_variant(root, "redacted")
++    authored_path = tmp_path / "authored.renderprofile.toml"
++    authored = _make_profile("authored")
++    authored.roles["narrator"].binding["options"] = {
++        "transcript": "secret transcript",
++        "voice_source": {"kind": "reference", "sha256": "abc", "transcript": "secret"},
++    }
++    save_profile(authored, authored_path)
++
++    result = inspect_bundle(root, variant=variant_name, compare_profile=authored_path)
++    comparison = result.profile_comparison
++    assert comparison is not None
++    rendered = json.dumps(comparison.to_dict())
++    assert "secret transcript" not in rendered
++    assert "secret" not in rendered
++
++    authored_path.write_text("not = [valid", encoding="utf-8")
++    errored = inspect_bundle(root, variant=variant_name, compare_profile=authored_path)
++    error = errored.profile_comparison
++    assert error is not None
++    assert error.status == "error"
++    assert error.error_code == "profile.compare_invalid"
++    assert error.error_message
++
++
++def test_compare_profile_requires_an_exact_variant(tmp_path: Path) -> None:
++    root = _write_bundle(tmp_path)
++    authored_path = tmp_path / "authored.renderprofile.toml"
++    save_profile(_make_profile("authored"), authored_path)
++
++    with pytest.raises(BundleRolesError) as error:
++        inspect_bundle(root, compare_profile=authored_path)
++    assert error.value.code == "bundle.roles_invalid"
++
++
++def test_bundle_inspect_cli_compare_profile_json_and_human(
++    tmp_path: Path, capsys
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant_name, snapshot = _write_variant(root, "cli-snapshot")
++    authored_path = tmp_path / "authored.renderprofile.toml"
++    save_profile(snapshot, authored_path)
++
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "inspect",
++                str(root),
++                "--variant",
++                variant_name,
++                "--compare-profile",
++                str(authored_path),
++                "--json",
++            ]
++        )
++        == 0
++    )
++    payload = json.loads(capsys.readouterr().out)
++    assert payload["profile_comparison"]["status"] == "match"
++
++    assert (
++        cli.main(
++            [
++                "bundle",
++                "inspect",
++                str(root),
++                "--variant",
++                variant_name,
++                "--compare-profile",
++                str(authored_path),
++            ]
++        )
++        == 0
++    )
++    assert "Profile comparison" in capsys.readouterr().out
++
++
+ def test_inspect_profile_with_no_variants_reports_readiness(tmp_path: Path) -> None:
+     root = _write_bundle(tmp_path)
+     authored_path = tmp_path / "cast.renderprofile.toml"
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index ff212f2..92a3f27 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -775,7 +775,9 @@ def test_too_long_preflight_preserves_source_and_planning_level(
+     assert adapter.synthesized_texts == []
+
+
+-def test_preflight_failure_message_counts_checks_and_uses_one_primary_detail() -> None:
++def test_preflight_failure_message_groups_distinct_causes_and_preserves_details() -> (
++    None
++):
+     from voicerender.cli import _preflight_payload
+     from voicerender.preflight import preflight_failure_message
+
+@@ -786,20 +788,71 @@ def test_preflight_failure_message_counts_checks_and_uses_one_primary_detail() -
+         render_profile_id="sha256:" + "2" * 64,
+         replan=(),
+         checks=(
+-            SimpleNamespace(status="error", detail=detail),
+-            SimpleNamespace(status="error", detail=detail),
+-            SimpleNamespace(status="error", detail="A later distinct failure."),
++            SimpleNamespace(
++                status="error",
++                source="chatterbox.model_not_installed",
++                detail=detail,
++                segment_number=1,
++                segment_id="segment-1",
++            ),
++            SimpleNamespace(
++                status="error",
++                source="chatterbox.model_not_installed",
++                detail=detail,
++                segment_number=2,
++                segment_id="segment-2",
++            ),
++            SimpleNamespace(
++                status="error",
++                source="other.failure",
++                detail="A later distinct failure.",
++                segment_number=3,
++                segment_id="segment-3",
++            ),
+         ),
+     )
+
+     summary = preflight_failure_message(report)  # type: ignore[arg-type]
++    assert "RenderPlan preflight rejected this plan (3 error checks)." in summary
++    assert "Primary causes:" in summary
++    assert "affected speech items: 2" in summary
++    assert "A later distinct failure." in summary
++    payload = _preflight_payload(report)
++    assert payload["error"] == summary
++    assert payload["failure_groups"][0]["affected_count"] == 2
++    assert len(payload["check_details"]) == 3
++
++
++def test_preflight_failure_message_summarizes_165_identical_checks() -> None:
++    from voicerender.cli import _preflight_payload
++    from voicerender.preflight import preflight_failure_message
+
+-    assert summary == (
+-        "RenderPlan preflight rejected this plan (3 error checks).\n"
+-        f"Primary cause: {detail}"
++    detail = "Chatterbox target 'turbo' requested quality 'fp32', but only 'q4f16' is installed."
++    checks = tuple(
++        SimpleNamespace(
++            status="error",
++            source="chatterbox.model_not_installed",
++            detail=detail,
++            segment_number=index,
++            segment_id=f"segment-{index}",
++        )
++        for index in range(1, 166)
+     )
+-    assert _preflight_payload(report)["error"] == summary
+-    assert len(report.checks) == 3
++    report = SimpleNamespace(
++        status="reject",
++        render_plan_id="sha256:" + "1" * 64,
++        render_profile_id="sha256:" + "2" * 64,
++        replan=(),
++        checks=checks,
++    )
++
++    summary = preflight_failure_message(report)  # type: ignore[arg-type]
++    assert "Affected speech items: 165/165." in summary
++    assert "First affected segment: 1 (segment-1)." in summary
++    payload = _preflight_payload(report)
++    assert len(payload["failure_groups"]) == 1
++    assert payload["failure_groups"][0]["affected_count"] == 165
++    assert len(payload["check_details"]) == 165
+
+
+ def test_fully_unknown_measurement_rejects(
+diff --git a/tests/test_profile_reidentify.py b/tests/test_profile_reidentify.py
+index 48dbf69..6abb758 100644
+--- a/tests/test_profile_reidentify.py
++++ b/tests/test_profile_reidentify.py
+@@ -19,6 +19,7 @@ def test_reidentify_helper_uses_typed_identity_without_engine_validation() -> No
+     assert result.planning == profile.planning
+     assert result.pauses == profile.pauses
+
++
+ def _stale_profile(tmp_path: Path) -> tuple[Path, bytes]:
+     source = Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
+     text = source.read_text(encoding="utf-8")
+@@ -32,11 +33,16 @@ def _stale_profile(tmp_path: Path) -> tuple[Path, bytes]:
+     return path, path.read_bytes()
+
+
+-def test_reidentify_output_preserves_source_and_profile_content(tmp_path: Path, capsys) -> None:
++def test_reidentify_output_preserves_source_and_profile_content(
++    tmp_path: Path, capsys
++) -> None:
+     source, original = _stale_profile(tmp_path)
+     output = tmp_path / "reidentified.renderprofile.toml"
+
+-    assert main(["profile", "reidentify", str(source), "--output", str(output), "--json"]) == 0
++    assert (
++        main(["profile", "reidentify", str(source), "--output", str(output), "--json"])
++        == 0
++    )
+     result = json.loads(capsys.readouterr().out)
+
+     assert set(result) == {"path", "old_profile_id", "profile_id", "changed"}
+@@ -48,7 +54,9 @@ def test_reidentify_output_preserves_source_and_profile_content(tmp_path: Path,
+     assert profile.roles[profile.default_role].binding["options"]["quality"] == "high"
+
+
+-def test_reidentify_in_place_is_idempotent_and_rejects_same_output(tmp_path: Path, capsys) -> None:
++def test_reidentify_in_place_is_idempotent_and_rejects_same_output(
++    tmp_path: Path, capsys
++) -> None:
+     source, _ = _stale_profile(tmp_path)
+     assert main(["profile", "reidentify", str(source), "--in-place"]) == 0
+     capsys.readouterr()
+@@ -60,7 +68,6 @@ def test_reidentify_in_place_is_idempotent_and_rejects_same_output(tmp_path: Pat
+     assert main(["profile", "reidentify", str(source), "--output", str(source)]) != 0
+
+
+-
+ def test_stale_identity_remains_strict_for_inspect_and_invalid_input_is_untouched(
+     tmp_path: Path, capsys
+ ) -> None:
+@@ -85,7 +92,10 @@ def test_reidentify_supports_missing_profile_id(tmp_path: Path, capsys) -> None:
+     path.write_text(tomlkit.dumps(document), encoding="utf-8")
+     output = tmp_path / "repaired.renderprofile.toml"
+
+-    assert main(["profile", "reidentify", str(path), "--output", str(output), "--json"]) == 0
++    assert (
++        main(["profile", "reidentify", str(path), "--output", str(output), "--json"])
++        == 0
++    )
+     result = json.loads(capsys.readouterr().out)
+     assert result["old_profile_id"] is None
+     assert result["changed"] is True
+diff --git a/voicerender/bundle_inspect.py b/voicerender/bundle_inspect.py
+index 81df6d4..00b5426 100644
+--- a/voicerender/bundle_inspect.py
++++ b/voicerender/bundle_inspect.py
+@@ -2,13 +2,78 @@
+
+ from __future__ import annotations
+
++import hashlib
++from collections.abc import Mapping
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import Any
++from typing import Any, Literal
++
++import tomlkit
++from renderplan import load_profile_for_reidentification
+
+ from .bundle_contract import BundleKind
+-from .bundle_roles import BundleRolesResult, inspect_bundle_roles
+-from .variants import BundleVariantsResult, list_bundle_variants
++from .bundle_roles import BundleRolesError, BundleRolesResult, inspect_bundle_roles
++from .variants import (
++    BundleVariantsResult,
++    list_bundle_variants,
++    load_bundle_variant_profile,
++)
++
++
++@dataclass(frozen=True, slots=True)
++class ProfileDifference:
++    """One canonical, safely serialized authored/snapshot profile difference."""
++
++    role: str
++    field: str
++    authored_value: Any
++    variant_value: Any
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "role": self.role,
++            "field": self.field,
++            "authored_value": self.authored_value,
++            "variant_value": self.variant_value,
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class ProfileComparison:
++    """Read-only comparison of an authored profile with a variant snapshot."""
++
++    status: Literal["match", "different", "error"]
++    authored_profile_path: Path
++    authored_profile_id: str | None
++    authored_computed_profile_id: str | None
++    authored_profile_id_valid: bool | None
++    authored_profile_id_stale: bool | None
++    variant_profile_path: Path | None
++    variant_profile_id: str | None
++    identity_match: bool | None
++    differences: tuple[ProfileDifference, ...] = ()
++    recommended_action: str | None = None
++    error_code: str | None = None
++    error_message: str | None = None
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "status": self.status,
++            "authored_profile_path": str(self.authored_profile_path),
++            "authored_profile_id": self.authored_profile_id,
++            "authored_computed_profile_id": self.authored_computed_profile_id,
++            "authored_profile_id_valid": self.authored_profile_id_valid,
++            "authored_profile_id_stale": self.authored_profile_id_stale,
++            "variant_profile_path": (
++                str(self.variant_profile_path) if self.variant_profile_path else None
++            ),
++            "variant_profile_id": self.variant_profile_id,
++            "identity_match": self.identity_match,
++            "differences": [difference.to_dict() for difference in self.differences],
++            "recommended_action": self.recommended_action,
++            "error_code": self.error_code,
++            "error_message": self.error_message,
++        }
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -19,6 +84,7 @@ class BundleInspectResult:
+     kind: BundleKind
+     roles: BundleRolesResult
+     variants: BundleVariantsResult
++    profile_comparison: ProfileComparison | None = None
+
+     def to_dict(self) -> dict[str, Any]:
+         return {
+@@ -28,6 +94,9 @@ class BundleInspectResult:
+             "kind": self.kind,
+             "roles": self.roles.to_dict(),
+             "variants": self.variants.to_dict(),
++            "profile_comparison": (
++                self.profile_comparison.to_dict() if self.profile_comparison else None
++            ),
+         }
+
+
+@@ -36,11 +105,17 @@ def inspect_bundle(
+     *,
+     profile: str | Path | None = None,
+     variant: str | None = None,
++    compare_profile: str | Path | None = None,
+     utterplan_root: str | Path | None = None,
+     renderplan_root: str | Path | None = None,
+     output_root: str | Path | None = None,
+ ) -> BundleInspectResult:
+-    """Inspect role/cast state and compose it with the existing variant listing."""
++    """Inspect role/cast state and compose it with existing variant listing."""
++    if compare_profile is not None and variant is None:
++        raise BundleRolesError(
++            "--compare-profile requires --variant",
++            code="bundle.roles_invalid",
++        )
+     roles = inspect_bundle_roles(
+         bundle,
+         profile=profile,
+@@ -53,12 +128,222 @@ def inspect_bundle(
+         renderplan_root=renderplan_root,
+         output_root=output_root,
+     )
++    comparison = (
++        compare_bundle_profile(
++            bundle,
++            variant,
++            compare_profile,
++            renderplan_root=renderplan_root,
++        )
++        if compare_profile is not None and variant is not None
++        else None
++    )
+     return BundleInspectResult(
+         bundle=roles.bundle,
+         kind=roles.kind,
+         roles=roles,
+         variants=variants,
++        profile_comparison=comparison,
++    )
++
++
++def compare_bundle_profile(
++    bundle: str | Path,
++    variant: str,
++    authored_profile: str | Path,
++    *,
++    renderplan_root: str | Path | None = None,
++) -> ProfileComparison:
++    """Compare an authored profile with a validated immutable variant snapshot."""
++    authored_path = Path(authored_profile).expanduser().resolve(strict=False)
++    selected = load_bundle_variant_profile(
++        bundle,
++        variant,
++        renderplan_root=renderplan_root,
++    )
++    snapshot = selected.profile
++    snapshot_id = snapshot.profile_id or snapshot.computed_id()
++    try:
++        document = tomlkit.parse(authored_path.read_text(encoding="utf-8"))
++        stored_profile_id = document.get("profile_id")
++        authored_id = stored_profile_id if isinstance(stored_profile_id, str) else None
++        authored = load_profile_for_reidentification(authored_path)
++        computed_id = authored.computed_id()
++        differences = _profile_differences(authored, snapshot)
++    except Exception as exc:  # noqa: BLE001 - inspection returns structured diagnostics.
++        return ProfileComparison(
++            status="error",
++            authored_profile_path=authored_path,
++            authored_profile_id=None,
++            authored_computed_profile_id=None,
++            authored_profile_id_valid=None,
++            authored_profile_id_stale=None,
++            variant_profile_path=selected.path,
++            variant_profile_id=snapshot_id,
++            identity_match=None,
++            error_code=getattr(exc, "code", "profile.compare_invalid"),
++            error_message=str(exc) or type(exc).__name__,
++        )
++
++    identity_match = authored_id == snapshot_id
++    different = bool(differences) or not identity_match
++    return ProfileComparison(
++        status="different" if different else "match",
++        authored_profile_path=authored_path,
++        authored_profile_id=authored_id,
++        authored_computed_profile_id=computed_id,
++        authored_profile_id_valid=authored_id == computed_id,
++        authored_profile_id_stale=authored_id is not None
++        and authored_id != computed_id,
++        variant_profile_path=selected.path,
++        variant_profile_id=snapshot_id,
++        identity_match=identity_match,
++        differences=tuple(differences),
++        recommended_action=(
++            "Re-project a new RenderPlan variant from the authored profile with "
++            "utterplan bundle render."
++            if different
++            else None
++        ),
+     )
+
+
+-__all__ = ["BundleInspectResult", "inspect_bundle"]
++def _profile_differences(authored: Any, variant: Any) -> list[ProfileDifference]:
++    authored_roles = getattr(authored, "roles", {})
++    variant_roles = getattr(variant, "roles", {})
++    differences: list[ProfileDifference] = []
++    for role_name in sorted(set(authored_roles) | set(variant_roles)):
++        authored_role = authored_roles.get(role_name)
++        variant_role = variant_roles.get(role_name)
++        authored_data = _role_inspection_data(authored_role)
++        variant_data = _role_inspection_data(variant_role)
++        _append_mapping_differences(
++            differences,
++            role_name,
++            "",
++            authored_data,
++            variant_data,
++        )
++    return differences
++
++
++def _role_inspection_data(role: Any) -> dict[str, Any] | None:
++    if role is None:
++        return None
++    binding = getattr(role, "binding", None)
++    if not isinstance(binding, Mapping):
++        binding = None
++    return {
++        "language": getattr(role, "language", None),
++        "binding": _inspection_binding(binding) if binding is not None else None,
++    }
++
++
++def _append_mapping_differences(
++    differences: list[ProfileDifference],
++    role: str,
++    prefix: str,
++    authored: Any,
++    variant: Any,
++) -> None:
++    if isinstance(authored, Mapping) and isinstance(variant, Mapping):
++        for key in sorted(set(authored) | set(variant), key=str):
++            field = f"{prefix}.{key}" if prefix else str(key)
++            _append_mapping_differences(
++                differences,
++                role,
++                field,
++                authored.get(key),
++                variant.get(key),
++            )
++        return
++    if isinstance(authored, list) and isinstance(variant, list) and authored == variant:
++        return
++    if authored != variant:
++        differences.append(
++            ProfileDifference(
++                role=role,
++                field=prefix,
++                authored_value=authored,
++                variant_value=variant,
++            )
++        )
++
++
++def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
++    safe = _redact_transcript_fields(dict(binding))
++    if not isinstance(safe, dict):
++        return {}
++    if isinstance(binding.get("voice_source"), Mapping):
++        safe["voice_source"] = _inspection_voice_source(binding["voice_source"])
++    options = binding.get("options")
++    if isinstance(options, Mapping):
++        options_safe = _redact_transcript_fields(dict(options))
++        if isinstance(options_safe, dict):
++            if isinstance(options.get("voice_source"), Mapping):
++                options_safe["voice_source"] = _inspection_voice_source(
++                    options["voice_source"]
++                )
++            safe["options"] = options_safe
++    return safe
++
++
++def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
++    kind = source.get("kind") or source.get("type")
++    safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
++    if kind == "managed_reference":
++        ref = source.get("value", source.get("ref", source.get("reference")))
++        if isinstance(ref, str):
++            safe["ref"] = ref
++        fields = (
++            "resolver",
++            "sha256",
++            "source_format",
++            "source_revision",
++            "source_repository",
++            "source_path",
++            "license",
++            "dataset",
++            "variant",
++        )
++    elif kind == "prepared":
++        fields = ("sha256", "format", "model_id", "model_revision", "layout")
++    elif kind == "reference":
++        fields = ("sha256",)
++    else:
++        fields = ()
++    for name in fields:
++        value = source.get(name)
++        if value is not None:
++            safe[name] = value
++    return safe
++
++
++def _redact_transcript_fields(value: Any) -> Any:
++    if isinstance(value, Mapping):
++        safe: dict[str, Any] = {}
++        for name, item in value.items():
++            if name in {"reference_text", "transcript"} and isinstance(item, str):
++                digest_name = (
++                    "reference_text_sha256"
++                    if name == "reference_text"
++                    else "transcript_sha256"
++                )
++                safe[str(digest_name)] = hashlib.sha256(
++                    item.encode("utf-8")
++                ).hexdigest()
++            else:
++                safe[str(name)] = _redact_transcript_fields(item)
++        return safe
++    if isinstance(value, (list, tuple)):
++        return [_redact_transcript_fields(item) for item in value]
++    return value
++
++
++__all__ = [
++    "BundleInspectResult",
++    "ProfileComparison",
++    "ProfileDifference",
++    "compare_bundle_profile",
++    "inspect_bundle",
++]
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index 65a8bd7..160586c 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -23,7 +23,11 @@ from .bundle_batch import (
+     BundleBatchRenderResult,
+     render_bundle_batch,
+ )
+-from .bundle_inspect import BundleInspectResult, inspect_bundle
++from .bundle_inspect import (
++    BundleInspectResult,
++    _inspection_binding,
++    inspect_bundle,
++)
+ from .bundle_roles import BundleRolesError, BundleRolesResult, inspect_bundle_roles
+ from .engines.options import engine_option_to_dict, engine_options
+ from .engines.qwen3synth import QWEN3_QVOICE_FORMAT
+@@ -58,7 +62,12 @@ from .models_api import (
+     remove_model,
+     verify_model,
+ )
+-from .preflight import preflight_failure_message, preflight_render_plan
++from .preflight import (
++    preflight_check_details,
++    preflight_failure_groups,
++    preflight_failure_message,
++    preflight_render_plan,
++)
+ from .profile_roles import (
+     list_profile_roles,
+     remove_profile_role,
+@@ -318,12 +327,13 @@ def build_parser() -> argparse.ArgumentParser:
+     profile_refresh.add_argument("-o", "--output", required=True, type=Path)
+     profile_refresh.add_argument("--json", action="store_true")
+
+-
+     profile_reidentify = profile_commands.add_parser(
+         "reidentify", help="Repair a stale or missing RenderProfile content ID"
+     )
+     profile_reidentify.add_argument("profile", type=Path)
+-    reidentify_destination = profile_reidentify.add_mutually_exclusive_group(required=True)
++    reidentify_destination = profile_reidentify.add_mutually_exclusive_group(
++        required=True
++    )
+     reidentify_destination.add_argument("-o", "--output", type=Path)
+     reidentify_destination.add_argument("--in-place", action="store_true")
+     profile_reidentify.add_argument("--json", action="store_true")
+@@ -649,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
+     inspect_selection.add_argument(
+         "--variant", help="exact variant's immutable RenderProfile snapshot"
+     )
++    bundle_inspect.add_argument(
++        "--compare-profile",
++        type=Path,
++        help="read-only authored RenderProfile to compare with --variant",
++    )
+     bundle_inspect.add_argument("--utterplan-root", type=Path)
+     bundle_inspect.add_argument("--renderplan-root", type=Path)
+     bundle_inspect.add_argument("--output-root", type=Path)
+@@ -915,73 +930,6 @@ def _profile_role_items(profile: Any) -> list[dict[str, Any]]:
+     ]
+
+
+-def _inspection_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+-    safe = dict(binding)
+-    options = binding.get("options")
+-    if isinstance(options, Mapping):
+-        safe_options: dict[str, Any] = {}
+-        for name, value in options.items():
+-            safe_options[name] = (
+-                _inspection_voice_source(value)
+-                if name == "voice_source"
+-                else _redact_transcript_fields(value)
+-            )
+-        safe["options"] = safe_options
+-    if isinstance(binding.get("voice_source"), Mapping):
+-        safe["voice_source"] = _inspection_voice_source(binding["voice_source"])
+-    return safe
+-
+-
+-def _inspection_voice_source(source: Mapping[str, Any]) -> dict[str, Any]:
+-    kind = source.get("kind") or source.get("type")
+-    safe: dict[str, Any] = {"kind": kind} if isinstance(kind, str) else {}
+-    if kind == "managed_reference":
+-        ref = source.get("value", source.get("ref", source.get("reference")))
+-        if isinstance(ref, str):
+-            safe["ref"] = ref
+-        fields: tuple[str, ...] = (
+-            "resolver",
+-            "sha256",
+-            "source_format",
+-            "source_revision",
+-            "source_repository",
+-            "source_path",
+-            "license",
+-            "dataset",
+-            "variant",
+-        )
+-    elif kind == "prepared":
+-        fields = ("sha256", "format", "model_id", "model_revision", "layout")
+-    elif kind == "reference":
+-        fields = ("sha256",)
+-    else:
+-        fields = ()
+-    for name in fields:
+-        value = source.get(name)
+-        if value is not None:
+-            safe[name] = value
+-    return safe
+-
+-
+-def _redact_transcript_fields(value: Any) -> Any:
+-    if isinstance(value, Mapping):
+-        safe: dict[str, Any] = {}
+-        for name, item in value.items():
+-            if name in {"reference_text", "transcript"} and isinstance(item, str):
+-                digest_name = (
+-                    "reference_text_sha256"
+-                    if name == "reference_text"
+-                    else "transcript_sha256"
+-                )
+-                safe[digest_name] = hashlib.sha256(item.encode("utf-8")).hexdigest()
+-            else:
+-                safe[name] = _redact_transcript_fields(item)
+-        return safe
+-    if isinstance(value, (list, tuple)):
+-        return [_redact_transcript_fields(item) for item in value]
+-    return value
+-
+-
+ def _print_profile_role_items(roles: list[dict[str, Any]]) -> None:
+     print(
+         "  ROLE       LANGUAGE  ENGINE   TARGET             VOICE/SPEAKER/SOURCE / ENROLLMENT"
+@@ -1090,6 +1038,8 @@ def _preflight_payload(report: Any) -> dict[str, Any]:
+         "replan": len(report.replan),
+         "reject": counts["error"],
+         "checks": counts,
++        "failure_groups": list(preflight_failure_groups(report)),
++        "check_details": preflight_check_details(report),
+         "exit_code": 0
+         if report.status == "ok"
+         else 2
+@@ -1340,6 +1290,33 @@ def _print_bundle_inspect(result: BundleInspectResult) -> None:
+             print(f"    output warning: {variant.output_error}")
+
+
++def _print_profile_comparison(comparison: Any) -> None:
++    print()
++    print("Profile comparison")
++    print(f"  status:             {comparison.status}")
++    print(f"  authored profile:   {comparison.authored_profile_path}")
++    print(f"  authored profile-id: {comparison.authored_profile_id}")
++    print(f"  computed profile-id: {comparison.authored_computed_profile_id}")
++    print(f"  authored ID valid:   {comparison.authored_profile_id_valid}")
++    print(f"  variant snapshot:    {comparison.variant_profile_path}")
++    print(f"  variant profile-id:  {comparison.variant_profile_id}")
++    print(f"  identity match:      {comparison.identity_match}")
++    if comparison.error_code or comparison.error_message:
++        error = ": ".join(
++            item for item in (comparison.error_code, comparison.error_message) if item
++        )
++        print(f"  comparison error:    {error}")
++    elif comparison.differences:
++        print("  differences:")
++        for difference in comparison.differences:
++            print(
++                f"    {difference.role}.{difference.field}: "
++                f"{difference.authored_value!r} -> {difference.variant_value!r}"
++            )
++    if comparison.recommended_action:
++        print(f"  recommended action:  {comparison.recommended_action}")
++
++
+ def _diagnostic_summary_text(value: Any) -> str | None:
+     parts: list[str] = []
+     error_type = getattr(value, "error_type", None)
+@@ -2375,9 +2352,13 @@ def main(argv: list[str] | None = None) -> int:
+                 output = save_render_profile(profile, output_path)
+                 payload = {"profile_id": profile.profile_id, "path": str(output)}
+             elif args.profile_command == "reidentify":
+-
+-                if args.output is not None and args.output.resolve() == args.profile.resolve():
+-                    raise ValueError("profile output must not overwrite its source; use --in-place")
++                if (
++                    args.output is not None
++                    and args.output.resolve() == args.profile.resolve()
++                ):
++                    raise ValueError(
++                        "profile output must not overwrite its source; use --in-place"
++                    )
+
+                 document = tomlkit.parse(args.profile.read_text(encoding="utf-8"))
+                 previous_id = document.get("profile_id")
+@@ -2387,7 +2368,9 @@ def main(argv: list[str] | None = None) -> int:
+                 assert destination is not None
+                 destination.parent.mkdir(parents=True, exist_ok=True)
+                 fd, temporary_name = tempfile.mkstemp(
+-                    prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
++                    prefix=f".{destination.name}.",
++                    suffix=".tmp",
++                    dir=destination.parent,
+                 )
+                 try:
+                     with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+@@ -2402,7 +2385,9 @@ def main(argv: list[str] | None = None) -> int:
+                         os.unlink(temporary_name)
+                 payload = {
+                     "path": str(destination),
+-                    "old_profile_id": str(previous_id) if previous_id is not None else None,
++                    "old_profile_id": str(previous_id)
++                    if previous_id is not None
++                    else None,
+                     "profile_id": profile.profile_id,
+                     "changed": previous_id != profile.profile_id,
+                 }
+@@ -2755,6 +2740,7 @@ def main(argv: list[str] | None = None) -> int:
+                 args.bundle,
+                 profile=args.profile,
+                 variant=args.variant,
++                compare_profile=args.compare_profile,
+                 utterplan_root=args.utterplan_root,
+                 renderplan_root=args.renderplan_root,
+                 output_root=args.output_root,
+@@ -2765,6 +2751,8 @@ def main(argv: list[str] | None = None) -> int:
+                 )
+             else:
+                 _print_bundle_inspect(inspect_result)
++                if inspect_result.profile_comparison is not None:
++                    _print_profile_comparison(inspect_result.profile_comparison)
+             return 1 if args.check and inspect_result.roles.ready is not True else 0
+
+         if args.command == "bundle" and args.bundle_command == "variants":
+diff --git a/voicerender/preflight.py b/voicerender/preflight.py
+index 93632df..4765df1 100644
+--- a/voicerender/preflight.py
++++ b/voicerender/preflight.py
+@@ -258,9 +258,59 @@ def preflight_exit_code(report: PreflightReport) -> int:
+     return {"ok": 0, "replan": 2, "reject": 1}[report.status]
+
+
++def preflight_failure_groups(report: PreflightReport) -> tuple[dict[str, Any], ...]:
++    """Group non-success checks without discarding their individual records."""
++    checks = tuple(getattr(report, "checks", ()))
++    if report.status == "reject":
++        failures = tuple(check for check in checks if check.status == "error")
++    else:
++        failures = tuple(check for check in checks if check.status != "ok")
++
++    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
++    for check in failures:
++        key = (
++            str(check.status),
++            str(getattr(check, "source", "voicerender.preflight")),
++            str(getattr(check, "detail", None) or "").strip(),
++        )
++        group = grouped.get(key)
++        if group is None:
++            group = {
++                "status": check.status,
++                "source": getattr(check, "source", "voicerender.preflight"),
++                "detail": getattr(check, "detail", None),
++                "affected_count": 0,
++                "first_segment_number": getattr(check, "segment_number", None),
++                "first_segment_id": getattr(check, "segment_id", None),
++            }
++            grouped[key] = group
++        count = group["affected_count"]
++        assert isinstance(count, int)
++        group["affected_count"] = count + 1
++    return tuple(grouped.values())
++
++
++def preflight_check_details(report: PreflightReport) -> list[dict[str, Any]]:
++    """Return every persisted check in an additive JSON-safe representation."""
++    checks = tuple(getattr(report, "checks", ()))
++    return [
++        {
++            "segment_number": getattr(check, "segment_number", None),
++            "segment_id": getattr(check, "segment_id", None),
++            "status": check.status,
++            "metric": getattr(check, "metric", None),
++            "measured": getattr(check, "measured", None),
++            "maximum": getattr(check, "maximum", None),
++            "source": getattr(check, "source", "voicerender.preflight"),
++            "detail": getattr(check, "detail", None),
++        }
++        for check in checks
++    ]
++
++
+ def preflight_failure_message(report: PreflightReport) -> str:
+-    """Summarize a non-ok report without repeating per-occurrence failures."""
+-    checks = getattr(report, "checks", ())
++    """Summarize repeated failures while retaining actionable cause grouping."""
++    checks = tuple(getattr(report, "checks", ()))
+     if report.status == "reject":
+         failures = tuple(check for check in checks if check.status == "error")
+         heading = (
+@@ -273,17 +323,38 @@ def preflight_failure_message(report: PreflightReport) -> str:
+         failures = tuple(check for check in checks if check.status != "ok")
+         heading = f"RenderPlan preflight status is {report.status!r}"
+
+-    primary_detail = next(
+-        (
+-            check.detail.strip()
+-            for check in failures
+-            if isinstance(check.detail, str) and check.detail.strip()
+-        ),
+-        None,
+-    )
+-    if primary_detail is None:
++    groups = preflight_failure_groups(report)
++    if not groups:
+         return heading
+-    return f"{heading}\nPrimary cause: {primary_detail}"
++    if len(groups) == 1:
++        group = groups[0]
++        detail = str(group["detail"] or group["source"])
++        if group["affected_count"] == 1:
++            return f"{heading}\nPrimary cause: {detail}"
++        first = group["first_segment_number"]
++        first_id = group["first_segment_id"]
++        first_label = f"{first} ({first_id})" if first_id else str(first)
++        total = len(failures)
++        return (
++            f"{heading}\n"
++            f"Primary cause: {detail}\n"
++            f"Affected speech items: {group['affected_count']}/{total}.\n"
++            f"First affected segment: {first_label}.\n"
++            "Likely action: inspect the selected variant's profile snapshot; "
++            "if an authored profile was changed, project a new variant from that profile."
++        )
++
++    lines = [f"{heading}\nPrimary causes:"]
++    for group in groups:
++        detail = str(group["detail"] or group["source"])
++        first = group["first_segment_number"]
++        first_id = group["first_segment_id"]
++        first_label = f"{first} ({first_id})" if first_id else str(first)
++        lines.append(
++            f"- {detail} (affected speech items: {group['affected_count']}; "
++            f"first affected segment: {first_label})"
++        )
++    return "\n".join(lines)
+
+
+ def preflight_summary(report: PreflightReport, output: str | Path) -> dict[str, Any]:
+@@ -301,6 +372,8 @@ def preflight_summary(report: PreflightReport, output: str | Path) -> dict[str,
+             for status in ("ok", "too_long", "error")
+         },
+         "replan_requests": len(report.replan),
++        "failure_groups": list(preflight_failure_groups(report)),
++        "check_details": preflight_check_details(report),
+     }
+
+
+@@ -406,7 +479,9 @@ def _voicerender_version() -> str:
+
+
+ __all__ = [
++    "preflight_check_details",
+     "preflight_exit_code",
++    "preflight_failure_groups",
+     "preflight_render_plan",
+     "preflight_summary",
+ ]
+diff --git a/voicerender/renderprofile.py b/voicerender/renderprofile.py
+index 2b40d60..8b40631 100644
+--- a/voicerender/renderprofile.py
++++ b/voicerender/renderprofile.py
+@@ -296,7 +296,6 @@ def load_render_profile(profile: str | Path | RenderProfile) -> RenderProfile:
+         raise ProfileError(f"Cannot load RenderProfile {profile}: {exc}") from exc
+
+
+-
+ def reidentify_render_profile(profile: str | Path | RenderProfile) -> RenderProfile:
+     """Compute the canonical identity without engine or metadata validation."""
+     try:
+@@ -307,7 +306,10 @@ def reidentify_render_profile(profile: str | Path | RenderProfile) -> RenderProf
+         )
+         return replace(loaded, profile_id=None).with_identity()
+     except Exception as exc:
+-        raise ProfileError(f"Cannot re-identify RenderProfile {profile}: {exc}") from exc
++        raise ProfileError(
++            f"Cannot re-identify RenderProfile {profile}: {exc}"
++        ) from exc
++
+
+ def save_render_profile(profile: RenderProfile, path: str | Path) -> Path:
+     """Persist a shared RenderProfile using the RenderPlan codec."""

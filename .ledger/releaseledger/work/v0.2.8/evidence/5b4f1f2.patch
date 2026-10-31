@@ -1,0 +1,346 @@
+ tests/test_model_management_api.py |  65 ++++++++++++++++++++++-
+ tests/test_model_management_cli.py | 105 +++++++++++++++++++++++++++++++++++++
+ tests/test_soprosynth_engine.py    |  25 ++++++++-
+ voicerender/cli.py                 |   4 +-
+ voicerender/models_api.py          |  37 ++++++++++---
+ 5 files changed, 223 insertions(+), 13 deletions(-)
+
+diff --git a/tests/test_model_management_api.py b/tests/test_model_management_api.py
+index 6c9c357..2e87e28 100644
+--- a/tests/test_model_management_api.py
++++ b/tests/test_model_management_api.py
+@@ -1,7 +1,8 @@
+ from __future__ import annotations
+
++import json
+ from pathlib import Path
+-from types import SimpleNamespace
++from types import MappingProxyType, SimpleNamespace
+
+ from voicerender.engines.assets import (
+     ModelArtifact,
+@@ -15,6 +16,8 @@ from voicerender.engines.assets import (
+ from voicerender.models_api import (
+     install_model,
+     list_models,
++    model_artifact_to_dict,
++    model_result_to_dict,
+     remove_model,
+     verify_model,
+ )
+@@ -125,3 +128,63 @@ def test_remove_and_verify_delegate_to_public_asset_manager(
+
+     assert removed.status == "removed" and removed.changed
+     assert verified.status == "verified" and verified.verified
++
++
++def test_model_artifact_to_dict_supports_nested_read_only_metadata() -> None:
++    model = ModelArtifact(
++        engine="sopro",
++        target_id="model-v1",
++        display_name="Sopro model v1",
++        installed=True,
++        status="ready",
++        languages=("en", "de"),
++        path=Path("/models/model-v1"),
++        metadata=MappingProxyType(
++            {
++                "backend": "onnx",
++                "catalog": MappingProxyType(
++                    {
++                        "profile": MappingProxyType(
++                            {
++                                "providers": ("CPUExecutionProvider",),
++                                "cache_path": Path("/models/cache"),
++                            }
++                        )
++                    }
++                ),
++            }
++        ),
++    )
++
++    payload = model_artifact_to_dict(model)
++
++    assert payload["path"] == "/models/model-v1"
++    assert payload["metadata"] == {
++        "backend": "onnx",
++        "catalog": {
++            "profile": {
++                "providers": ["CPUExecutionProvider"],
++                "cache_path": "/models/cache",
++            }
++        },
++    }
++    json.dumps(payload)
++
++
++def test_model_result_to_dict_serializes_nested_read_only_artifact_metadata() -> None:
++    model = ModelArtifact(
++        engine="sopro",
++        target_id="model-v1",
++        display_name="Sopro model v1",
++        installed=True,
++        status="ready",
++        metadata=MappingProxyType(
++            {"catalog": MappingProxyType({"profile": ("uint8",)})}
++        ),
++    )
++    result = ModelInstallResult("sopro", "model-v1", "installed", True, artifact=model)
++
++    payload = model_result_to_dict(result)
++
++    assert payload["artifact"]["metadata"] == {"catalog": {"profile": ["uint8"]}}
++    json.dumps(payload)
+diff --git a/tests/test_model_management_cli.py b/tests/test_model_management_cli.py
+index 016b91d..f8cd32d 100644
+--- a/tests/test_model_management_cli.py
++++ b/tests/test_model_management_cli.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+
+ import json
++from types import MappingProxyType
+
+ from voicerender import cli
+ from voicerender.engines.assets import ModelArtifact
+@@ -85,3 +86,107 @@ def test_models_install_json_reports_unsupported_diagnostic(
+     assert payload["diagnostics"] == [
+         "Engine 'kokoro' does not support model install for target 'v1.0'"
+     ]
++
++
++def _sopro_model() -> ModelArtifact:
++    return ModelArtifact(
++        "sopro",
++        "model-v1",
++        "Sopro model v1",
++        True,
++        "ready",
++        ("en",),
++        metadata=MappingProxyType(
++            {
++                "catalog": MappingProxyType(
++                    {
++                        "profile": MappingProxyType(
++                            {
++                                "precision": "uint8",
++                                "providers": ("CPUExecutionProvider",),
++                            }
++                        )
++                    }
++                )
++            }
++        ),
++    )
++
++
++def _unexpected_model_serialization(_model: ModelArtifact) -> None:
++    raise AssertionError("plain model output must not serialize metadata")
++
++
++def test_models_list_plain_and_offline_supports_sopro_read_only_metadata(
++    monkeypatch, capsys
++) -> None:
++    offline_values = []
++
++    def list_models(*args, **kwargs):
++        offline_values.append(kwargs["offline"])
++        return (_sopro_model(),)
++
++    monkeypatch.setattr(cli, "list_models", list_models)
++    monkeypatch.setattr(cli, "model_artifact_to_dict", _unexpected_model_serialization)
++
++    for extra_args in ([], ["--offline"]):
++        exit_code = cli.main(["models", "list", "--engine", "sopro", *extra_args])
++        captured = capsys.readouterr()
++        assert exit_code == 0
++        assert "sopro\tmodel-v1\tready\ttrue\ten\t-" in captured.out
++        assert captured.err == ""
++
++    assert offline_values == [False, True]
++
++
++def test_models_list_json_supports_sopro_read_only_metadata(
++    monkeypatch, capsys
++) -> None:
++    monkeypatch.setattr(cli, "list_models", lambda *args, **kwargs: (_sopro_model(),))
++
++    exit_code = cli.main(["models", "list", "--engine", "sopro", "--json"])
++
++    assert exit_code == 0
++    payload = json.loads(capsys.readouterr().out)
++    assert payload[0]["engine"] == "sopro"
++    assert payload[0]["target_id"] == "model-v1"
++    assert payload[0]["metadata"]["catalog"]["profile"] == {
++        "precision": "uint8",
++        "providers": ["CPUExecutionProvider"],
++    }
++
++
++def test_models_inspect_plain_supports_sopro_read_only_metadata(
++    monkeypatch, capsys
++) -> None:
++    monkeypatch.setattr(cli, "model_status", lambda *args, **kwargs: _sopro_model())
++    monkeypatch.setattr(cli, "model_artifact_to_dict", _unexpected_model_serialization)
++
++    exit_code = cli.main(["models", "inspect", "model-v1", "--engine", "sopro"])
++
++    captured = capsys.readouterr()
++    assert exit_code == 0
++    assert (
++        "sopro\tmodel-v1\tready\tinstalled=true\tlanguages=en\tqualities=-"
++        in captured.out
++    )
++    assert captured.err == ""
++
++
++def test_models_inspect_json_supports_sopro_read_only_metadata(
++    monkeypatch, capsys
++) -> None:
++    monkeypatch.setattr(cli, "model_status", lambda *args, **kwargs: _sopro_model())
++
++    exit_code = cli.main(
++        ["models", "inspect", "model-v1", "--engine", "sopro", "--json"]
++    )
++
++    assert exit_code == 0
++    payload = json.loads(capsys.readouterr().out)
++    assert payload["engine"] == "sopro"
++    assert payload["target_id"] == "model-v1"
++    assert payload["metadata"]["catalog"]["profile"] == {
++        "precision": "uint8",
++        "providers": ["CPUExecutionProvider"],
++    }
+diff --git a/tests/test_soprosynth_engine.py b/tests/test_soprosynth_engine.py
+index e8f9785..46d6ab1 100644
+--- a/tests/test_soprosynth_engine.py
++++ b/tests/test_soprosynth_engine.py
+@@ -2,8 +2,9 @@ from __future__ import annotations
+
+ import json
+ import sys
++from collections.abc import Mapping
+ from pathlib import Path
+-from types import ModuleType, SimpleNamespace
++from types import MappingProxyType, ModuleType, SimpleNamespace
+ from typing import Any
+
+ import numpy as np
+@@ -165,7 +166,18 @@ def _fake_soprosynth() -> tuple[ModuleType, dict[str, Any]]:
+         profiles=("wasm-uint8",),
+         source_revision="bundle-revision-1",
+         source_commit="commit-1",
+-        metadata={"max_input_tokens": 128},
++        metadata=MappingProxyType(
++            {
++                "max_input_tokens": 128,
++                "catalog": MappingProxyType(
++                    {
++                        "profile_metadata": MappingProxyType(
++                            {"wasm-uint8": MappingProxyType({"precision": "uint8"})}
++                        )
++                    }
++                ),
++            }
++        ),
+     )
+
+     def discover_bundles(**kwargs: Any) -> tuple[Any, ...]:
+@@ -223,6 +235,15 @@ def test_sopro_api_probe_discovery_and_target_capabilities(
+     assert targets[0].id == "model-v1"
+     assert targets[0].metadata["bundle_ref"] == "sopro:model-v1"
+     assert targets[0].metadata["source_revision"] == "bundle-revision-1"
++    catalog = targets[0].metadata["catalog"]
++    assert isinstance(catalog, Mapping)
++    profile_metadata = catalog["profile_metadata"]
++    assert isinstance(profile_metadata, Mapping)
++    profile = profile_metadata["wasm-uint8"]
++    assert isinstance(profile, Mapping)
++    assert profile["precision"] == "uint8"
++    with pytest.raises(TypeError):
++        profile["precision"] = "fp16"
+     assert targets[0].voices == ()
+     assert targets[0].default_voice is None
+     assert {"reference_voice", "request_measurement", "voice_level"} <= targets[
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index d5bb851..c2ff2b0 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -2074,8 +2074,8 @@ def main(argv: list[str] | None = None) -> int:
+                     offline=args.offline,
+                     refresh=args.refresh,
+                 )
+-                rows = [model_artifact_to_dict(model) for model in models]
+                 if args.json:
++                    rows = [model_artifact_to_dict(model) for model in models]
+                     print(
+                         json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True)
+                     )
+@@ -2090,8 +2090,8 @@ def main(argv: list[str] | None = None) -> int:
+                 return 0
+             if args.models_command == "inspect":
+                 artifact = model_status(args.engine, args.target, quality=args.quality)
+-                payload = model_artifact_to_dict(artifact)
+                 if args.json:
++                    payload = model_artifact_to_dict(artifact)
+                     print(
+                         json.dumps(
+                             payload, ensure_ascii=False, indent=2, sort_keys=True
+diff --git a/voicerender/models_api.py b/voicerender/models_api.py
+index 3e9136f..a66cc24 100644
+--- a/voicerender/models_api.py
++++ b/voicerender/models_api.py
+@@ -2,7 +2,7 @@
+
+ from __future__ import annotations
+
+-from dataclasses import asdict
++from collections.abc import Mapping
+ from pathlib import Path
+ from typing import Any
+
+@@ -241,15 +241,36 @@ def verify_model(
+         )
+
+
++def _json_value(value: Any) -> Any:
++    if isinstance(value, Path):
++        return str(value)
++    if isinstance(value, Mapping):
++        return {str(key): _json_value(item) for key, item in value.items()}
++    if isinstance(value, (tuple, list)):
++        return [_json_value(item) for item in value]
++    if value is None or isinstance(value, (str, int, float, bool)):
++        return value
++    raise TypeError(
++        f"model metadata contains unsupported JSON value {type(value).__name__}"
++    )
++
++
+ def model_artifact_to_dict(model: ModelArtifact) -> dict[str, Any]:
+     """Return the stable JSON representation of a model artifact."""
+-    value = asdict(model)
+-    value["path"] = str(model.path) if model.path is not None else None
+-    value["languages"] = list(model.languages)
+-    value["qualities"] = list(model.qualities)
+-    value["installed_qualities"] = list(model.installed_qualities)
+-    value["metadata"] = dict(model.metadata)
+-    return value
++    return {
++        "engine": model.engine,
++        "target_id": model.target_id,
++        "display_name": model.display_name,
++        "installed": model.installed,
++        "status": model.status,
++        "languages": list(model.languages),
++        "qualities": list(model.qualities),
++        "installed_qualities": list(model.installed_qualities),
++        "source": model.source,
++        "revision": model.revision,
++        "path": str(model.path) if model.path is not None else None,
++        "metadata": _json_value(model.metadata),
++    }
+
+
+ def model_result_to_dict(

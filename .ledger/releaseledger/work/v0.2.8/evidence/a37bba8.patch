@@ -1,0 +1,588 @@
+ pyproject.toml                     |   4 +-
+ tests/test_document_contract.py    | 134 +++++++++++++++++++++++++++++++++++++
+ tests/test_error_diagnostics.py    |  18 +++++
+ tests/test_kittensynth_engine.py   | 121 +++++++++++++++++++++++++++++++++
+ tests/test_preflight.py            |  65 +++++++++++++++++-
+ tests/test_runtime.py              |   2 +-
+ voicerender/engines/kittensynth.py |  66 +++++++++++++++++-
+ voicerender/error_diagnostics.py   |  17 ++++-
+ 8 files changed, 421 insertions(+), 6 deletions(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index d258c9a..00df7b1 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,13 +18,13 @@ dependencies = [
+   "tomli>=2; python_version < '3.11'",
+   "renderplan>=0.1.2,<0.2",
+   "voicefolio @ git+https://github.com/buchwandler/voicefolio.git@93bea04d210d509b59e8e616f1be1cf1d816a19d",
+-  "onnxvoice>=0.2.12,<0.3",
++  "onnxvoice>=0.2.14,<0.3",
+ ]
+
+ [project.optional-dependencies]
+ chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+-kitten = ["kittensynth[cpu]>=0.1.6,<0.2"]
++kitten = ["kittensynth[cpu]>=0.1.7,<0.2"]
+ kokoro = ["pykokoro>=0.10.6,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index 6de11e6..7eede1a 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -405,6 +405,140 @@ def test_document_preflight_reject_stops_before_render(
+     assert result.report_path.is_file()
+
+
++def test_document_model_download_failure_persists_reject_without_speech_artifacts(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import sys
++    from dataclasses import replace
++    from types import ModuleType, SimpleNamespace
++    from typing import Any
++
++    from renderplan import load_plan, load_preflight, save_plan
++
++    import voicerender.document as document_module
++    from voicerender.engines.kittensynth import KittenSynthEngineAdapter
++    from voicerender.engines.registry import _ADAPTERS
++
++    root = _workspace(tmp_path / "model-download.ssmd-bundle")
++    profile_path = (
++        Path(__file__).parents[1] / "examples/voices/narration.renderprofile.toml"
++    )
++    profile = codec.load_profile(profile_path)
++    fingerprint = (profile.profile_id or profile.computed_id()).removeprefix("sha256:")[
++        :12
++    ]
++    variant = f"narration--{fingerprint}"
++    variant_dir = root / "renderplan" / variant
++    variant_dir.mkdir(parents=True)
++    shutil.copy(profile_path, variant_dir / "renderprofile.toml")
++    plan_path = variant_dir / "document.renderplan.toml"
++    shutil.copy(
++        Path(__file__).parents[1] / "examples/plans/chapter.renderplan.toml",
++        plan_path,
++    )
++    plan = load_plan(plan_path)
++    speech = replace(
++        plan.speech[0],
++        binding={
++            "renderer": "kitten",
++            "target_id": "kitten-test-model",
++            "voice": "Jasper",
++            "options": {},
++        },
++        segment_id=None,
++    )
++    plan = replace(plan, flow=(speech,), plan_id=None).with_identity()
++    save_plan(plan, plan_path)
++
++    events: list[tuple[str, str]] = []
++    error_type = type("ModelDownloadError", (RuntimeError,), {})
++    native_error = error_type(
++        "Managed Kitten model download failed: The Hub Xet/hf_xet transport failed; "
++        "pinned HTTPS fallback failed: timeout "
++        "https://example.test/model?X-Amz-Signature=secret-query"
++    )
++    model = SimpleNamespace(
++        id="kitten-test-model",
++        language="en-US",
++        quality="medium",
++        voice_ids=("Jasper",),
++        display_name="Kitten test model",
++        version="0.1",
++        metadata={},
++        runtime_available=True,
++        sample_rate=24000,
++        voices=(
++            SimpleNamespace(
++                id="Jasper",
++                gender="unknown",
++                language="en-US",
++                locale="en-US",
++                language_label="English",
++            ),
++        ),
++        default_voice="Jasper",
++        aliases=(),
++    )
++
++    class FakeVoice:
++        @classmethod
++        def from_pretrained(cls, target_id: str, **kwargs: Any) -> Any:
++            events.append(("open", target_id))
++            raise native_error
++
++        @classmethod
++        def from_local(cls, *args: Any, **kwargs: Any) -> Any:
++            raise AssertionError("preflight must not load a local model")
++
++        def measure_prepared(self, text: str) -> Any:
++            raise AssertionError("preflight must not measure after a failed open")
++
++        def synthesize_prepared(self, *args: Any, **kwargs: Any) -> Any:
++            events.append(("synthesize", "called"))
++            raise AssertionError("preflight must never synthesize")
++
++        def close(self) -> None:
++            events.append(("close", "called"))
++
++    module = ModuleType("kittensynth")
++    module.__version__ = "0.1.7"
++    module.__file__ = "/fake/kittensynth/__init__.py"
++    module.REQUEST_API_VERSION = 1
++    module.ModelDownloadError = error_type  # type: ignore[attr-defined]
++    module.KittenVoice = FakeVoice
++    module.SynthesisMeasure = object
++    module.SynthesisConfig = object
++    module.SynthesisResult = object
++    module.discover_models = lambda **kwargs: (model,)
++    module.runtime_identity = lambda: {"engine_version": "0.1.7"}
++    module.request_api_contract = lambda: {
++        "version": 1,
++        "supports_request_measurement": True,
++        "measurement_entrypoint": "KittenVoice.measure_prepared",
++        "measurement_metric": "model_tokens",
++    }
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    monkeypatch.setitem(_ADAPTERS, "kitten", KittenSynthEngineAdapter())
++
++    result = document_module.render_document(root, variant=variant)
++
++    assert result.status == "failed"
++    assert result.error_code == "preflight.reject"
++    assert result.replan_required is False
++    assert result.preflight_report is not None
++    assert result.preflight_report == result.request.output_dir / "preflight.toml"
++    assert result.preflight_report.is_file()
++    assert result.report_path.is_file()
++    report = load_preflight(result.preflight_report)
++    assert report.status == "reject"
++    assert report.checks[0].source == "kitten.model_download_error"
++    assert "pinned HTTPS fallback failed" in report.checks[0].detail
++    assert "secret-query" not in report.checks[0].detail
++    assert result.manifest is None
++    assert not list(result.request.output_dir.rglob("*.wav"))
++    assert events == [("open", "kitten-test-model")]
++
++
+ def test_document_render_reports_reused_complete_manifest(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+diff --git a/tests/test_error_diagnostics.py b/tests/test_error_diagnostics.py
+index e5e1cfb..f36b4a2 100644
+--- a/tests/test_error_diagnostics.py
++++ b/tests/test_error_diagnostics.py
+@@ -122,3 +122,21 @@ def test_root_cause_summary_omits_duplicate_message() -> None:
+         "cause": {"type": "RuntimeError", "message": "same"},
+     }
+     assert root_cause_summary(diagnostic) is None
++
++
++def test_exception_diagnostic_redacts_signed_url_queries_and_inline_credentials() -> (
++    None
++):
++    error = RuntimeError(
++        "download failed at "
++        "https://example.test/model?X-Amz-Signature=signed-secret&token=query-secret;\n"
++        "HF_TOKEN=env-secret"
++    )
++
++    diagnostic = exception_diagnostic(error)
++    payload = json.dumps(diagnostic)
++
++    assert "https://example.test/model?[REDACTED]" in payload
++    assert "signed-secret" not in payload
++    assert "query-secret" not in payload
++    assert "env-secret" not in payload
+diff --git a/tests/test_kittensynth_engine.py b/tests/test_kittensynth_engine.py
+index 5d7abf2..d5be830 100644
+--- a/tests/test_kittensynth_engine.py
++++ b/tests/test_kittensynth_engine.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+
++import json
+ import sys
+ from types import ModuleType, SimpleNamespace
+ from typing import Any
+@@ -15,9 +16,11 @@ from voicerender.engines.kittensynth import (
+     KittenSynthEngineSession,
+     _target_from_model,
+ )
++from voicerender.error_diagnostics import exception_diagnostic
+ from voicerender.errors import (
+     EmptySpeechTextError,
+     EngineBackendError,
++    InvalidEngineOptionError,
+     SpeechRequestTooLongError,
+ )
+ from voicerender.renderplan_input import PreflightDisposition, classify_measurement
+@@ -331,6 +334,124 @@ def test_managed_dependency_error_is_a_non_replanable_runtime_reject(
+     assert classify_measurement(caught.value).disposition is PreflightDisposition.REJECT
+
+
++def test_model_download_error_preserves_safe_transport_diagnostics(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    download_error_type = type("ModelDownloadError", (RuntimeError,), {})
++    transport_error_type = type("AssetTransportError", (RuntimeError,), {})
++    module.ModelDownloadError = download_error_type  # type: ignore[attr-defined]
++    transport_error = transport_error_type(
++        "The Hub Xet/hf_xet transport failed; pinned HTTPS fallback failed: "
++        "timeout https://example.test/model?X-Amz-Signature=signed-secret"
++    )
++    transport_error.stage = "xet_fallback"
++    transport_error.native_error_type = "TimeoutError"
++    transport_error.fallback_attempted = True
++    transport_error.fallback_failed = True
++    transport_error.fallback_outcome = "failed"
++    transport_error.retry_attempted = True
++    transport_error.retry_failed = True
++    transport_error.retry_outcome = "failed"
++    native_error = download_error_type(
++        f"Managed Kitten model download failed: {transport_error}"
++    )
++    native_error.__cause__ = transport_error
++
++    class FailingKittenVoice:
++        @classmethod
++        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
++            raise native_error
++
++    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    selection = EngineSelection(
++        engine="kitten",
++        target_id="nano-0.8-int8",
++        language="en-US",
++        voice="Jasper",
++    )
++
++    with pytest.raises(EngineBackendError) as caught:
++        KittenSynthEngineAdapter().open(selection)
++
++    error = caught.value
++    assert error.code == "kitten.model_download_error"
++    assert error.details["native_error_type"] == "ModelDownloadError"
++    assert error.details["engine"] == "kitten"
++    assert error.details["target_id"] == "nano-0.8-int8"
++    assert error.details["language"] == "en-US"
++    assert error.details["voice"] == "Jasper"
++    assert error.details["stage"] == "model_install"
++    assert error.details["native_stage"] == "xet_fallback"
++    assert error.details["transport_error_type"] == "AssetTransportError"
++    native_error_message = error.details["native_error_message"]
++    assert isinstance(native_error_message, str)
++    assert "Xet/hf_xet transport failed" in native_error_message
++    assert "signed-secret" not in native_error_message
++    assert error.details["transport_native_error_type"] == "TimeoutError"
++    assert error.details["fallback_attempted"] is True
++    assert error.details["fallback_failed"] is True
++    assert error.details["retry_outcome"] == "failed"
++    assert "Xet/hf_xet transport failed" in str(error)
++    assert "pinned HTTPS fallback failed" in str(error)
++    diagnostic = json.dumps(exception_diagnostic(error))
++    assert "signed-secret" not in diagnostic
++    assert "X-Amz-Signature" not in diagnostic
++    assert "?[REDACTED]" in diagnostic
++
++
++def test_open_error_fallbacks_do_not_claim_model_download_or_xet(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
++    native_error = ValueError("generic options failure")
++
++    class FailingKittenVoice:
++        @classmethod
++        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
++            raise native_error
++
++    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    selection = EngineSelection(
++        engine="kitten", target_id="nano-0.8-int8", language="en-US", voice="Jasper"
++    )
++
++    with pytest.raises(InvalidEngineOptionError) as caught:
++        KittenSynthEngineAdapter().open(selection)
++
++    assert caught.value.code == "kitten.invalid_options"
++    assert "Xet" not in str(caught.value)
++
++
++def test_arbitrary_asset_download_error_keeps_generic_backend_code(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    module = ModuleType("kittensynth")
++    module.ModelDownloadError = type("ModelDownloadError", (RuntimeError,), {})  # type: ignore[attr-defined]
++    asset_error_type = type("AssetDownloadError", (RuntimeError,), {})
++    native_error = asset_error_type("unrelated asset failure")
++
++    class FailingKittenVoice:
++        @classmethod
++        def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
++            raise native_error
++
++    module.KittenVoice = FailingKittenVoice  # type: ignore[attr-defined]
++    monkeypatch.setitem(sys.modules, "kittensynth", module)
++    selection = EngineSelection(
++        engine="kitten", target_id="nano-0.8-int8", language="en-US", voice="Jasper"
++    )
++
++    with pytest.raises(EngineBackendError) as caught:
++        KittenSynthEngineAdapter().open(selection)
++
++    assert caught.value.code == "kitten.engine_error"
++    assert "Xet" not in str(caught.value)
++
++
+ def _synthesis_result(audio: Any) -> SimpleNamespace:
+     return SimpleNamespace(
+         audio=audio,
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 1fde38b..d2dcab0 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -346,7 +346,7 @@ def _install_fake_kittensynth(
+     }
+     module.KittenVoice = FakeVoice
+     if open_error is not None:
+-        module.ManagedModelDependencyError = type(open_error)  # type: ignore[attr-defined]
++        setattr(module, type(open_error).__name__, type(open_error))
+     module.SynthesisMeasure = object
+     module.SynthesisConfig = object
+     module.SynthesisResult = object
+@@ -558,6 +558,69 @@ def test_kitten_managed_dependency_error_rejects_preflight_before_measurement(
+     assert [event[0] for event in events] == ["open"]
+
+
++def test_kitten_model_download_failure_is_memoized_and_rejects_every_occurrence(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    transport_error_type = type("AssetTransportError", (RuntimeError,), {})
++    transport_error = transport_error_type(
++        "The Hub Xet/hf_xet transport failed; pinned HTTPS fallback failed: "
++        "timeout https://example.test/model?X-Amz-Signature=secret-query"
++    )
++    transport_error.stage = "xet_fallback"
++    transport_error.native_error_type = "TimeoutError"
++    transport_error.fallback_attempted = True
++    transport_error.fallback_failed = True
++    transport_error.fallback_outcome = "failed"
++    download_error_type = type("ModelDownloadError", (RuntimeError,), {})
++    download_error = download_error_type(
++        f"Managed Kitten model download failed: {transport_error}"
++    )
++    download_error.__cause__ = transport_error
++    binding = {
++        "renderer": "kitten",
++        "target_id": "kitten-test-model",
++        "voice": "Jasper",
++    }
++    events = _install_fake_kittensynth(
++        monkeypatch,
++        amount=180,
++        maximum=256,
++        fits=True,
++        open_error=download_error,
++    )
++    plan = _plan(
++        ("First shared Kitten occurrence", True, "sentence"),
++        ("Second shared Kitten occurrence", True, "sentence"),
++        binding=binding,
++    )
++    output = tmp_path / "kitten-model-download-error.toml"
++
++    report = preflight_render_plan(plan, output)
++
++    assert report.status == "reject"
++    assert [check.status for check in report.checks] == ["error", "error"]
++    assert [check.source for check in report.checks] == [
++        "kitten.model_download_error",
++        "kitten.model_download_error",
++    ]
++    assert [check.metric for check in report.checks] == ["unknown", "unknown"]
++    assert [check.measured for check in report.checks] == [None, None]
++    assert [check.maximum for check in report.checks] == [None, None]
++    assert report.replan == ()
++    assert report.checks[0].detail == report.checks[1].detail
++    assert "Xet/hf_xet transport failed" in report.checks[0].detail
++    assert "pinned HTTPS fallback failed" in report.checks[0].detail
++    assert "secret-query" not in report.checks[0].detail
++    assert events == [("open", "kitten-test-model")]
++
++    persisted = load_preflight(output)
++    assert persisted.status == "reject"
++    assert [check.source for check in persisted.checks] == [
++        "kitten.model_download_error",
++        "kitten.model_download_error",
++    ]
++
++
+ def test_kitten_preflight_defers_emphasis_to_composition(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_runtime.py b/tests/test_runtime.py
+index 660b6a4..a28f18c 100644
+--- a/tests/test_runtime.py
++++ b/tests/test_runtime.py
+@@ -288,7 +288,7 @@ def test_project_requires_lightweight_onnxvoice_without_ort_distribution() -> No
+         "dependencies"
+     ]
+
+-    assert "onnxvoice>=0.2.12,<0.3" in dependencies
++    assert "onnxvoice>=0.2.14,<0.3" in dependencies
+     assert not any(
+         "onnxruntime" in dependency.casefold() for dependency in dependencies
+     )
+diff --git a/voicerender/engines/kittensynth.py b/voicerender/engines/kittensynth.py
+index 2a62e66..5c0c880 100644
+--- a/voicerender/engines/kittensynth.py
++++ b/voicerender/engines/kittensynth.py
+@@ -9,6 +9,7 @@ from contextlib import AbstractContextManager, contextmanager
+ from dataclasses import replace
+ from typing import Any, Literal
+
++from ..error_diagnostics import sanitize_error_message
+ from ..errors import (
+     EmptySpeechTextError,
+     EngineBackendError,
+@@ -153,6 +154,56 @@ def _catalog_targets(request: CatalogRequest) -> tuple[SynthesisTarget, ...]:
+     return tuple(_target_from_model(model) for model in models)
+
+
++def _kitten_model_download_details(error: Exception) -> dict[str, Any]:
++    """Extract bounded transport diagnostics without copying arbitrary metadata."""
++    details: dict[str, Any] = {"stage": "model_install"}
++    cause = error.__cause__
++    if cause is None and not error.__suppress_context__:
++        cause = error.__context__
++    if cause is None:
++        return details
++
++    details["transport_error_type"] = type(cause).__name__
++    native_stage = getattr(cause, "stage", None)
++    if isinstance(native_stage, str) and native_stage.strip():
++        details["native_stage"] = sanitize_error_message(native_stage, limit=128)
++
++    native_error_type = getattr(cause, "native_error_type", None)
++    if isinstance(native_error_type, str) and native_error_type.strip():
++        details["transport_native_error_type"] = sanitize_error_message(
++            native_error_type, limit=128
++        )
++
++    native_message = getattr(error, "native_error_message", None)
++    if not isinstance(native_message, str):
++        native_message = getattr(cause, "native_error_message", None)
++    if (
++        not isinstance(native_message, str)
++        and type(cause).__name__ == "AssetTransportError"
++    ):
++        native_message = str(cause)
++    if isinstance(native_message, str) and native_message.strip():
++        details["native_error_message"] = sanitize_error_message(
++            native_message, limit=1024
++        )
++
++    for name in (
++        "fallback_attempted",
++        "fallback_failed",
++        "fallback_outcome",
++        "retry_attempted",
++        "retry_failed",
++        "retry_outcome",
++        "runtime_switch_activated",
++    ):
++        value = getattr(cause, name, None)
++        if isinstance(value, bool):
++            details[name] = value
++        elif isinstance(value, str) and value.strip():
++            details[name] = sanitize_error_message(value, limit=64)
++    return details
++
++
+ def _translate_kitten_error(
+     error: Exception,
+     selection: EngineSelection,
+@@ -177,6 +228,7 @@ def _translate_kitten_error(
+             "kitten.runtime_dependency_error",
+         ),
+         ("OnnxVoiceContractError", EngineBackendError, "kitten.runtime_contract_error"),
++        ("ModelDownloadError", EngineBackendError, "kitten.model_download_error"),
+     )
+     error_type: type[EngineError] = EngineBackendError
+     code: str | None = "kitten.engine_error"
+@@ -208,7 +260,19 @@ def _translate_kitten_error(
+             text_length=len(request.text) if request is not None else None,
+             source="kittensynth.synthesize_prepared",
+         )
+-    return error_type(str(error), **context, code=code)
++    details = (
++        _kitten_model_download_details(error)
++        if code == "kitten.model_download_error"
++        else None
++    )
++    message = (
++        sanitize_error_message(str(error), limit=2048)
++        if code == "kitten.model_download_error"
++        else str(error)
++    )
++    if code == "kitten.model_download_error" and not message:
++        message = "Kitten model download failed."
++    return error_type(message, **context, details=details, code=code)
+
+
+ def _measurement_field(measured: Any, name: str, default: Any = None) -> Any:
+diff --git a/voicerender/error_diagnostics.py b/voicerender/error_diagnostics.py
+index 94f7ac3..4620cc2 100644
+--- a/voicerender/error_diagnostics.py
++++ b/voicerender/error_diagnostics.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+
+ import math
++import re
+ from collections.abc import Mapping
+ from pathlib import Path
+
+@@ -13,17 +14,31 @@ _MAX_DETAIL_ITEMS = 100
+ _MAX_DETAIL_DEPTH = 8
+ _OMIT = object()
+
++_SIGNED_URL_QUERY = re.compile(r"(?P<url>https?://[^\s?#]+)\?[^\s#]*", re.IGNORECASE)
++_SECRET_ASSIGNMENT = re.compile(
++    r"(?i)\b(hf[_-]?token|access[_-]?token|api[_-]?key|authorization|"
++    r"x-amz-(?:signature|credential|security-token)|signature|token)(\s*[:=]\s*)"
++    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
++)
+
+-def _limited_text(value: object, limit: int) -> str:
++
++def sanitize_error_message(value: object, *, limit: int = _MAX_MESSAGE_LENGTH) -> str:
++    """Bound diagnostic text and redact signed URL queries and inline credentials."""
+     try:
+         text = str(value)
+     except Exception:  # noqa: BLE001 - diagnostics must not mask the original error.
+         text = f"<{type(value).__name__} message unavailable>"
++    text = _SIGNED_URL_QUERY.sub(r"\g<url>?[REDACTED]", text)
++    text = _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
+     if len(text) > limit:
+         return text[: limit - 1] + "…"
+     return text
+
+
++def _limited_text(value: object, limit: int) -> str:
++    return sanitize_error_message(value, limit=limit)
++
++
+ def _sensitive_key(key: str) -> bool:
+     normalized = "".join(character for character in key.lower() if character.isalnum())
+     sensitive_markers = (
