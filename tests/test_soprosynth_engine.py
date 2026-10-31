@@ -730,7 +730,7 @@ def test_installed_sopro_measurement_type_is_forwarded(
     soprosynth = pytest.importorskip("soprosynth")
     native = soprosynth.RequestMeasure(
         amount=31,
-        maximum=None,
+        maximum=31,
         unit="tokens",
         fits=True,
     )
@@ -738,7 +738,7 @@ def test_installed_sopro_measurement_type_is_forwarded(
     measured = _measure_once(monkeypatch, native, max_input_tokens=None)
 
     assert measured.amount == 31
-    assert measured.maximum is None
+    assert measured.maximum == 31
     assert measured.fits is True
     assert measured.unit == "model_tokens"
     assert measured.details["fit_source"] == "producer"
