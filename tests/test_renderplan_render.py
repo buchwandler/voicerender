@@ -1445,13 +1445,13 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
     fingerprint = first["items"][0]["execution_fingerprint"][0]
     assert fingerprint["adapter_id"] == _ENGINE_ID
     assert fingerprint["capacity"]["metric"] == "model_tokens"
-    book_report = tomllib.loads(
-        (output_root / variant / "voicerender-report.toml").read_text(encoding="utf-8")
-    )
-    report_fingerprint = json.loads(
-        book_report["item"][0]["execution_fingerprint_json"]
-    )
-    assert report_fingerprint[0]["fingerprint_id"] == fingerprint["fingerprint_id"]
+    book_report_path = output_root / variant / "voicerender-report.toml"
+    book_report = tomllib.loads(book_report_path.read_text(encoding="utf-8"))
+    from voicerender.report_contract import MAX_BUNDLE_REPORT_BYTES
+
+    assert book_report_path.stat().st_size <= MAX_BUNDLE_REPORT_BYTES
+    assert "execution_fingerprint_json" not in book_report["item"][0]
+    assert "execution_fingerprint" not in book_report["item"][0]
     assert first["items"][0]["manifest_complete"] is False
     assert (output_root / variant / "chapter-0001" / "000001.wav").is_file()
     assert adapter.synthesized_texts == ["speech one"]

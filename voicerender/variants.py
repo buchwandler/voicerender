@@ -28,6 +28,7 @@ from .bundle_contract import (
 )
 from .document_contract import load_document_workspace
 from .renderplan_render import RENDER_MANIFEST_FILENAME
+from .report_contract import BOOK_REPORT_FORMAT, MAX_BUNDLE_REPORT_BYTES
 
 PlanStatus = Literal["valid", "invalid"]
 RenderStatus = Literal["not_rendered", "complete", "partial", "failed", "unknown"]
@@ -36,7 +37,6 @@ VariantState = Literal[
 ]
 UnitKind = Literal["chapters", "documents"]
 REPORT_FILENAME = "voicerender-report.toml"
-_MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,13 +627,13 @@ def _inspect_output(
 
 def _load_report(path: Path, kind: BundleKind) -> _Report:
     try:
-        if path.stat().st_size > _MAX_REPORT_BYTES:
+        if path.stat().st_size > MAX_BUNDLE_REPORT_BYTES:
             raise ValueError("render report exceeds the 2 MiB size limit")
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise TypeError("render report root must be a TOML table")
         expected_format = (
-            "voicerender-bundle-book-report"
+            BOOK_REPORT_FORMAT
             if kind == "book"
             else "voicerender-bundle-document-report"
         )

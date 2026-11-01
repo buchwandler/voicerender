@@ -62,6 +62,11 @@ from .renderplan_render import (
     _verified_manifest_artifact_count,
     render_renderplan,
 )
+from .report_contract import (
+    BOOK_REPORT_FORMAT,
+    BOOK_REPORT_VERSION,
+    MAX_BUNDLE_REPORT_BYTES,
+)
 from .session_pool import validate_max_open_sessions
 from .storage import verified_wav
 
@@ -1305,7 +1310,10 @@ def _skipped_outcome(chapter: _LoadedChapter, index: int) -> ChapterRenderOutcom
 
 
 def _outcome_to_dict(
-    outcome: ChapterRenderOutcome, output_variant_dir: Path
+    outcome: ChapterRenderOutcome,
+    output_variant_dir: Path,
+    *,
+    include_execution_fingerprint: bool = True,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "index": outcome.index,
@@ -1334,7 +1342,7 @@ def _outcome_to_dict(
         item["recheck_report"] = _relative_posix(
             outcome.recheck_report, output_variant_dir
         )
-    if outcome.execution_fingerprint:
+    if include_execution_fingerprint and outcome.execution_fingerprint:
         item["execution_fingerprint"] = list(outcome.execution_fingerprint)
     if outcome.error_code is not None:
         item["error_code"] = outcome.error_code
@@ -1368,8 +1376,8 @@ def _relative_posix(path: Path, base: Path) -> str:
 def _write_book_report(result: BookRenderResult) -> None:
     request = result.request
     payload: dict[str, Any] = {
-        "format": "voicerender-bundle-book-report",
-        "version": 1,
+        "format": BOOK_REPORT_FORMAT,
+        "version": BOOK_REPORT_VERSION,
         "variant": request.variant_name,
         "emphasis_policy": request.emphasis_policy.value,
         "pending_composition": result.pending_composition,
@@ -1385,7 +1393,9 @@ def _write_book_report(result: BookRenderResult) -> None:
             "speech": request.speech_selector,
         },
         "item": [
-            _outcome_to_dict(outcome, request.output_variant_dir)
+            _outcome_to_dict(
+                outcome, request.output_variant_dir, include_execution_fingerprint=False
+            )
             for outcome in result.outcomes
         ],
     }
@@ -1405,13 +1415,18 @@ def _write_book_report(result: BookRenderResult) -> None:
         assert isinstance(item, Mapping)
         lines.extend(["", "[[item]]"])
         for key, value in item.items():
-            if key == "execution_fingerprint":
-                key = "execution_fingerprint_json"
-                value = json.dumps(
-                    value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                )
             lines.append(f"{key} = {_toml_value(value)}")
+
     destination = result.report_path
+    content = "\n".join(lines) + "\n"
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_BUNDLE_REPORT_BYTES:
+        raise BookRenderError(
+            f"VoiceRender book report {destination} is {len(encoded)} bytes; "
+            f"maximum is {MAX_BUNDLE_REPORT_BYTES} bytes",
+            code="report.too_large",
+        )
+
     temporary: Path | None = None
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1419,8 +1434,8 @@ def _write_book_report(result: BookRenderResult) -> None:
             prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
         )
         temporary = Path(temporary_name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(lines) + "\n")
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)

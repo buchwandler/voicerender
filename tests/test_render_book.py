@@ -1421,3 +1421,54 @@ def test_book_report_and_events_propagate_error_diagnostic_summary(
     human_output = capsys.readouterr().out
     assert "root cause RuntimeError: provider execution failed" in human_output
     assert str(outcome.render_diagnostics) in human_output
+
+
+def test_book_report_omits_large_fingerprints_and_rejects_oversize_atomically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from voicerender.report_contract import MAX_BUNDLE_REPORT_BYTES
+    from voicerender.variants import list_bundle_variants
+
+    _install_fake_execution(monkeypatch)
+    workspace, variant = _book(tmp_path, chapters=((1, 1),))
+    result = book_module.render_book(workspace, variant=variant)
+    original_outcome = result.outcomes[0]
+    fingerprints = tuple(
+        {
+            "fingerprint_id": f"sha256:{index:064x}",
+            "canonical_synthesis_identity": "x" * 3_000,
+        }
+        for index in range(1_000)
+    )
+    detailed_outcome = replace(original_outcome, execution_fingerprint=fingerprints)
+    detailed_result = replace(result, outcomes=(detailed_outcome,))
+
+    book_module._write_book_report(detailed_result)
+    report_bytes = result.report_path.read_bytes()
+    report = tomllib.loads(report_bytes.decode("utf-8"))
+    item = report["item"][0]
+    assert len(report_bytes) <= MAX_BUNDLE_REPORT_BYTES
+    assert "execution_fingerprint" not in item
+    assert "execution_fingerprint_json" not in item
+    assert (
+        detailed_result.outcomes[0].execution_fingerprint[0]["fingerprint_id"]
+        == (fingerprints[0]["fingerprint_id"])
+    )
+
+    listed = list_bundle_variants(
+        workspace, output_root=workspace / "voicerender"
+    ).variants[0]
+    assert listed.render_status == "complete"
+    assert listed.output_error is None
+
+    oversized_outcome = replace(
+        detailed_outcome, error_message="x" * (MAX_BUNDLE_REPORT_BYTES + 1)
+    )
+    oversized_result = replace(detailed_result, outcomes=(oversized_outcome,))
+    with pytest.raises(BookRenderError) as error:
+        book_module._write_book_report(oversized_result)
+    assert error.value.code == "report.too_large"
+    assert str(result.report_path) in str(error.value)
+    assert str(MAX_BUNDLE_REPORT_BYTES) in str(error.value)
+    assert result.report_path.read_bytes() == report_bytes
+    assert not list(result.report_path.parent.glob(f".{result.report_path.name}.*.tmp"))
