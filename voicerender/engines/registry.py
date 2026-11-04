@@ -59,6 +59,11 @@ _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
     "piper": BuiltinEngineSpec(
         "pipersynth", "voicerender.engines.pipersynth", "PiperSynthEngineAdapter"
     ),
+    "phonon": BuiltinEngineSpec(
+        "phononsynth",
+        "voicerender.engines.phononsynth",
+        "PhononSynthEngineAdapter",
+    ),
     "qwen3": BuiltinEngineSpec(
         "qwen3synth", "voicerender.engines.qwen3synth", "Qwen3SynthEngineAdapter", True
     ),
@@ -89,6 +94,7 @@ def normalize_engine_id(engine: str) -> str:
         "chatterboxsynth": "chatterbox",
         "pykokoro": "kokoro",
         "pipersynth": "piper",
+        "phononsynth": "phonon",
         "pocketsynth": "pocket",
         "qwen3synth": "qwen3",
         "soprosynth": "sopro",

@@ -36,6 +36,10 @@ from voicerender.engines.inflectsynth import (
 )
 from voicerender.engines.kittensynth import KittenSynthEngineAdapter
 from voicerender.engines.kokoro import PyKokoroEngineAdapter
+from voicerender.engines.phononsynth import (
+    PhononSynthEngineAdapter,
+    PhononSynthEngineSession,
+)
 from voicerender.engines.pipersynth import PiperSynthEngineAdapter
 from voicerender.engines.pocketsynth import (
     PocketSynthEngineAdapter,
@@ -362,6 +366,7 @@ def test_kittensynth_profile_contract_converts_sparse_optional_context(
         pytest.param(SupertonicSynthEngineAdapter, False, id="supertonic"),
         pytest.param(PyKokoroEngineAdapter, True, id="kokoro"),
         pytest.param(PiperSynthEngineAdapter, True, id="piper"),
+        pytest.param(PhononSynthEngineAdapter, False, id="phonon"),
     ],
 )
 def test_builtin_adapter_capability_controls_renderplan_token_lowering(
@@ -408,6 +413,56 @@ def test_pocket_renderplan_request_reaches_capacity_measurement(
     assert measured.fits is True
     assert measured.amount == 3
     assert measured_requests[0].text == request.text
+
+
+def test_phonon_renderplan_exact_text_reaches_measurement_and_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhononSynthEngineAdapter()
+    request = _builtin_renderplan_request(
+        monkeypatch,
+        adapter,
+        speaker=None,
+        text="  Exact RenderPlan text, unchanged!  ",
+    )
+    measured_text: list[str] = []
+    synthesized_text: list[str] = []
+
+    class Voice:
+        def measure_prepared(self, text: str) -> Any:
+            measured_text.append(text)
+            return SimpleNamespace(
+                token_count=8, max_tokens=None, fits=None, model_id="target-v1"
+            )
+
+        def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
+            synthesized_text.append(text)
+            return SimpleNamespace(
+                audio=[0.0, 0.1, -0.1],
+                sample_rate=24000,
+                voice=kwargs["voice"],
+                model_ref="phonon://target-v1",
+                metadata={},
+            )
+
+    session = PhononSynthEngineSession(
+        Voice(),
+        EngineSelection(
+            engine="phonon", target_id="target-v1", language="en-US", voice="voice-a"
+        ),
+        config=None,
+    )
+
+    measured = session.measure(request)
+    session.synthesize(request)
+
+    assert measured.fits is None
+    assert measured.amount == 8
+    assert measured.maximum is None
+    assert measured.unit == "model_tokens"
+    assert measured_text == [request.text]
+    assert synthesized_text == [request.text]
+    assert measured_text == synthesized_text
 
 
 def test_inflect_renderplan_optional_tokens_reach_synthesis(
@@ -493,6 +548,15 @@ def test_unsupported_engine_sessions_retain_direct_token_rejection() -> None:
         generation=None,
         voice_level=None,
     )
+    phonon = PhononSynthEngineSession(
+        object(),
+        EngineSelection(engine="phonon", target_id="target-v1", language="en-US"),
+        config=None,
+    )
+    with pytest.raises(
+        UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
+    ):
+        phonon.synthesize(request)
 
     with pytest.raises(
         UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
@@ -506,6 +570,23 @@ def test_unsupported_engine_sessions_retain_direct_token_rejection() -> None:
         UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
     ):
         supertonic.synthesize(request)
+
+
+def test_phonon_say_as_is_rejected_before_synthesis() -> None:
+    request = SpeechRequest(
+        id="say-as-request",
+        text="hello",
+        language="en-US",
+        say_as=(SayAsSpan(start=0, end=5, interpret_as="characters"),),
+    )
+    session = PhononSynthEngineSession(
+        object(),
+        EngineSelection(engine="phonon", target_id="target-v1", language="en-US"),
+        config=None,
+    )
+
+    with pytest.raises(UnsupportedSynthesisFeatureError, match="say_as spans"):
+        session.synthesize(request)
 
 
 def test_request_conversion_preserves_exact_text_binding_and_token_semantics(

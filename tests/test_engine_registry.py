@@ -22,6 +22,7 @@ ENGINE_IDS = {
     "chatterbox",
     "inflect",
     "kitten",
+    "phonon",
     "kokoro",
     "piper",
     "pocket",
@@ -35,6 +36,7 @@ PACKAGES = {
     "kitten": "kittensynth",
     "kokoro": "pykokoro",
     "piper": "pipersynth",
+    "phonon": "phononsynth",
     "pocket": "pocketsynth",
     "sopro": "soprosynth",
     "supertonic": "supertonicsynth",
@@ -47,6 +49,7 @@ ADAPTER_MODULES = {
     "kitten": "voicerender.engines.kittensynth",
     "kokoro": "voicerender.engines.kokoro",
     "piper": "voicerender.engines.pipersynth",
+    "phonon": "voicerender.engines.phononsynth",
     "pocket": "voicerender.engines.pocketsynth",
     "sopro": "voicerender.engines.soprosynth",
     "supertonic": "voicerender.engines.supertonicsynth",
@@ -57,7 +60,7 @@ ADAPTER_MODULES = {
 def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
     script = r"""
 import builtins
-blocked = {"chatterboxsynth", "inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
+blocked = {"chatterboxsynth", "inflectsynth", "kittensynth", "phononsynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
 seen = []
 original = builtins.__import__
 def guarded(name, *args, **kwargs):
@@ -74,7 +77,7 @@ assert not seen
     # Keep the subprocess isolated from SDKs that may already be imported by pytest.
     script = script.replace(
         "blocked_to_ids",
-        "{'chatterbox', 'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
+        "{'chatterbox', 'inflect', 'kitten', 'kokoro', 'phonon', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
     )
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -138,6 +141,12 @@ def _fake_package(package: str) -> ModuleType:
             "synthesize",
             "close",
         ),
+        "PhononVoice": (
+            "from_pretrained",
+            "measure_prepared",
+            "synthesize_prepared",
+            "close",
+        ),
         "InflectVoice": (
             "from_pretrained",
             "from_local",
@@ -195,6 +204,7 @@ def _fake_package(package: str) -> ModuleType:
         "SupertonicRuntime",
         "AtomicSynthesisResult",
         "DiscoveredModel",
+        "PhononVoice",
         "InflectVoice",
         "DescribedVoice",
         "request_api_contract",
@@ -238,6 +248,53 @@ def _fake_package(package: str) -> ModuleType:
     return module
 
 
+def _phonon_contract() -> dict[str, object]:
+    return {
+        "version": 1,
+        "engine": "phonon",
+        "entrypoint": "PhononVoice.synthesize_prepared",
+        "stream_entrypoint": "PhononVoice.stream_prepared",
+        "measure_entrypoint": "PhononVoice.measure_prepared",
+        "input": "prepared_text",
+        "measurement_unit": "model_tokens",
+        "max_input_tokens": None,
+        "features": {
+            "named_voices": True,
+            "streaming": True,
+            "voice_cloning": False,
+            "word_timings": False,
+            "automatic_chunking": False,
+        },
+    }
+
+
+def _phonon_model() -> SimpleNamespace:
+    voice = SimpleNamespace(
+        id="demo-voice",
+        display_name="Demo voice",
+        gender="female",
+        language="en-US",
+        locale="en-US",
+        languages=("en-US",),
+    )
+    return SimpleNamespace(
+        id="demo-model",
+        display_name="Phonon demo",
+        languages=("en-US",),
+        quality_choices=("q4", "fp32"),
+        sample_rate=24000,
+        voices=(voice,),
+        default_voice="demo-voice",
+        source_revision="revision-1",
+        license_spdx="CC-BY-4.0",
+        commercial_use=True,
+        release_version="1.0.0",
+        release_tags={"q4": "release-q4"},
+        source_revisions={"q4": "source-q4"},
+        metadata={},
+    )
+
+
 def _kitten_contract(**overrides: object) -> dict[str, object]:
     contract: dict[str, object] = {
         "version": 2,
@@ -252,7 +309,7 @@ def _kitten_contract(**overrides: object) -> dict[str, object]:
     return contract
 
 
-def test_registry_lists_ten_engines_without_probing() -> None:
+def test_registry_lists_eleven_engines_without_probing() -> None:
     listed = list_engines()
     assert {item["id"] for item in listed} == ENGINE_IDS
     assert {item["package"] for item in listed} == set(PACKAGES.values())
@@ -263,12 +320,15 @@ def test_registry_lists_ten_engines_without_probing() -> None:
     assert by_id["pocket"]["supports_reference_voice"] is True
     assert by_id["kokoro"]["supports_reference_voice"] is True
     assert by_id["piper"]["supports_reference_voice"] is False
+    assert by_id["phonon"]["package"] == "phononsynth"
+    assert by_id["phonon"]["supports_reference_voice"] is False
 
 
 def test_soprosynth_alias_normalizes_without_loading_sdk() -> None:
     assert normalize_engine_id("SoproSynth") == "sopro"
     assert normalize_engine_id("ChatterboxSynth") == "chatterbox"
     assert normalize_engine_id("chatterboxsynth") == "chatterbox"
+    assert normalize_engine_id("phononsynth") == "phonon"
 
 
 @pytest.mark.parametrize(("engine", "package"), sorted(PACKAGES.items()))
@@ -279,7 +339,9 @@ def test_all_engine_probes_use_public_api_without_loading_models(
 
     fake = _fake_package(package)
     monkeypatch.setitem(sys.modules, package, fake)
-    if engine == "inflect":
+    if engine == "phonon":
+        fake.request_api_contract = _phonon_contract
+    elif engine == "inflect":
         fake.request_api_contract = lambda: {
             "version": 1,
             "supports_request_measurement": True,
@@ -583,7 +645,12 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
     from voicerender.engines.catalog import SynthesisTarget
 
     adapter_module = import_module(ADAPTER_MODULES[engine])
-    if engine == "piper":
+    if engine == "phonon":
+        fake = _fake_package(PACKAGES[engine])
+        fake.request_api_contract = _phonon_contract
+        fake.discover_models = lambda **kwargs: (_phonon_model(),)
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+    elif engine == "piper":
         fake = _fake_package(PACKAGES[engine])
 
         class FakeVoiceAssetManager:
@@ -709,6 +776,11 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
 
     from voicerender.engines.selection import EngineRequest
 
+    if engine == "phonon":
+        fake = _fake_package(PACKAGES[engine])
+        fake.request_api_contract = _phonon_contract
+        fake.discover_models = lambda **kwargs: (_phonon_model(),)
+        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
     if engine == "qwen3":
         fake = _fake_package(PACKAGES[engine])
         fake.request_api_contract = lambda: SimpleNamespace(

@@ -2,7 +2,7 @@
 
 VoiceRender executes shared [RenderPlan](https://pypi.org/project/renderplan/) files through lazy, request-level synthesis engine adapters. It provides RenderProfile lifecycle tools, no-synthesis preflight reports, exact one-item/one-WAV rendering, content-addressed reuse, and verifiable shared manifests. Audio composition, external-media resolution, mastering, and export are outside VoiceRender.
 
-The package lives in `voicerender/`; engine SDKs and model assets are installed separately.
+The package lives in `voicerender/`; engine SDKs are optional and loaded lazily, while model-asset lifecycle is delegated to each engine.
 
 ## Install
 
@@ -17,6 +17,7 @@ Install only the engine SDK you need:
 ```bash
 python -m pip install "voicerender[piper]"
 python -m pip install "voicerender[sopro]"
+python -m pip install "voicerender[phonon]"
 ```
 
 For development from a checkout:
@@ -25,7 +26,23 @@ For development from a checkout:
 python -m pip install -e ".[dev]"
 ```
 
-Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `supertonic`, `inflect`, and `qwen3`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
+Available engine extras are `kokoro`, `piper`, `phonon`, `pocket`, `kitten`, `sopro`, `supertonic`, `inflect`, and `qwen3`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
+
+### PhononSynth prepared-text synthesis
+
+Install the optional CPU integration and inspect the current model/voice catalog:
+
+```bash
+python -m pip install "voicerender[phonon]"
+voicerender engines inspect phonon
+voicerender voices list --engine phonon --lang en-US
+```
+
+Choose a published model, named voice, and—when needed—one of that model's advertised quality values when creating a profile. PhononSynth owns catalog discovery and model loading; opening a render session can download/install selected model assets unless `--offline` is used with an existing cache. `cache_dir` and `offline` are forwarded to the SDK.
+
+VoiceRender passes the exact prepared text to `PhononVoice.measure_prepared()` and `synthesize_prepared()`. The SDK reports the exact token count but declares no input limit or fit decision, so VoiceRender records unknown capacity (`maximum=None`, `fits=None`) and preflight fails closed; it does not invent a limit or split the request.
+
+The adapter supports named voices and model-quality selection and forwards PhononSynth's supported generation options. It does not support reference voices/cloning, speaker selection, pronunciation overrides, `say_as` spans, linguistic tokens, whole-request phonemes, or word timings. Although the PhononSynth SDK has a streaming API, VoiceRender uses its complete-request synthesis API and does not expose streaming.
 
 ### Kitten request measurement
 
@@ -108,7 +125,7 @@ voicerender render examples/plans/chapter.renderplan.toml \
 voicerender inspect-manifest renders/narration/render-manifest.toml --json
 ```
 
-Install the selected engine extra and make its model assets available before preflight/render; VoiceRender does not download models implicitly. Preflight reports `ok`, `replan`, or `reject` for each required speech occurrence. An `ok` report approves that exact RenderPlan under the observed renderer capability; rendering still remeasures each exact request immediately before synthesis. If fresh capacity no longer fits, VoiceRender stops before synthesis for that occurrence and returns a new same-plan/same-occurrence `replan` report; a session-open failure returns a fresh `reject` report. The CLI writes that report to `--recheck-report` when supplied. VoiceRender never creates a child plan, changes text, or adapts chunking. Every RenderPlan speech item maps to exactly one public `SpeechRequest` and one numbered WAV, in plan order; VoiceRender does not split, merge, normalize, or reorder requests. Incremental manifests remain valid when rendering fails partway through. Render results expose an execution fingerprint (VoiceRender/adapter versions, API-probe signature, synthesis identity, voice/options, and measured capacity) separately from `RenderPlan.plan_id`.
+Install the selected engine extra before use. Model-asset behavior is engine-specific and delegated to its SDK; PhononSynth may download/install the selected model when a render session opens unless `--offline` is used with an existing cache. VoiceRender does not implement its own model downloads. Preflight reports `ok`, `replan`, or `reject` for each required speech occurrence. An `ok` report approves that exact RenderPlan under the observed renderer capability; rendering still remeasures each exact request immediately before synthesis. If fresh capacity no longer fits, VoiceRender stops before synthesis for that occurrence and returns a new same-plan/same-occurrence `replan` report; a session-open failure returns a fresh `reject` report. The CLI writes that report to `--recheck-report` when supplied. VoiceRender never creates a child plan, changes text, or adapts chunking. Every RenderPlan speech item maps to exactly one public `SpeechRequest` and one numbered WAV, in plan order; VoiceRender does not split, merge, normalize, or reorder requests. Incremental manifests remain valid when rendering fails partway through. Render results expose an execution fingerprint (VoiceRender/adapter versions, API-probe signature, synthesis identity, voice/options, and measured capacity) separately from `RenderPlan.plan_id`.
 
 ### Deferred emphasis
 

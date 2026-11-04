@@ -155,6 +155,7 @@ def main() -> None:
         "kitten",
         "kokoro",
         "piper",
+        "phonon",
         "pocket",
         "qwen3",
         "sopro",
@@ -162,6 +163,7 @@ def main() -> None:
     }
     assert find_spec("chatterboxsynth") is None
     assert find_spec("qwen3synth") is None
+    assert find_spec("phononsynth") is None
     listed_engines = list_engines()
     assert {item["id"] for item in listed_engines} == expected_engine_ids
     by_id = {item["id"]: item for item in listed_engines}
@@ -172,6 +174,7 @@ def main() -> None:
         "kittensynth",
         "pykokoro",
         "pipersynth",
+        "phononsynth",
         "pocketsynth",
         "qwen3synth",
         "soprosynth",

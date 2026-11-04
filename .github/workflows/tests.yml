@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        extra: [kokoro, piper, pocket, kitten, sopro, supertonic, inflect]
+        extra: [kokoro, piper, phonon, pocket, kitten, sopro, supertonic, inflect]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -63,7 +63,7 @@ jobs:
           python -m pip install --upgrade "pip<26.2"
           python -m pip install -e ".[${{ matrix.extra }}]" pytest
       - name: Run API and adapter contracts without model downloads
-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py
+        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_phononsynth_engine.py
 
   sopro-contract:
     runs-on: ubuntu-latest
@@ -103,9 +103,10 @@ jobs:
             "kittensynth[cpu]==0.1.4" \
             "soprosynth[cpu]==0.1.1" \
             "supertonicsynth[cpu]==0.1.2" \
-            "inflectsynth[cpu]==0.1.1"
+            "inflectsynth[cpu]==0.1.1" \
+            "phononsynth[cpu]==0.1.1"
       - name: Run released-set compatibility contracts
-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
+        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_phononsynth_engine.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
 
   lower-bounds:
     runs-on: ubuntu-latest
@@ -224,6 +225,7 @@ jobs:
                   "chatterboxsynth",
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
                   "pocketsynth", "soprosynth", "supertonicsynth",
+                  "phononsynth",
                   "qwen3synth",
               }
               assert not engine_sdks & base_requirements
@@ -248,6 +250,7 @@ jobs:
           import importlib.resources as resources
           import sys
 
+          from importlib.util import find_spec
           import voicerender
           import voicerender.book
           from renderplan import RenderPlanSet
@@ -265,16 +268,19 @@ jobs:
               "kitten",
               "kokoro",
               "piper",
+              "phonon",
               "pocket",
               "qwen3",
               "sopro",
               "supertonic",
           }
+          assert find_spec("phononsynth") is None
           assert not any(
               name.split(".", 1)[0] in {
                   "chatterboxsynth",
                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
                   "pocketsynth", "soprosynth", "supertonicsynth", "utterplan",
+                  "phononsynth",
                   "qwen3synth",
               }
               for name in sys.modules
