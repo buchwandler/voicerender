@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Literal
@@ -31,7 +31,7 @@ from renderplan import (
 )
 
 from .audio_boundaries import BOUNDARY_POLICY_ID, trim_renderer_trailing_silence
-from .engines.base import EngineSelection, SpeechRequest
+from .engines.base import EngineSelection, RenderedSpeech, SpeechRequest
 from .engines.registry import get_adapter
 from .error_diagnostics import (
     ERROR_DIAGNOSTIC_SCHEMA,
@@ -123,6 +123,275 @@ class _RenderFailure:
     error_diagnostic: dict[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RenderedOccurrence:
+    """One normalized in-memory speech result, in RenderPlan occurrence order."""
+
+    number: int
+    segment_id: str
+    speech: RenderedSpeech
+
+
+@dataclass(frozen=True, slots=True)
+class RenderPlanMemoryResult:
+    """Non-persisting execution result for a selected RenderPlan speech set."""
+
+    render_plan_id: str
+    selected_count: int
+    rendered: tuple[RenderedOccurrence, ...]
+    warnings: tuple[str, ...] = ()
+    fresh_preflight: PreflightReport | None = None
+    error: str | None = None
+    error_code: str | None = None
+    error_segment_number: int | None = None
+    error_segment_id: str | None = None
+    error_engine: str | None = None
+    error_type: str | None = None
+    error_diagnostic: Mapping[str, object] | None = None
+    pending_composition: bool = False
+
+    @property
+    def occurrences(self) -> tuple[RenderedOccurrence, ...]:
+        """Compatibility alias for the stable ``rendered`` result field."""
+        return self.rendered
+
+    @property
+    def rendered_count(self) -> int:
+        return len(self.rendered)
+
+    @property
+    def selection_complete(self) -> bool:
+        return self.rendered_count == self.selected_count and self.error is None
+
+    @property
+    def failed(self) -> bool:
+        return not self.selection_complete
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionContext:
+    plan: RenderPlan
+    preflight: PreflightReport
+    selected_items: tuple[SpeechItem, ...]
+    emphasis_policy: EmphasisPolicy
+    conversions: Mapping[tuple[int, str], SpeechRequestConversion]
+    deferred_controls: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalizedSynthesis:
+    speech: RenderedSpeech
+    boundary_info: dict[str, Any]
+    render_result: dict[str, Any]
+    synthesis_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _SpeechExecution:
+    session: Any | None
+    outcome: MeasurementOutcome | None
+    synthesis: _NormalizedSynthesis | None
+    failure: _RenderFailure | None
+
+
+def _prepare_execution_context(
+    plan: RenderPlan | str | Path,
+    preflight: PreflightReport | str | Path,
+    speech_numbers: Collection[int] | None,
+    emphasis_policy: EmphasisPolicy | str,
+) -> _ExecutionContext:
+    parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
+    if not isinstance(parsed_plan, RenderPlan):
+        raise PlanError("render input must be a RenderPlan")
+    selected_items = _select_speech_items(parsed_plan, speech_numbers)
+    report = (
+        load_preflight(preflight) if isinstance(preflight, (str, Path)) else preflight
+    )
+    if not isinstance(report, PreflightReport):
+        raise PlanError("render requires a shared RenderPlan preflight report")
+    if report.status != "ok":
+        raise PlanError(
+            f"RenderPlan preflight status must be 'ok', got {report.status!r}"
+        )
+    try:
+        report.validate_against(parsed_plan)
+    except ValueError as exc:
+        raise PlanError(
+            f"RenderPlan preflight report does not match the plan: {exc}"
+        ) from exc
+    checked = {
+        (check.segment_number, check.segment_id): check for check in report.checks
+    }
+    for item in parsed_plan.speech:
+        if not item.preflight_required:
+            continue
+        key = (item.number, item.segment_id or item.computed_id())
+        check = checked.get(key)
+        if check is None or check.status != "ok":
+            raise PlanError(
+                f"Speech occurrence {key} does not have a matching OK preflight check"
+            )
+    try:
+        policy = EmphasisPolicy(emphasis_policy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "emphasis_policy must be 'reject' or 'defer-to-compose'"
+        ) from exc
+    emphasis_items = tuple(
+        item
+        for item in parsed_plan.speech
+        if any(control.name == "emphasis" for control in item.controls)
+    )
+    if emphasis_items and policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
+        raise UnsupportedSynthesisFeatureError(
+            "This RenderPlan contains emphasis controls; explicitly select "
+            "emphasis_policy='defer-to-compose' and declare "
+            f"{EMPHASIS_COMPOSITION_CAPABILITY}"
+        )
+    for item in emphasis_items:
+        if not item.preflight_required:
+            continue
+        key = (item.number, item.segment_id or item.computed_id())
+        check = checked.get(key)
+        if check is None or EMPHASIS_COMPOSITION_CAPABILITY not in (check.detail or ""):
+            raise PlanError(
+                f"Preflight did not confirm deferred emphasis for speech occurrence {key}"
+            )
+    conversions = {
+        (
+            item.number,
+            item.segment_id or item.computed_id(),
+        ): speech_request_conversion_from_renderplan(item, emphasis_policy=policy)
+        for item in selected_items
+    }
+    deferred_controls = tuple(
+        {
+            "segment_number": item.number,
+            "segment_id": item.segment_id or item.computed_id(),
+            "capability": EMPHASIS_COMPOSITION_CAPABILITY,
+            "count": sum(control.name == "emphasis" for control in item.controls),
+        }
+        for item in emphasis_items
+        if policy is EmphasisPolicy.DEFER_TO_COMPOSE
+    )
+    return _ExecutionContext(
+        parsed_plan,
+        report,
+        selected_items,
+        policy,
+        conversions,
+        deferred_controls,
+    )
+
+
+def _measure_prepared_speech(
+    current: _PreparedSpeech, session: Any
+) -> MeasurementOutcome:
+    try:
+        measured = session.measure(current.request)
+    except Exception as exc:  # noqa: BLE001 - capacity/runtime errors are centrally classified.
+        return classify_measurement(exc)
+    return classify_measurement(measured)
+
+
+def _synthesize_prepared_speech(
+    current: _PreparedSpeech, session: Any
+) -> _NormalizedSynthesis:
+    synthesis_started = monotonic()
+    rendered_speech = session.synthesize(current.request)
+    synthesis_seconds = max(0.0, monotonic() - synthesis_started)
+    if rendered_speech.id != current.request.id:
+        raise ArtifactError(
+            "Renderer returned an artifact for a different speech request"
+        )
+    normalized_audio, boundary = trim_renderer_trailing_silence(
+        rendered_speech.audio, sample_rate=rendered_speech.sample_rate
+    )
+    boundary_info = asdict(boundary)
+    render_result: dict[str, Any] = {}
+    resolved_mode = rendered_speech.metadata.get("short_sentence_mode")
+    if isinstance(resolved_mode, str):
+        render_result["short_sentence_mode"] = resolved_mode
+    return _NormalizedSynthesis(
+        replace(rendered_speech, audio=normalized_audio),
+        boundary_info,
+        render_result,
+        synthesis_seconds,
+    )
+
+
+def _measurement_failure(
+    plan: RenderPlan, current: _PreparedSpeech, outcome: MeasurementOutcome
+) -> _RenderFailure:
+    item = current.item
+    fresh = (
+        _failure_report(plan, item, current.segment_id, outcome)
+        if item.preflight_required
+        else None
+    )
+    return _RenderFailure(
+        outcome.error or "Immediate renderer remeasurement did not return an exact fit",
+        fresh_preflight=fresh,
+        error_code=(
+            "preflight.replan"
+            if fresh is not None and fresh.status == "replan"
+            else "preflight.reject"
+            if fresh is not None
+            else "engine.measurement_failed"
+        ),
+        error_segment_number=item.number,
+        error_segment_id=current.segment_id,
+        error_engine=current.selection.engine,
+    )
+
+
+def _execute_prepared_speech(
+    plan: RenderPlan,
+    current: _PreparedSpeech,
+    sessions: EngineSessionPool,
+    *,
+    context: Mapping[str, object],
+) -> _SpeechExecution:
+    """Run the shared session, measurement, and normalized synthesis path."""
+    session = sessions.acquire(current.session_key, current.selection, context=context)
+    if isinstance(session, SessionOpenFailure):
+        item = current.item
+        failure = _RenderFailure(
+            f"Cannot open renderer session: {session.error}",
+            fresh_preflight=(
+                _rejected_report(plan, item, current.segment_id, session.error)
+                if item.preflight_required
+                else None
+            ),
+            error_code=(
+                "preflight.reject"
+                if item.preflight_required
+                else "engine.session_failed"
+            ),
+            error_segment_number=item.number,
+            error_segment_id=current.segment_id,
+            error_engine=current.selection.engine,
+            error_type=type(session.error).__name__,
+            error_diagnostic=_capture_exception_diagnostic(session.error),
+        )
+        return _SpeechExecution(None, None, None, failure)
+
+    outcome = _measure_prepared_speech(current, session)
+    if outcome.disposition is not PreflightDisposition.OK:
+        return _SpeechExecution(
+            session,
+            outcome,
+            None,
+            _measurement_failure(plan, current, outcome),
+        )
+    return _SpeechExecution(
+        session,
+        outcome,
+        _synthesize_prepared_speech(current, session),
+        None,
+    )
+
+
 def _capture_exception_diagnostic(error: BaseException) -> dict[str, object]:
     """Capture structured details without allowing diagnostics to mask failures."""
     try:
@@ -181,81 +450,15 @@ def render_renderplan(
 ) -> RenderPlanResult:
     """Render selected speech items, retaining verified artifacts from prior runs."""
     max_open_sessions = validate_max_open_sessions(max_open_sessions)
-    parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
-    if not isinstance(parsed_plan, RenderPlan):
-        raise PlanError("render input must be a RenderPlan")
-    selected_items = _select_speech_items(parsed_plan, speech_numbers)
-    report = (
-        load_preflight(preflight) if isinstance(preflight, (str, Path)) else preflight
+    context = _prepare_execution_context(
+        plan, preflight, speech_numbers, emphasis_policy
     )
-    if not isinstance(report, PreflightReport):
-        raise PlanError("render requires a shared RenderPlan preflight report")
-    if report.status != "ok":
-        raise PlanError(
-            f"RenderPlan preflight status must be 'ok', got {report.status!r}"
-        )
-    try:
-        report.validate_against(parsed_plan)
-    except ValueError as exc:
-        raise PlanError(
-            f"RenderPlan preflight report does not match the plan: {exc}"
-        ) from exc
-    checked = {
-        (check.segment_number, check.segment_id): check for check in report.checks
-    }
-    for item in parsed_plan.speech:
-        if not item.preflight_required:
-            continue
-        key = (item.number, item.segment_id or item.computed_id())
-        check = checked.get(key)
-        if check is None or check.status != "ok":
-            raise PlanError(
-                f"Speech occurrence {key} does not have a matching OK preflight check"
-            )
-
-    try:
-        policy = EmphasisPolicy(emphasis_policy)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "emphasis_policy must be 'reject' or 'defer-to-compose'"
-        ) from exc
-    emphasis_items = tuple(
-        item
-        for item in parsed_plan.speech
-        if any(control.name == "emphasis" for control in item.controls)
-    )
-    if emphasis_items and policy is not EmphasisPolicy.DEFER_TO_COMPOSE:
-        raise UnsupportedSynthesisFeatureError(
-            "This RenderPlan contains emphasis controls; explicitly select "
-            "emphasis_policy='defer-to-compose' and declare "
-            f"{EMPHASIS_COMPOSITION_CAPABILITY}"
-        )
-    for item in emphasis_items:
-        if not item.preflight_required:
-            continue
-        key = (item.number, item.segment_id or item.computed_id())
-        check = checked.get(key)
-        if check is None or EMPHASIS_COMPOSITION_CAPABILITY not in (check.detail or ""):
-            raise PlanError(
-                f"Preflight did not confirm deferred emphasis for speech occurrence {key}"
-            )
-    conversions = {
-        (
-            item.number,
-            item.segment_id or item.computed_id(),
-        ): speech_request_conversion_from_renderplan(item, emphasis_policy=policy)
-        for item in selected_items
-    }
-    deferred_controls = [
-        {
-            "segment_number": item.number,
-            "segment_id": item.segment_id or item.computed_id(),
-            "capability": EMPHASIS_COMPOSITION_CAPABILITY,
-            "count": sum(control.name == "emphasis" for control in item.controls),
-        }
-        for item in emphasis_items
-        if policy is EmphasisPolicy.DEFER_TO_COMPOSE
-    ]
+    parsed_plan = context.plan
+    report = context.preflight
+    selected_items = context.selected_items
+    policy = context.emphasis_policy
+    conversions = context.conversions
+    deferred_controls = list(context.deferred_controls)
     diagnostics: dict[str, Any] = {
         "schema": "voicerender.render-diagnostics.v1",
         "audio_boundary_policy": BOUNDARY_POLICY_ID,
@@ -459,40 +662,25 @@ def render_renderplan(
                             )
                     else:
                         fingerprint["execution_status"] = "synthesized"
-                        session = sessions.acquire(
-                            current.session_key,
-                            current.selection,
+                        execution = _execute_prepared_speech(
+                            parsed_plan,
+                            current,
+                            sessions,
                             context=item_context,
                         )
-                        if isinstance(session, SessionOpenFailure):
-                            fingerprint["execution_status"] = "session_open_failed"
+                        if execution.outcome is not None:
+                            fingerprint["capacity"] = _measurement_fingerprint(
+                                execution.outcome
+                            )
+                        if execution.failure is not None:
+                            failure = execution.failure
+                            fingerprint["execution_status"] = (
+                                "session_open_failed"
+                                if execution.session is None
+                                else "remeasurement_failed"
+                            )
                             execution_fingerprints[key] = (
                                 _finalize_execution_fingerprint(fingerprint)
-                            )
-                            failure = _RenderFailure(
-                                f"Cannot open renderer session: {session.error}",
-                                fresh_preflight=(
-                                    _rejected_report(
-                                        parsed_plan,
-                                        item,
-                                        current.segment_id,
-                                        session.error,
-                                    )
-                                    if item.preflight_required
-                                    else None
-                                ),
-                                error_code=(
-                                    "preflight.reject"
-                                    if item.preflight_required
-                                    else "engine.session_failed"
-                                ),
-                                error_segment_number=item.number,
-                                error_segment_id=current.segment_id,
-                                error_engine=current.selection.engine,
-                                error_type=type(session.error).__name__,
-                                error_diagnostic=_capture_exception_diagnostic(
-                                    session.error
-                                ),
                             )
                             progress_tracker.complete("failed")
                             emit_render_event(
@@ -502,8 +690,8 @@ def render_renderplan(
                                     progress_tracker,
                                     **item_context,
                                     status="failed",
-                                    error_type=type(session.error).__name__,
-                                    error_code=getattr(session.error, "code", None),
+                                    error_type=failure.error_type or "MeasurementError",
+                                    error_code=failure.error_code,
                                     error_message=failure.message,
                                     render_diagnostics=str(
                                         out / RENDER_DIAGNOSTICS_FILENAME
@@ -514,83 +702,21 @@ def render_renderplan(
                                 ),
                             )
                             break
-
-                        try:
-                            measured = session.measure(current.request)
-                        except Exception as exc:  # noqa: BLE001 - Capacity/runtime errors are centrally classified.
-                            outcome = classify_measurement(exc)
-                        else:
-                            outcome = classify_measurement(measured)
-                        fingerprint["capacity"] = _measurement_fingerprint(outcome)
-                        if outcome.disposition is not PreflightDisposition.OK:
-                            fresh = (
-                                _failure_report(
-                                    parsed_plan,
-                                    item,
-                                    current.segment_id,
-                                    outcome,
-                                )
-                                if item.preflight_required
-                                else None
+                        normalized_synthesis = execution.synthesis
+                        if normalized_synthesis is None:
+                            raise RuntimeError(
+                                "speech execution completed without a synthesis result"
                             )
-                            fingerprint["execution_status"] = "remeasurement_failed"
-                            execution_fingerprints[key] = (
-                                _finalize_execution_fingerprint(fingerprint)
-                            )
-                            failure = _RenderFailure(
-                                outcome.error
-                                or "Immediate renderer remeasurement did not return an exact fit",
-                                fresh_preflight=fresh,
-                                error_code=(
-                                    "preflight.replan"
-                                    if fresh is not None and fresh.status == "replan"
-                                    else "preflight.reject"
-                                    if fresh is not None
-                                    else "engine.measurement_failed"
-                                ),
-                                error_segment_number=item.number,
-                                error_segment_id=current.segment_id,
-                                error_engine=current.selection.engine,
-                            )
-                            progress_tracker.complete("failed")
-                            emit_render_event(
-                                on_event,
-                                _render_progress_event(
-                                    RenderEventKind.SEGMENT_FAILED,
-                                    progress_tracker,
-                                    **item_context,
-                                    status="failed",
-                                    error_type="MeasurementError",
-                                    error_code=failure.error_code,
-                                    render_diagnostics=str(
-                                        out / RENDER_DIAGNOSTICS_FILENAME
-                                    ),
-                                ),
-                            )
-                            break
-
-                        synthesis_started = monotonic()
-                        rendered_speech = session.synthesize(current.request)
-                        synthesis_seconds = max(0.0, monotonic() - synthesis_started)
-                        if rendered_speech.id != current.request.id:
-                            raise ArtifactError(
-                                "Renderer returned an artifact for a different speech request"
-                            )
-                        normalized_audio, boundary = trim_renderer_trailing_silence(
-                            rendered_speech.audio,
-                            sample_rate=rendered_speech.sample_rate,
-                        )
-                        boundary_info = asdict(boundary)
+                        synthesis_seconds = normalized_synthesis.synthesis_seconds
+                        rendered_speech = normalized_synthesis.speech
+                        normalized_audio = rendered_speech.audio
+                        boundary_info = normalized_synthesis.boundary_info
                         fingerprint["audio_boundary"] = boundary_info
                         diagnostics["audio_boundary"][current.segment_id] = (
                             boundary_info
                         )
-                        render_result = {}
-                        resolved_mode = rendered_speech.metadata.get(
-                            "short_sentence_mode"
-                        )
-                        if isinstance(resolved_mode, str):
-                            render_result["short_sentence_mode"] = resolved_mode
+                        render_result = normalized_synthesis.render_result
+                        if render_result:
                             fingerprint["render_result"] = render_result
                             diagnostics["render_results"][current.segment_id] = (
                                 render_result
@@ -815,6 +941,195 @@ def render_renderplan(
                 if result.diagnostics_path is not None
                 else None
             ),
+            **diagnostic_summary_fields(result.error_diagnostic),
+        ),
+    )
+    return result
+
+
+def render_renderplan_memory(
+    plan: RenderPlan,
+    *,
+    preflight: PreflightReport,
+    speech_numbers: Collection[int] | None = None,
+    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+    max_open_sessions: int = 1,
+    on_event: RenderEventCallback | None = None,
+) -> RenderPlanMemoryResult:
+    """Synthesize selected occurrences without creating or writing any files."""
+    max_open_sessions = validate_max_open_sessions(max_open_sessions)
+    context = _prepare_execution_context(
+        plan, preflight, speech_numbers, emphasis_policy
+    )
+    parsed_plan = context.plan
+    selected_items = context.selected_items
+    report_id = parsed_plan.plan_id or parsed_plan.computed_id()
+    progress_tracker = ProgressTracker(len(selected_items))
+    occurrences: list[RenderedOccurrence] = []
+    warnings: list[str] = []
+    if context.deferred_controls:
+        warnings.append(
+            "Rendered speech is unchanged; emphasis remains pending composition."
+        )
+    failure: _RenderFailure | None = None
+
+    emit_render_event(
+        on_event,
+        _render_progress_event(
+            RenderEventKind.RENDER_STARTED,
+            progress_tracker,
+            plan_id=report_id,
+        ),
+    )
+
+    def session_event_callback(kind: RenderEventKind) -> Callable[..., None]:
+        def emit_event(
+            _key: str,
+            selection: EngineSelection,
+            event_context: Mapping[str, object],
+            status: str | None = None,
+            error: Exception | None = None,
+            elapsed: float | None = None,
+        ) -> None:
+            fields = dict(event_context)
+            fields["engine"] = selection.engine
+            if status is not None:
+                fields["status"] = status
+            if error is not None:
+                fields["error_type"] = type(error).__name__
+                fields["error_code"] = getattr(error, "code", None)
+            if elapsed is not None:
+                fields["phase_elapsed_seconds"] = elapsed
+            emit_render_event(
+                on_event, _render_progress_event(kind, progress_tracker, **fields)
+            )
+
+        return emit_event
+
+    with EngineSessionPool(
+        max_open_sessions=max_open_sessions,
+        on_open_started=session_event_callback(RenderEventKind.ENGINE_OPEN_STARTED),
+        on_open_finished=session_event_callback(RenderEventKind.ENGINE_OPEN_FINISHED),
+        on_close_started=session_event_callback(RenderEventKind.ENGINE_CLOSE_STARTED),
+        on_close_finished=session_event_callback(RenderEventKind.ENGINE_CLOSE_FINISHED),
+    ) as sessions:
+        for item in selected_items:
+            segment_id = item.segment_id or item.computed_id()
+            current = _prepare_speech(
+                item,
+                emphasis_policy=context.emphasis_policy,
+                conversion=context.conversions[(item.number, segment_id)],
+            )
+            item_context = {
+                "plan_id": report_id,
+                "segment_number": item.number,
+                "segment_id": segment_id,
+                "role": item.role,
+                "engine": current.selection.engine,
+            }
+            emit_render_event(
+                on_event,
+                _render_progress_event(
+                    RenderEventKind.SEGMENT_STARTED,
+                    progress_tracker,
+                    **item_context,
+                ),
+            )
+            try:
+                execution = _execute_prepared_speech(
+                    parsed_plan,
+                    current,
+                    sessions,
+                    context=item_context,
+                )
+                failure = execution.failure
+                if failure is None:
+                    normalized = execution.synthesis
+                    if normalized is None:
+                        raise RuntimeError(
+                            "speech execution completed without a synthesis result"
+                        )
+                    occurrences.append(
+                        RenderedOccurrence(
+                            number=item.number,
+                            segment_id=segment_id,
+                            speech=normalized.speech,
+                        )
+                    )
+                    warnings.extend(normalized.speech.warnings)
+            except RenderEventCallbackError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep the memory result inspectable.
+                code = getattr(exc, "code", None)
+                failure = _RenderFailure(
+                    str(exc) or "Render failed",
+                    error_code=code if isinstance(code, str) else "render.failed",
+                    error_segment_number=item.number,
+                    error_segment_id=segment_id,
+                    error_engine=getattr(exc, "engine", None)
+                    or current.selection.engine,
+                    error_type=type(exc).__name__,
+                    error_diagnostic=_capture_exception_diagnostic(exc),
+                )
+            if failure is not None:
+                progress_tracker.complete("failed")
+                emit_render_event(
+                    on_event,
+                    _render_progress_event(
+                        RenderEventKind.SEGMENT_FAILED,
+                        progress_tracker,
+                        **item_context,
+                        status="failed",
+                        error_type=failure.error_type,
+                        error_code=failure.error_code,
+                        error_message=failure.message,
+                        **diagnostic_summary_fields(failure.error_diagnostic),
+                    ),
+                )
+                break
+            progress_tracker.complete("rendered")
+            emit_render_event(
+                on_event,
+                _render_progress_event(
+                    RenderEventKind.SEGMENT_RENDERED,
+                    progress_tracker,
+                    **item_context,
+                    status="rendered",
+                ),
+            )
+        sessions.close(
+            status="failure_cleanup" if failure is not None else "render_complete"
+        )
+
+    for _item in selected_items[len(occurrences) + (1 if failure else 0) :]:
+        progress_tracker.complete("skipped")
+    result = RenderPlanMemoryResult(
+        render_plan_id=report_id,
+        selected_count=len(selected_items),
+        rendered=tuple(occurrences),
+        warnings=tuple(warnings),
+        fresh_preflight=failure.fresh_preflight if failure is not None else None,
+        error=failure.message if failure is not None else None,
+        error_code=failure.error_code if failure is not None else None,
+        error_segment_number=(
+            failure.error_segment_number if failure is not None else None
+        ),
+        error_segment_id=failure.error_segment_id if failure is not None else None,
+        error_engine=failure.error_engine if failure is not None else None,
+        error_type=failure.error_type if failure is not None else None,
+        error_diagnostic=(failure.error_diagnostic if failure is not None else None),
+        pending_composition=bool(context.deferred_controls),
+    )
+    emit_render_event(
+        on_event,
+        _render_progress_event(
+            RenderEventKind.RENDER_COMPLETED,
+            progress_tracker,
+            plan_id=report_id,
+            status="failed" if result.failed else "completed",
+            error_code=result.error_code,
+            error_type=result.error_type,
+            error_message=result.error,
             **diagnostic_summary_fields(result.error_diagnostic),
         ),
     )

@@ -75,13 +75,13 @@ def _preflight_progress_event(
 
 def preflight_render_plan(
     plan: RenderPlan,
-    output: str | Path,
+    output: str | Path | None = None,
     *,
     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
     max_open_sessions: int = 1,
     on_event: RenderEventCallback | None = None,
 ) -> PreflightReport:
-    """Measure each required speech occurrence, then validate and persist its report."""
+    """Measure each required speech occurrence and optionally persist the validated report."""
     if not isinstance(plan, RenderPlan):
         raise PlanError("preflight input must be a RenderPlan")
     max_open_sessions = validate_max_open_sessions(max_open_sessions)
@@ -240,7 +240,8 @@ def preflight_render_plan(
             producer=Producer(name="voicerender", version=_voicerender_version()),
         ).with_identity()
         report.validate_against(plan)
-        save_preflight(report, output)
+        if output is not None:
+            save_preflight(report, output)
         emit_render_event(
             on_event,
             _preflight_progress_event(

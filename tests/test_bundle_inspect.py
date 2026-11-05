@@ -2,24 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 import tomlkit
 from renderplan import (
+    RenderManifest,
     RenderPlan,
     RoleProfile,
     SourceSpan,
+    SpeechArtifact,
     SpeechItem,
+    load_plan,
+    save_manifest,
     save_plan,
     save_profile,
 )
 
 from voicerender import cli
+from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
 from voicerender.bundle_contract import BundleContractError
 from voicerender.bundle_inspect import inspect_bundle
+from voicerender.bundle_render_inspect import inspect_bundle_render
 from voicerender.bundle_roles import BundleRolesError
+from voicerender.storage import atomic_wav
 from voicerender.variants import list_bundle_variants
 
 
@@ -422,3 +430,95 @@ def test_bundle_roles_and_inspect_cli_variant_human_json_and_check(
     assert cli.main(["bundle", "inspect", str(root), "--check", "--json"]) == 2
     error = json.loads(capsys.readouterr().out)
     assert error["error_code"] == "bundle.roles_invalid"
+
+
+def test_bundle_render_inspection_is_selection_aware_and_read_only(
+    tmp_path: Path,
+) -> None:
+    root = _write_bundle(tmp_path)
+    variant, _ = _write_variant(root, "render-inspection")
+    plan_path = root / "renderplan" / variant / "document.renderplan.toml"
+    plan = load_plan(plan_path)
+    first = plan.speech[0]
+    second = replace(first, number=2, segment_id=None, text="A second sentence.")
+    plan = replace(plan, flow=(first, second), plan_id=None).with_identity()
+    save_plan(plan, plan_path)
+
+    output_root = tmp_path / "voice-output"
+    output = output_root / variant / "document-0001"
+    output.mkdir(parents=True)
+    info = atomic_wav(output / first.wav, [0.0, 0.1, -0.1], 24000)
+    artifact = SpeechArtifact(
+        segment_number=first.number,
+        segment_id=first.segment_id or first.computed_id(),
+        wav=first.wav,
+        sha256=f"sha256:{info['sha256']}",
+        frames=int(info["frames"]),
+        sample_rate=int(info["sample_rate"]),
+        channels=int(info["channels"]),
+    )
+    manifest = RenderManifest(
+        render_plan_id=plan.plan_id or plan.computed_id(),
+        speech=(artifact,),
+        complete=False,
+    ).with_identity()
+    save_manifest(manifest, output / "render-manifest.toml")
+    (output / "render-diagnostics.json").write_text(
+        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
+    )
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    inspected = inspect_bundle_render(root, variant=variant, output_root=output_root)
+
+    assert inspected.state == "partial"
+    assert [item.state for item in inspected.selected_occurrences] == [
+        "reusable",
+        "missing",
+    ]
+    assert inspected.rendered_occurrences[0].number == 1
+    assert inspected.missing_occurrences[0].number == 2
+    assert not inspected.force_required
+    assert inspected.reset_safe
+    assert inspected.replacement_safe
+    assert inspected.to_dict()["format"] == "voicerender-bundle-render-inspection"
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+    (output / first.wav).write_bytes(b"corrupt output")
+    corrupted = inspect_bundle_render(root, variant=variant, output_root=output_root)
+    assert corrupted.corrupt_occurrences[0].number == 1
+    assert not corrupted.force_required
+
+
+def test_bundle_render_inspection_reports_stale_and_unsafe_reset(
+    tmp_path: Path,
+) -> None:
+    root = _write_bundle(tmp_path)
+    variant, _ = _write_variant(root, "stale-render-inspection")
+    output_root = tmp_path / "voice-output"
+    output = output_root / variant / "document-0001"
+    output.mkdir(parents=True)
+    (output / "000001.wav").mkdir()
+    stale_manifest = RenderManifest(
+        render_plan_id="sha256:" + "0" * 64,
+        speech=(),
+        complete=False,
+    ).with_identity()
+    save_manifest(stale_manifest, output / "render-manifest.toml")
+
+    inspected = inspect_bundle_render(root, variant=variant, output_root=output_root)
+
+    assert inspected.state == "stale"
+    assert inspected.stale_occurrences
+    assert inspected.force_required
+    assert not inspected.reset_safe
+    assert not inspected.replacement_safe
+    assert inspected.reset_detail is not None

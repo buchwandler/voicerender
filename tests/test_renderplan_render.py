@@ -58,6 +58,7 @@ from voicerender.preflight import preflight_render_plan
 from voicerender.renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
     render_renderplan,
+    render_renderplan_memory,
 )
 from voicerender.storage import wav_info
 
@@ -250,6 +251,36 @@ def _plan(
 def _report(adapter: _Adapter, plan: RenderPlan, tmp_path: Path) -> PreflightReport:
     del adapter
     return preflight_render_plan(plan, tmp_path / "preflight.toml")
+
+
+def test_memory_preflight_and_render_are_nonpersisting_and_selection_aware(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _install(monkeypatch)
+    plan = _plan("first", "second")
+
+    report = preflight_render_plan(plan)
+    assert report.status == "ok"
+    assert list(tmp_path.iterdir()) == []
+
+    persisted_report = preflight_render_plan(
+        plan, tmp_path / "persisted-preflight.toml"
+    )
+    assert report == persisted_report
+    existing_files = list(tmp_path.iterdir())
+
+    result = render_renderplan_memory(plan, preflight=report, speech_numbers={2})
+
+    assert result.selection_complete
+    assert result.selected_count == result.rendered_count == 1
+    assert result.rendered[0].number == 2
+    assert result.rendered[0].speech.id
+    assert adapter.synthesized_texts == ["second"]
+
+    ordered = render_renderplan_memory(plan, preflight=report)
+    assert [item.number for item in ordered.rendered] == [1, 2]
+    assert adapter.synthesized_texts == ["second", "first", "second"]
+    assert list(tmp_path.iterdir()) == existing_files
 
 
 def test_preflight_and_render_share_optional_token_lowering(

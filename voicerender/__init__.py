@@ -26,6 +26,11 @@ from .bundle_batch import (
 )
 from .bundle_contract import BundleContractError
 from .bundle_inspect import BundleInspectResult, inspect_bundle
+from .bundle_render_inspect import (
+    BundleRenderInspection,
+    RenderOccurrenceInspection,
+    inspect_bundle_render,
+)
 from .bundle_roles import (
     BundleRequiredRole,
     BundleRoleBinding,
@@ -129,7 +134,13 @@ from .profile_roles import (
 )
 from .progress import EtaConfidence, RenderProgress
 from .render import render, render_plan
-from .renderplan_render import RenderPlanResult, render_renderplan
+from .renderplan_render import (
+    RenderedOccurrence,
+    RenderPlanMemoryResult,
+    RenderPlanResult,
+    render_renderplan,
+    render_renderplan_memory,
+)
 from .renderprofile import (
     create_render_profile,
     load_render_profile,
@@ -198,6 +209,7 @@ __all__ = [
     "BundleBatchRenderSummary",
     "BundleContractError",
     "BundleInspectResult",
+    "BundleRenderInspection",
     "BundleRenderResult",
     "BundleRequiredRole",
     "BundleRoleBinding",
@@ -253,13 +265,16 @@ __all__ = [
     "RenderEventCallbackError",
     "RenderEventKind",
     "RenderManifest",
+    "RenderOccurrenceInspection",
     "RenderPlan",
+    "RenderPlanMemoryResult",
     "RenderPlanResult",
     "RenderProfile",
     "RenderProfileFragment",
     "RenderProgress",
     "RenderResult",
     "RenderScope",
+    "RenderedOccurrence",
     "RenderedSpeech",
     "RequestMeasure",
     "ResolvedPreparedVoice",
@@ -301,6 +316,7 @@ __all__ = [
     "estimate_render_document",
     "estimate_renderplan",
     "inspect_bundle",
+    "inspect_bundle_render",
     "inspect_bundle_roles",
     "inspect_voice",
     "install_model",
@@ -329,6 +345,7 @@ __all__ = [
     "render_bundle_batch",
     "render_plan",
     "render_renderplan",
+    "render_renderplan_memory",
     "resolve_prepared_voice",
     "resolve_reference_audio",
     "resolve_voice",

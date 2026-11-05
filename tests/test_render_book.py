@@ -45,6 +45,7 @@ from voicerender import (
 from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
 from voicerender.book import render_book
 from voicerender.book_contract import load_renderplan_set
+from voicerender.bundle_render_inspect import inspect_bundle_render
 from voicerender.errors import ArtifactError
 from voicerender.events import (
     RenderEvent,
@@ -465,6 +466,63 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "session_limits": session_limits,
         "policy": policy_calls,
     }
+
+
+def test_bundle_render_inspection_selects_book_chapter_and_speech(
+    tmp_path: Path,
+) -> None:
+    workspace, variant = _book(tmp_path, chapters=((7, 3), (5, 2)))
+    plan_path = workspace / "renderplan" / variant / "chapter-0007.renderplan.toml"
+    plan = load_plan(plan_path)
+    output_root = tmp_path / "voice-output"
+    output = output_root / variant / "chapter-0007"
+    output.mkdir(parents=True)
+    item = plan.speech[0]
+    info = atomic_wav(output / item.wav, [0.0, 0.1, -0.1], 24000)
+    artifact = SpeechArtifact(
+        segment_number=item.number,
+        segment_id=item.segment_id or item.computed_id(),
+        wav=item.wav,
+        sha256=f"sha256:{info['sha256']}",
+        frames=int(info["frames"]),
+        sample_rate=int(info["sample_rate"]),
+        channels=int(info["channels"]),
+    )
+    manifest = RenderManifest(
+        render_plan_id=plan.plan_id or plan.computed_id(),
+        speech=(artifact,),
+        complete=False,
+        producer=Producer(name="test", version="1"),
+    ).with_identity()
+    save_manifest(manifest, output / RENDER_MANIFEST_FILENAME)
+    (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
+        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
+    )
+
+    one_speech = inspect_bundle_render(
+        workspace,
+        variant=variant,
+        chapters="7",
+        speech="1",
+        output_root=output_root,
+    )
+    all_speeches = inspect_bundle_render(
+        workspace,
+        variant=variant,
+        chapters="7",
+        output_root=output_root,
+    )
+
+    assert one_speech.state == "complete"
+    assert one_speech.selected_chapters == ("chapter-0007",)
+    assert len(one_speech.selected_occurrences) == 1
+    assert one_speech.rendered_occurrences[0].number == 1
+    assert all_speeches.state == "partial"
+    assert [item.state for item in all_speeches.selected_occurrences] == [
+        "reusable",
+        "missing",
+        "missing",
+    ]
 
 
 def test_book_propagates_explicit_emphasis_policy(

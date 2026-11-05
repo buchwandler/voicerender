@@ -657,6 +657,7 @@ def _resolve_request(
     reset_stale_output: bool,
     fail_fast: bool,
     emphasis_policy: EmphasisPolicy,
+    inspect_output: bool = False,
 ) -> BookRenderRequest:
     workspace_path = _resolve_workspace(workspace)
     renderplan_base = _resolve_root(
@@ -728,10 +729,10 @@ def _resolve_request(
             f"VoiceRender output variant is not a directory: {output_variant_dir}",
             code="workspace.invalid",
         )
-    _assert_safe_output_metadata(
-        output_variant_dir / BOOK_REPORT_FILENAME, output_variant_dir
-    )
-
+    if not inspect_output:
+        _assert_safe_output_metadata(
+            output_variant_dir / BOOK_REPORT_FILENAME, output_variant_dir
+        )
     loaded_chapters: list[_LoadedChapter] = []
     chapter_outputs: set[Path] = set()
     for entry in selected_entries:
@@ -767,17 +768,18 @@ def _resolve_request(
                 f"selected chapters share an output directory: {chapter_output}",
                 code="workspace.invalid",
             )
-        _assert_safe_output_metadata(
-            chapter_output_resolved / RENDER_MANIFEST_FILENAME,
-            chapter_output_resolved,
-        )
-        _assert_safe_output_metadata(
-            chapter_output_resolved / "preflight.toml", chapter_output_resolved
-        )
-        _assert_safe_output_metadata(
-            chapter_output_resolved / RECHECK_PREFLIGHT_FILENAME,
-            chapter_output_resolved,
-        )
+        if not inspect_output:
+            _assert_safe_output_metadata(
+                chapter_output_resolved / RENDER_MANIFEST_FILENAME,
+                chapter_output_resolved,
+            )
+            _assert_safe_output_metadata(
+                chapter_output_resolved / "preflight.toml", chapter_output_resolved
+            )
+            _assert_safe_output_metadata(
+                chapter_output_resolved / RECHECK_PREFLIGHT_FILENAME,
+                chapter_output_resolved,
+            )
         chapter_outputs.add(chapter_output_resolved)
         speech_numbers = (
             None
