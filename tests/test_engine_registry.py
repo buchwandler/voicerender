@@ -883,7 +883,7 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
                 defaults = {
                     "speed": 1.0,
                     "steps": 5,
-                    "seed": 0,
+                    "seed": None if engine == "supertonic" else 0,
                     "variation": 0.667,
                     "mode": "off",
                 }
@@ -927,5 +927,8 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
     assert not diagnostics
     assert selection.engine == engine
     assert selection.target_id == "demo-model"
+
+    if engine == "supertonic":
+        assert "seed" not in selection.options
     if engine == "piper":
         assert selection.options["length_scale"] == 0.5

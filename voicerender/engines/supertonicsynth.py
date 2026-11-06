@@ -487,16 +487,19 @@ class SupertonicSynthEngineAdapter:
                 "synthesis.engine_options",
             ) from exc
         selected_options = {
-            name: options[name] for name in SUPERTONIC_OPTION_NAMES if name in options
+            name: options[name]
+            for name in SUPERTONIC_OPTION_NAMES
+            if name in options and options[name] is not None
         }
         selected_options.update(
             {
                 "steps": generation.steps,
                 "speed": generation.speed,
-                "seed": generation.seed,
                 "voice_level": voice_level.mode,
             }
         )
+        if generation.seed is not None:
+            selected_options["seed"] = generation.seed
         selection = EngineSelection(
             engine=self.id,
             target_id=target_id,
