@@ -612,7 +612,9 @@ def test_explicit_cross_language_voice_is_rejected_in_selection(
         monkeypatch, language="de-DE", voice="AV_cori"
     )
     mismatch = next(
-        item for item in diagnostics if item.code == "pykokoro.voice_language_incompatible"
+        item
+        for item in diagnostics
+        if item.code == "pykokoro.voice_language_incompatible"
     )
 
     assert mismatch.severity == "error"
@@ -633,7 +635,9 @@ def test_german_selection_rejects_the_implicit_english_default(
         monkeypatch, language="de-DE", voice=None
     )
     mismatch = next(
-        item for item in diagnostics if item.code == "pykokoro.voice_language_incompatible"
+        item
+        for item in diagnostics
+        if item.code == "pykokoro.voice_language_incompatible"
     )
 
     assert mismatch.details["voice"] == "AV_ariala"

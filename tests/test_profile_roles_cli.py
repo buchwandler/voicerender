@@ -110,7 +110,9 @@ def _install_akinvox_profile_discovery(monkeypatch) -> None:
     monkeypatch.setattr(
         PyKokoroEngineAdapter,
         "open",
-        lambda *_args, **_kwargs: pytest.fail("profile selection must not open synthesis"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "profile selection must not open synthesis"
+        ),
     )
 
 

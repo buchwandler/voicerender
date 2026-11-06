@@ -132,7 +132,9 @@ def _language_matches(descriptor: VoiceDescriptor, language: str | None) -> bool
     if language is None:
         return True
     expected = normalize_language_key(language)
-    return any(normalize_language_key(item) == expected for item in descriptor.languages)
+    return any(
+        normalize_language_key(item) == expected for item in descriptor.languages
+    )
 
 
 def _target_descriptors(target: Any) -> list[VoiceDescriptor]:

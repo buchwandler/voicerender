@@ -237,7 +237,6 @@ def test_api_probe_rejects_bad_version(
     assert probe.status == status
 
 
-
 def test_api_probe_rejects_v1_with_actionable_error_without_opening_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,6 +276,7 @@ def test_api_probe_rejects_missing_or_false_authoritative_fit_contract(
     }
     assert "phononsynth>=0.1.2,<0.2" in probe.error_message
     assert package.PhononVoice.opens == []
+
 
 def test_api_probe_rejects_missing_required_method(
     monkeypatch: pytest.MonkeyPatch,
@@ -536,7 +536,14 @@ def test_measurement_preserves_authoritative_fit_and_exact_prepared_text() -> No
         SimpleNamespace(token_count=23, max_tokens=20, fits=True),
         SimpleNamespace(token_count=23, max_tokens=30, fits=False),
     ],
-    ids=("unknown-fit", "boolean-count", "negative-count", "zero-maximum", "too-long-fit", "too-short-fit"),
+    ids=(
+        "unknown-fit",
+        "boolean-count",
+        "negative-count",
+        "zero-maximum",
+        "too-long-fit",
+        "too-short-fit",
+    ),
 )
 def test_measurement_rejects_invalid_contract_values(measurement: Any) -> None:
     class Voice:
@@ -552,6 +559,7 @@ def test_measurement_rejects_invalid_contract_values(measurement: Any) -> None:
     assert raised.value.details["token_count"] == measurement.token_count
     assert raised.value.details["max_tokens"] == measurement.max_tokens
     assert raised.value.details["fits"] == measurement.fits
+
 
 def test_measurement_translates_empty_text_error(
     monkeypatch: pytest.MonkeyPatch,

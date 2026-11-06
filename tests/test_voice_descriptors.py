@@ -95,12 +95,8 @@ def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
         "voicerender.voices_api.discover_targets", lambda *a, **k: (target,)
     )
 
-    english = list_voices(
-        engine="kokoro", target_id=target.id, language="en-US"
-    )
-    german = list_voices(
-        engine="kokoro", target_id=target.id, language="de-DE"
-    )
+    english = list_voices(engine="kokoro", target_id=target.id, language="en-US")
+    german = list_voices(engine="kokoro", target_id=target.id, language="de-DE")
     german_underscore = list_voices(
         engine="kokoro", target_id=target.id, language="de_AT"
     )
@@ -109,9 +105,7 @@ def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
     assert {item.voice for item in german} == set(target.voices[8:])
     assert {item.voice for item in german_underscore} == set(target.voices[8:])
     assert all(item.languages == ("en", "en-us", "en-gb") for item in english)
-    assert all(
-        item.languages == ("de", "de-de", "de-at", "de-ch") for item in german
-    )
+    assert all(item.languages == ("de", "de-de", "de-at", "de-ch") for item in german)
 
 
 def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:

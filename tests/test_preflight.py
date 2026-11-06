@@ -1097,7 +1097,9 @@ def test_kokoro_preflight_rejects_cross_language_voice_before_runtime_open(
     monkeypatch.setattr(
         adapter,
         "open",
-        lambda *_args, **_kwargs: pytest.fail("incompatible bindings must fail before runtime open"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "incompatible bindings must fail before runtime open"
+        ),
     )
     binding = {
         "renderer": "kokoro",

@@ -257,15 +257,14 @@ def _error_context(
     }
 
 
-
-def _validated_measurement(
-    measured: Any, selection: EngineSelection
-) -> RequestMeasure:
+def _validated_measurement(measured: Any, selection: EngineSelection) -> RequestMeasure:
     amount = _value(measured, "token_count")
     maximum = _value(measured, "max_tokens")
     fits = _value(measured, "fits")
 
-    valid_amount = isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
+    valid_amount = (
+        isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
+    )
     valid_maximum = maximum is None or (
         isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
     )
@@ -295,6 +294,7 @@ def _validated_measurement(
         source="phononsynth.measure_prepared",
         details={"model_id": _value(measured, "model_id") or selection.target_id},
     )
+
 
 def _translate_phonon_error(
     error: Exception,
@@ -560,10 +560,7 @@ class PhononSynthEngineAdapter:
                 failed_stage="request_api_contract",
                 failed_symbol="request_api_contract",
                 error_message=_PHONON_API_COMPATIBILITY_MESSAGE,
-                warnings=probe.warnings
-                + (
-                    _PHONON_API_COMPATIBILITY_MESSAGE,
-                ),
+                warnings=probe.warnings + (_PHONON_API_COMPATIBILITY_MESSAGE,),
                 details={**dict(probe.details), "contract_mismatches": contradictions},
             )
         return replace(
