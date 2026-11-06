@@ -250,13 +250,14 @@ def _fake_package(package: str) -> ModuleType:
 
 def _phonon_contract() -> dict[str, object]:
     return {
-        "version": 1,
+        "version": 2,
         "engine": "phonon",
         "entrypoint": "PhononVoice.synthesize_prepared",
         "stream_entrypoint": "PhononVoice.stream_prepared",
         "measure_entrypoint": "PhononVoice.measure_prepared",
         "input": "prepared_text",
         "measurement_unit": "model_tokens",
+        "measurement_fit_is_authoritative": True,
         "max_input_tokens": None,
         "features": {
             "named_voices": True,
@@ -340,6 +341,7 @@ def test_all_engine_probes_use_public_api_without_loading_models(
     fake = _fake_package(package)
     monkeypatch.setitem(sys.modules, package, fake)
     if engine == "phonon":
+        fake.REQUEST_API_VERSION = 2
         fake.request_api_contract = _phonon_contract
     elif engine == "inflect":
         fake.request_api_contract = lambda: {

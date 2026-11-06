@@ -18,7 +18,7 @@ from ..errors import (
     InvalidEngineVoiceError,
     UnsupportedSynthesisFeatureError,
 )
-from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
+from .api_probe import EngineApiProbe, probe_public_api
 from .base import (
     PCM_RANGE_POLICY,
     EngineCapabilities,
@@ -43,6 +43,12 @@ from .profiles import make_renderprofile_fragment
 
 ENGINE_ID = "phonon"
 PACKAGE_NAME = "phononsynth"
+PHONONSYNTH_REQUEST_API_VERSION = 2
+_PHONON_API_COMPATIBILITY_MESSAGE = (
+    "PhononSynth request API is incompatible. VoiceRender requires the "
+    "authoritative request-measurement contract. Install "
+    "phononsynth>=0.1.2,<0.2."
+)
 PHONON_OPTION_NAMES = frozenset(
     {
         "quality",
@@ -251,6 +257,45 @@ def _error_context(
     }
 
 
+
+def _validated_measurement(
+    measured: Any, selection: EngineSelection
+) -> RequestMeasure:
+    amount = _value(measured, "token_count")
+    maximum = _value(measured, "max_tokens")
+    fits = _value(measured, "fits")
+
+    valid_amount = isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
+    valid_maximum = maximum is None or (
+        isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
+    )
+    if not valid_amount or not isinstance(fits, bool) or not valid_maximum:
+        raise EngineBackendError(
+            "PhononSynth returned an invalid request measurement.",
+            engine=ENGINE_ID,
+            target_id=selection.target_id,
+            code="phonon.measurement_invalid",
+            details={"token_count": amount, "max_tokens": maximum, "fits": fits},
+        )
+
+    if maximum is not None and fits is not (amount <= maximum):
+        raise EngineBackendError(
+            "PhononSynth request measurement contradicts its maximum.",
+            engine=ENGINE_ID,
+            target_id=selection.target_id,
+            code="phonon.measurement_invalid",
+            details={"token_count": amount, "max_tokens": maximum, "fits": fits},
+        )
+
+    return RequestMeasure(
+        fits=fits,
+        amount=amount,
+        maximum=maximum,
+        unit="model_tokens",
+        source="phononsynth.measure_prepared",
+        details={"model_id": _value(measured, "model_id") or selection.target_id},
+    )
+
 def _translate_phonon_error(
     error: Exception,
     selection: EngineSelection,
@@ -334,16 +379,7 @@ class PhononSynthEngineSession:
             raise
         except Exception as exc:  # Backend errors are normalized at this boundary.
             raise _translate_phonon_error(exc, self._selection, request) from exc
-        return RequestMeasure(
-            fits=_value(measured, "fits"),
-            amount=_value(measured, "token_count"),
-            maximum=_value(measured, "max_tokens"),
-            unit="model_tokens",
-            source="phononsynth.measure_prepared",
-            details={
-                "model_id": _value(measured, "model_id") or self._selection.target_id,
-            },
-        )
+        return _validated_measurement(measured, self._selection)
 
     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
         unsupported = (
@@ -461,10 +497,16 @@ class PhononSynthEngineAdapter:
                 ),
                 "__module__": ("discover_models", "runtime_identity"),
             },
-            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
+            expected_api_version=PHONONSYNTH_REQUEST_API_VERSION,
             require_explicit_contract=True,
         )
         if not probe.compatible:
+            if probe.status == "api_version_incompatible":
+                return replace(
+                    probe,
+                    error_message=_PHONON_API_COMPATIBILITY_MESSAGE,
+                    warnings=probe.warnings + (_PHONON_API_COMPATIBILITY_MESSAGE,),
+                )
             return probe
         try:
             contract = _module().request_api_contract()
@@ -475,6 +517,9 @@ class PhononSynthEngineAdapter:
                 "measure_entrypoint": _contract_field(contract, "measure_entrypoint"),
                 "input": _contract_field(contract, "input"),
                 "measurement_unit": _contract_field(contract, "measurement_unit"),
+                "measurement_fit_is_authoritative": _contract_field(
+                    contract, "measurement_fit_is_authoritative"
+                ),
                 "named_voices": _contract_field(features, "named_voices"),
                 "voice_cloning": _contract_field(features, "voice_cloning"),
                 "word_timings": _contract_field(features, "word_timings"),
@@ -496,6 +541,7 @@ class PhononSynthEngineAdapter:
             "measure_entrypoint": "PhononVoice.measure_prepared",
             "input": "prepared_text",
             "measurement_unit": "model_tokens",
+            "measurement_fit_is_authoritative": True,
             "named_voices": True,
             "voice_cloning": False,
             "word_timings": False,
@@ -513,9 +559,10 @@ class PhononSynthEngineAdapter:
                 status="api_incompatible",
                 failed_stage="request_api_contract",
                 failed_symbol="request_api_contract",
+                error_message=_PHONON_API_COMPATIBILITY_MESSAGE,
                 warnings=probe.warnings
                 + (
-                    "PhononSynth request contract contradicts VoiceRender adapter semantics.",
+                    _PHONON_API_COMPATIBILITY_MESSAGE,
                 ),
                 details={**dict(probe.details), "contract_mismatches": contradictions},
             )
@@ -902,6 +949,7 @@ class PhononSynthEngineAdapter:
 __all__ = [
     "ENGINE_ID",
     "PACKAGE_NAME",
+    "PHONONSYNTH_REQUEST_API_VERSION",
     "PHONON_OPTION_NAMES",
     "PhononSelectionError",
     "PhononSynthEngineAdapter",

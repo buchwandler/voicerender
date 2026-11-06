@@ -40,7 +40,7 @@ voicerender voices list --engine phonon --lang en-US
 
 Choose a published model, named voice, and—when needed—one of that model's advertised quality values when creating a profile. PhononSynth owns catalog discovery and model loading; opening a render session can download/install selected model assets unless `--offline` is used with an existing cache. `cache_dir` and `offline` are forwarded to the SDK.
 
-VoiceRender passes the exact prepared text to `PhononVoice.measure_prepared()` and `synthesize_prepared()`. The SDK reports the exact token count but declares no input limit or fit decision, so VoiceRender records unknown capacity (`maximum=None`, `fits=None`) and preflight fails closed; it does not invent a limit or split the request.
+VoiceRender passes the exact prepared text to `PhononVoice.measure_prepared()` and `synthesize_prepared()`. The Phonon extra requires PhononSynth 0.1.2 or later in the 0.1 series, whose request API reports an authoritative boolean fit alongside the exact token count. No finite text-token maximum is declared, so VoiceRender accepts only an explicit `fits=True`, rejects `fits=False`, and fails closed if the fit result is missing. It does not invent a limit or split the request.
 
 The adapter supports named voices and model-quality selection and forwards PhononSynth's supported generation options. It does not support reference voices/cloning, speaker selection, pronunciation overrides, `say_as` spans, linguistic tokens, whole-request phonemes, or word timings. Although the PhononSynth SDK has a streaming API, VoiceRender uses its complete-request synthesis API and does not expose streaming.
 

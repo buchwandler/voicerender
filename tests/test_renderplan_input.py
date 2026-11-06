@@ -432,7 +432,7 @@ def test_phonon_renderplan_exact_text_reaches_measurement_and_synthesis(
         def measure_prepared(self, text: str) -> Any:
             measured_text.append(text)
             return SimpleNamespace(
-                token_count=8, max_tokens=None, fits=None, model_id="target-v1"
+                token_count=8, max_tokens=None, fits=True, model_id="target-v1"
             )
 
         def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
@@ -456,7 +456,7 @@ def test_phonon_renderplan_exact_text_reaches_measurement_and_synthesis(
     measured = session.measure(request)
     session.synthesize(request)
 
-    assert measured.fits is None
+    assert measured.fits is True
     assert measured.amount == 8
     assert measured.maximum is None
     assert measured.unit == "model_tokens"

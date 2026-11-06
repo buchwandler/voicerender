@@ -36,6 +36,7 @@ from voicerender.engines.base import (
 )
 from voicerender.engines.catalog import SynthesisTarget, TargetVoice
 from voicerender.engines.kittensynth import KittenSynthEngineAdapter
+from voicerender.engines.phononsynth import PhononSynthEngineAdapter
 from voicerender.engines.pipersynth import PiperSynthEngineAdapter
 from voicerender.engines.registry import _ADAPTERS, get_adapter
 from voicerender.engines.selection import EngineRequest
@@ -427,6 +428,148 @@ def _plan(
         render_profile_id="sha256:" + "2" * 64,
         flow=tuple(flow),
     ).with_identity()
+
+
+def _install_fake_phononsynth(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    amount: int = 23,
+    maximum: int | None = None,
+    fits: bool = True,
+) -> list[tuple[str, Any]]:
+    events: list[tuple[str, Any]] = []
+    model = SimpleNamespace(
+        id="phonon-test-model",
+        display_name="Phonon test model",
+        languages=("en-US",),
+        quality_choices=(),
+        sample_rate=24000,
+        voices=(
+            SimpleNamespace(
+                id="voice-a",
+                gender="unknown",
+                language="en-US",
+                locale="en-US",
+                languages=("en-US",),
+                display_name="Voice A",
+            ),
+        ),
+        default_voice="voice-a",
+    )
+
+    class FakeVoice:
+        @classmethod
+        def from_pretrained(cls, target_id: str, **_kwargs: Any) -> FakeVoice:
+            events.append(("open", target_id))
+            return cls()
+
+        def measure_prepared(self, text: str) -> Any:
+            events.append(("measure", text))
+            return SimpleNamespace(
+                token_count=amount,
+                max_tokens=maximum,
+                fits=fits,
+                model_id="phonon-test-model",
+            )
+
+        def synthesize_prepared(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("preflight must never synthesize")
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    class SynthesisConfig:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def validated(self) -> SynthesisConfig:
+            return self
+
+    module = ModuleType("phononsynth")
+    module.__version__ = "0.1.2"
+    module.REQUEST_API_VERSION = 2
+    module.request_api_contract = lambda: {
+        "version": 2,
+        "engine": "phonon",
+        "entrypoint": "PhononVoice.synthesize_prepared",
+        "measure_entrypoint": "PhononVoice.measure_prepared",
+        "input": "prepared_text",
+        "measurement_unit": "model_tokens",
+        "measurement_fit_is_authoritative": True,
+        "features": {
+            "named_voices": True,
+            "voice_cloning": False,
+            "word_timings": False,
+            "automatic_chunking": False,
+        },
+    }
+    module.PhononVoice = FakeVoice
+    module.SynthesisConfig = SynthesisConfig
+    module.SynthesisResult = object
+    module.SynthesisMeasure = object
+    module.DiscoveredModel = object
+    module.DescribedVoice = object
+    module.discover_models = lambda **_kwargs: (model,)
+    module.runtime_identity = lambda: {"runtime": "phonon-test-runtime"}
+    monkeypatch.setitem(sys.modules, "phononsynth", module)
+    monkeypatch.setitem(_ADAPTERS, "phonon", PhononSynthEngineAdapter())
+    return events
+
+
+def test_phonon_preflight_accepts_authoritative_fit_without_maximum(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_phononsynth(monkeypatch)
+    binding = {
+        "renderer": "phonon",
+        "target_id": "phonon-test-model",
+        "voice": "voice-a",
+    }
+    plan = _plan(("Phonon prepared text", True, "sentence"), binding=binding)
+
+    report = preflight_render_plan(plan, tmp_path / "phonon-authoritative-fit.toml")
+
+    check = report.checks[0]
+    assert report.status == "ok"
+    assert check.status == "ok"
+    assert check.metric == "model_tokens"
+    assert check.measured == 23
+    assert check.maximum is None
+    assert check.source == "phononsynth.measure_prepared"
+    assert [event[0] for event in events] == ["open", "measure", "close"]
+    assert events[1][1] == "Phonon prepared text"
+
+
+def test_phonon_preflight_defers_emphasis_with_authoritative_fit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _install_fake_phononsynth(monkeypatch)
+    binding = {
+        "renderer": "phonon",
+        "target_id": "phonon-test-model",
+        "voice": "voice-a",
+    }
+    plan = _plan(("Phonon emphasis", True, "sentence"), binding=binding)
+    item = replace(
+        plan.speech[0],
+        segment_id=None,
+        controls=(SpeechControl(start=0, end=5, name="emphasis", params={}),),
+    )
+    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
+
+    report = preflight_render_plan(
+        plan,
+        tmp_path / "phonon-emphasis-deferred.toml",
+        emphasis_policy="defer-to-compose",
+    )
+
+    check = report.checks[0]
+    assert report.status == "ok"
+    assert check.status == "ok"
+    assert "audiocompose.emphasis.gain.v1" in check.detail
+    assert "pending composition" in check.detail
+    assert check.source == "phononsynth.measure_prepared"
+    assert [event[0] for event in events] == ["open", "measure", "close"]
 
 
 @pytest.mark.parametrize(

@@ -74,15 +74,15 @@ def _model() -> Any:
 
 def _fake_package(
     *,
-    api_version: Any = 1,
+    api_version: Any = 2,
     contract: Any = None,
     missing_method: str | None = None,
 ) -> Any:
     module: Any = ModuleType("phononsynth")
-    module.__version__ = "0.1.1"
+    module.__version__ = "0.1.2"
     module.REQUEST_API_VERSION = api_version
     contract_value = contract or {
-        "version": 1,
+        "version": 2,
         "engine": "phonon",
         "entrypoint": "PhononVoice.synthesize_prepared",
         "stream_entrypoint": "PhononVoice.stream_prepared",
@@ -90,6 +90,7 @@ def _fake_package(
         "input": "prepared_text",
         "measurement_unit": "model_tokens",
         "max_input_tokens": None,
+        "measurement_fit_is_authoritative": True,
         "features": {
             "named_voices": True,
             "streaming": True,
@@ -135,7 +136,7 @@ def _fake_package(
             if self.measure_error is not None:
                 raise self.measure_error
             return SimpleNamespace(
-                token_count=17, max_tokens=None, fits=None, model_id="phonon-demo"
+                token_count=17, max_tokens=None, fits=True, model_id="phonon-demo"
             )
 
         def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
@@ -190,7 +191,7 @@ def _selection(**kwargs: Any) -> EngineSelection:
     return EngineSelection(**values)
 
 
-def test_api_probe_accepts_explicit_phonon_v1_contract(
+def test_api_probe_accepts_explicit_phonon_v2_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(sys.modules, "phononsynth", _fake_package())
@@ -199,7 +200,7 @@ def test_api_probe_accepts_explicit_phonon_v1_contract(
 
     assert probe.compatible
     assert probe.status == "ready"
-    assert probe.api_version == 1
+    assert probe.api_version == 2
     assert probe.details["request_api_contract"]["engine"] == "phonon"
 
 
@@ -221,7 +222,7 @@ def test_api_probe_reports_missing_package(monkeypatch: pytest.MonkeyPatch) -> N
 
 @pytest.mark.parametrize(
     ("api_version", "status"),
-    [(2, "api_version_incompatible"), ("1", "api_probe_failed")],
+    [(1, "api_version_incompatible"), ("1", "api_probe_failed")],
 )
 def test_api_probe_rejects_bad_version(
     monkeypatch: pytest.MonkeyPatch, api_version: Any, status: str
@@ -235,6 +236,47 @@ def test_api_probe_rejects_bad_version(
     assert not probe.compatible
     assert probe.status == status
 
+
+
+def test_api_probe_rejects_v1_with_actionable_error_without_opening_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _fake_package(api_version=1)
+    monkeypatch.setitem(sys.modules, "phononsynth", package)
+
+    probe = PhononSynthEngineAdapter().probe_api()
+
+    assert not probe.compatible
+    assert probe.status == "api_version_incompatible"
+    assert probe.expected_api_version == 2
+    assert "authoritative request-measurement contract" in probe.error_message
+    assert "phononsynth>=0.1.2,<0.2" in probe.error_message
+    assert package.PhononVoice.opens == []
+
+
+@pytest.mark.parametrize("field_value", [None, False])
+def test_api_probe_rejects_missing_or_false_authoritative_fit_contract(
+    monkeypatch: pytest.MonkeyPatch, field_value: Any
+) -> None:
+    package = _fake_package()
+    contract = package.request_api_contract()
+    if field_value is None:
+        del contract["measurement_fit_is_authoritative"]
+    else:
+        contract["measurement_fit_is_authoritative"] = field_value
+    package = _fake_package(contract=contract)
+    monkeypatch.setitem(sys.modules, "phononsynth", package)
+
+    probe = PhononSynthEngineAdapter().probe_api()
+
+    assert not probe.compatible
+    assert probe.status == "api_incompatible"
+    assert probe.details["contract_mismatches"]["measurement_fit_is_authoritative"] == {
+        "expected": True,
+        "actual": field_value,
+    }
+    assert "phononsynth>=0.1.2,<0.2" in probe.error_message
+    assert package.PhononVoice.opens == []
 
 def test_api_probe_rejects_missing_required_method(
     monkeypatch: pytest.MonkeyPatch,
@@ -456,7 +498,7 @@ def test_capabilities_are_truthful_and_options_are_canonical() -> None:
     assert not capabilities.supports_model_sources
 
 
-def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> None:
+def test_measurement_preserves_authoritative_fit_and_exact_prepared_text() -> None:
     class Voice:
         def __init__(self) -> None:
             self.text: str | None = None
@@ -464,7 +506,7 @@ def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> Non
         def measure_prepared(self, text: str) -> Any:
             self.text = text
             return SimpleNamespace(
-                token_count=23, max_tokens=None, fits=None, model_id="phonon-demo"
+                token_count=23, max_tokens=None, fits=True, model_id="phonon-demo"
             )
 
     voice = Voice()
@@ -474,7 +516,7 @@ def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> Non
     measured = PhononSynthEngineSession(voice, _selection(), None).measure(request)
 
     assert measured == RequestMeasure(
-        fits=None,
+        fits=True,
         amount=23,
         maximum=None,
         unit="model_tokens",
@@ -483,6 +525,33 @@ def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> Non
     )
     assert voice.text == text
 
+
+@pytest.mark.parametrize(
+    "measurement",
+    [
+        SimpleNamespace(token_count=23, max_tokens=None, fits=None),
+        SimpleNamespace(token_count=True, max_tokens=None, fits=True),
+        SimpleNamespace(token_count=-1, max_tokens=None, fits=True),
+        SimpleNamespace(token_count=23, max_tokens=0, fits=True),
+        SimpleNamespace(token_count=23, max_tokens=20, fits=True),
+        SimpleNamespace(token_count=23, max_tokens=30, fits=False),
+    ],
+    ids=("unknown-fit", "boolean-count", "negative-count", "zero-maximum", "too-long-fit", "too-short-fit"),
+)
+def test_measurement_rejects_invalid_contract_values(measurement: Any) -> None:
+    class Voice:
+        def measure_prepared(self, _text: str) -> Any:
+            return measurement
+
+    request = SpeechRequest(id="invalid-measurement", text="hello", language="en-US")
+
+    with pytest.raises(EngineBackendError) as raised:
+        PhononSynthEngineSession(Voice(), _selection(), None).measure(request)
+
+    assert raised.value.code == "phonon.measurement_invalid"
+    assert raised.value.details["token_count"] == measurement.token_count
+    assert raised.value.details["max_tokens"] == measurement.max_tokens
+    assert raised.value.details["fits"] == measurement.fits
 
 def test_measurement_translates_empty_text_error(
     monkeypatch: pytest.MonkeyPatch,
