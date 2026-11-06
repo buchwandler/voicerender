@@ -18,6 +18,7 @@ from .book import (
 )
 from .bundle_contract import BundleKind, load_bundle_identity
 from .document import _resolve_document_request
+from .renderplan_input import EmphasisPolicy
 from .renderplan_render import (
     RENDER_DIAGNOSTICS_FILENAME,
     RENDER_MANIFEST_FILENAME,
@@ -141,7 +142,7 @@ def inspect_bundle_render(
     """Inspect selected bundle output artifacts without preflight or filesystem writes."""
     identity = load_bundle_identity(bundle)
     if identity.kind == "book":
-        request = _resolve_request(
+        book_request = _resolve_request(
             identity.root,
             variant=variant,
             chapter_selector=chapters,
@@ -152,7 +153,7 @@ def inspect_bundle_render(
             force=False,
             reset_stale_output=False,
             fail_fast=False,
-            emphasis_policy="reject",
+            emphasis_policy=EmphasisPolicy.REJECT,
             inspect_output=True,
         )
         chapter_plans = tuple(
@@ -162,16 +163,16 @@ def inspect_bundle_render(
                 chapter.output_dir,
                 chapter.speech_numbers,
             )
-            for chapter in request._loaded_chapters
+            for chapter in book_request._loaded_chapters
         )
-        profile_id = request.render_profile_id
+        profile_id = book_request.render_profile_id
     else:
         if chapters.strip().casefold() != "all":
             raise BookRenderError(
                 "--chapters must be 'all' for a document bundle",
                 code="selection.invalid",
             )
-        request = _resolve_document_request(
+        document_request = _resolve_document_request(
             identity.root,
             variant=variant,
             speech=speech,
@@ -180,17 +181,17 @@ def inspect_bundle_render(
             cache_dir=None,
             force=False,
             reset_stale_output=False,
-            emphasis_policy="reject",
+            emphasis_policy=EmphasisPolicy.REJECT,
         )
         chapter_plans = (
             (
-                request.document_id,
-                request.plan,
-                request.output_dir,
-                request.speech_numbers,
+                document_request.document_id,
+                document_request.plan,
+                document_request.output_dir,
+                document_request.speech_numbers,
             ),
         )
-        profile_id = request.render_profile_id
+        profile_id = document_request.render_profile_id
 
     occurrences: list[RenderOccurrenceInspection] = []
     force_required = False
@@ -367,17 +368,17 @@ def _inspect_plan_output(
     for item in selected_items:
         segment_id = item.segment_id or item.computed_id()
         key = (item.number, segment_id)
-        artifact = artifacts.get(key)
+        selected_artifact = artifacts.get(key)
         wav_path = output_dir / item.wav
-        if artifact is None:
+        if selected_artifact is None:
             state: RenderOccurrenceState = "missing"
             detail = "no verified manifest artifact is recorded"
         else:
             metadata = {
-                "sha256": artifact.sha256.removeprefix("sha256:"),
-                "frames": artifact.frames,
-                "sample_rate": artifact.sample_rate,
-                "channels": artifact.channels,
+                "sha256": selected_artifact.sha256.removeprefix("sha256:"),
+                "frames": selected_artifact.frames,
+                "sample_rate": selected_artifact.sample_rate,
+                "channels": selected_artifact.channels,
             }
             if verified_wav(wav_path, metadata):
                 state = "reusable"

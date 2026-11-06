@@ -1102,7 +1102,7 @@ def render_renderplan_memory(
         )
 
     for _item in selected_items[len(occurrences) + (1 if failure else 0) :]:
-        progress_tracker.complete("skipped")
+        progress_tracker.advance()
     result = RenderPlanMemoryResult(
         render_plan_id=report_id,
         selected_count=len(selected_items),
