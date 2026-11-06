@@ -12,6 +12,7 @@ from voicerender import cli
 from voicerender.engines.api_probe import EngineApiProbe
 from voicerender.engines.catalog import SynthesisTarget, TargetVoice
 from voicerender.engines.kokoro import PyKokoroEngineAdapter
+from voicerender.engines.registry import _ADAPTERS
 from voicerender.renderprofile import load_render_profile, save_render_profile
 
 
@@ -101,14 +102,16 @@ def _install_akinvox_profile_discovery(monkeypatch) -> None:
         api_version=2,
         contract_source="explicit",
     )
+    adapter = PyKokoroEngineAdapter()
+    monkeypatch.setitem(_ADAPTERS, "kokoro", adapter)
     monkeypatch.setattr(
         "voicerender.engines.kokoro._discover_targets",
         lambda **_kwargs: (target,),
     )
-    monkeypatch.setattr(PyKokoroEngineAdapter, "probe_api", lambda _self: probe)
-    monkeypatch.setattr(PyKokoroEngineAdapter, "version", lambda _self: "0.10.11")
+    monkeypatch.setattr(adapter, "probe_api", lambda: probe)
+    monkeypatch.setattr(adapter, "version", lambda: "0.10.11")
     monkeypatch.setattr(
-        PyKokoroEngineAdapter,
+        adapter,
         "open",
         lambda *_args, **_kwargs: pytest.fail(
             "profile selection must not open synthesis"
