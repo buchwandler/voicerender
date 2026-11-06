@@ -1,0 +1,176 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.2.9
+git_base_ref: 4bdac4e18fcb9909689889f1237fa4d4f083357d
+git_base_sha: 4bdac4e18fcb9909689889f1237fa4d4f083357d
+git_head_ref: 38197830ba6c1adf66c05a4b53a5a462869ab9c1
+git_head_sha: 38197830ba6c1adf66c05a4b53a5a462869ab9c1
+include_merges: nontrivial
+entries:
+  - kind: fixed
+    summary: "Fixed book reports to enforce the shared 2 MiB limit and omit persisted execution fingerprints"
+    status: accepted
+    source_refs:
+      - git:16913d40e23b25987b17274d02248d8456360c7e
+    paths:
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/report_contract.py
+      - voicerender/variants.py
+    sources:
+      - git:16913d40e23b25987b17274d02248d8456360c7e
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added optional PhononSynth support with model, voice, and prepared-text synthesis"
+    status: accepted
+    source_refs:
+      - git:7c5933312eb77b2d38fe3051086ca85f4e3f363a
+    paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/wheel_smoke.py
+      - voicerender/engines/phononsynth.py
+      - voicerender/engines/registry.py
+    sources:
+      - git:7c5933312eb77b2d38fe3051086ca85f4e3f363a
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added read-only bundle render inspection and in-memory RenderPlan APIs"
+    status: accepted
+    source_refs:
+      - git:d72b77973b675971c38158a3e51fe14011eb2004
+    paths:
+      - tests/test_bundle_inspect.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_render.py
+    sources:
+      - git:d72b77973b675971c38158a3e51fe14011eb2004
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added static AkinVox multispeaker voices with language-aware Kokoro selection"
+    status: accepted
+    source_refs:
+      - git:81f5f519c5b17f49053da10705730ddf78a6c1ed
+    paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_voice_descriptors.py
+      - voicerender/engines/kokoro.py
+      - voicerender/models.py
+      - voicerender/voices_api.py
+    sources:
+      - git:81f5f519c5b17f49053da10705730ddf78a6c1ed
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary: "Changed PhononSynth preflight to honor authoritative fit and reject incompatible APIs"
+    status: accepted
+    source_refs:
+      - git:05e2511c2e77b9b4b20e1220397332b6bef08029
+    paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_renderplan_input.py
+      - voicerender/engines/phononsynth.py
+    sources:
+      - git:05e2511c2e77b9b4b20e1220397332b6bef08029
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    internal: true
+    summary: "Improved PhononSynth validation diagnostics and multilingual voice test coverage"
+    status: accepted
+    source_refs:
+      - git:0b951e4c9690afd7c7392046dd3a63794fdd9990
+    paths:
+      - tests/test_kokoro_reference.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_voice_descriptors.py
+      - voicerender/engines/phononsynth.py
+      - voicerender/voices_api.py
+    sources:
+      - git:0b951e4c9690afd7c7392046dd3a63794fdd9990
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: "Fixed Supertonic option normalization for unset and explicit seeds"
+    status: accepted
+    source_refs:
+      - git:f3679d382a40a07f8046129f536d43f62ebba4f5
+    paths:
+      - tests/test_engine_registry.py
+      - tests/test_supertonicsynth_engine.py
+      - voicerender/engines/supertonicsynth.py
+    sources:
+      - git:f3679d382a40a07f8046129f536d43f62ebba4f5
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    internal: true
+    summary: "Improved bundle inspection request handling and in-memory progress accounting"
+    status: accepted
+    source_refs:
+      - git:0581372760acc6ed4017c81ff8329be0e6452b0f
+    paths:
+      - voicerender/bundle_render_inspect.py
+      - voicerender/renderplan_render.py
+    sources:
+      - git:0581372760acc6ed4017c81ff8329be0e6452b0f
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: internal
+    internal: true
+    summary: "Improved profile-role CLI test expectations"
+    status: accepted
+    source_refs:
+      - git:38197830ba6c1adf66c05a4b53a5a462869ab9c1
+    paths:
+      - tests/test_profile_roles_cli.py
+    sources:
+      - git:38197830ba6c1adf66c05a4b53a5a462869ab9c1
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

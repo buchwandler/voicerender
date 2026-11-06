@@ -1,0 +1,1631 @@
+ tests/test_bundle_inspect.py         | 100 ++++++
+ tests/test_render_book.py            |  58 ++++
+ tests/test_renderplan_render.py      |  31 ++
+ voicerender/__init__.py              |  19 +-
+ voicerender/book.py                  |  32 +-
+ voicerender/bundle_render_inspect.py | 471 ++++++++++++++++++++++++++
+ voicerender/preflight.py             |   7 +-
+ voicerender/renderplan_render.py     | 637 ++++++++++++++++++++++++++---------
+ 8 files changed, 1175 insertions(+), 180 deletions(-)
+
+diff --git a/tests/test_bundle_inspect.py b/tests/test_bundle_inspect.py
+index a008f3c..1d7ed76 100644
+--- a/tests/test_bundle_inspect.py
++++ b/tests/test_bundle_inspect.py
+@@ -2,24 +2,32 @@ from __future__ import annotations
+
+ import hashlib
+ import json
++from dataclasses import replace
+ from pathlib import Path
+ from typing import Any
+
+ import pytest
+ import tomlkit
+ from renderplan import (
++    RenderManifest,
+     RenderPlan,
+     RoleProfile,
+     SourceSpan,
++    SpeechArtifact,
+     SpeechItem,
++    load_plan,
++    save_manifest,
+     save_plan,
+     save_profile,
+ )
+
+ from voicerender import cli
++from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+ from voicerender.bundle_contract import BundleContractError
+ from voicerender.bundle_inspect import inspect_bundle
++from voicerender.bundle_render_inspect import inspect_bundle_render
+ from voicerender.bundle_roles import BundleRolesError
++from voicerender.storage import atomic_wav
+ from voicerender.variants import list_bundle_variants
+
+
+@@ -422,3 +430,95 @@ def test_bundle_roles_and_inspect_cli_variant_human_json_and_check(
+     assert cli.main(["bundle", "inspect", str(root), "--check", "--json"]) == 2
+     error = json.loads(capsys.readouterr().out)
+     assert error["error_code"] == "bundle.roles_invalid"
++
++
++def test_bundle_render_inspection_is_selection_aware_and_read_only(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant, _ = _write_variant(root, "render-inspection")
++    plan_path = root / "renderplan" / variant / "document.renderplan.toml"
++    plan = load_plan(plan_path)
++    first = plan.speech[0]
++    second = replace(first, number=2, segment_id=None, text="A second sentence.")
++    plan = replace(plan, flow=(first, second), plan_id=None).with_identity()
++    save_plan(plan, plan_path)
++
++    output_root = tmp_path / "voice-output"
++    output = output_root / variant / "document-0001"
++    output.mkdir(parents=True)
++    info = atomic_wav(output / first.wav, [0.0, 0.1, -0.1], 24000)
++    artifact = SpeechArtifact(
++        segment_number=first.number,
++        segment_id=first.segment_id or first.computed_id(),
++        wav=first.wav,
++        sha256=f"sha256:{info['sha256']}",
++        frames=int(info["frames"]),
++        sample_rate=int(info["sample_rate"]),
++        channels=int(info["channels"]),
++    )
++    manifest = RenderManifest(
++        render_plan_id=plan.plan_id or plan.computed_id(),
++        speech=(artifact,),
++        complete=False,
++    ).with_identity()
++    save_manifest(manifest, output / "render-manifest.toml")
++    (output / "render-diagnostics.json").write_text(
++        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
++    )
++    before = {
++        path.relative_to(tmp_path): path.read_bytes()
++        for path in tmp_path.rglob("*")
++        if path.is_file()
++    }
++
++    inspected = inspect_bundle_render(root, variant=variant, output_root=output_root)
++
++    assert inspected.state == "partial"
++    assert [item.state for item in inspected.selected_occurrences] == [
++        "reusable",
++        "missing",
++    ]
++    assert inspected.rendered_occurrences[0].number == 1
++    assert inspected.missing_occurrences[0].number == 2
++    assert not inspected.force_required
++    assert inspected.reset_safe
++    assert inspected.replacement_safe
++    assert inspected.to_dict()["format"] == "voicerender-bundle-render-inspection"
++    after = {
++        path.relative_to(tmp_path): path.read_bytes()
++        for path in tmp_path.rglob("*")
++        if path.is_file()
++    }
++    assert after == before
++
++    (output / first.wav).write_bytes(b"corrupt output")
++    corrupted = inspect_bundle_render(root, variant=variant, output_root=output_root)
++    assert corrupted.corrupt_occurrences[0].number == 1
++    assert not corrupted.force_required
++
++
++def test_bundle_render_inspection_reports_stale_and_unsafe_reset(
++    tmp_path: Path,
++) -> None:
++    root = _write_bundle(tmp_path)
++    variant, _ = _write_variant(root, "stale-render-inspection")
++    output_root = tmp_path / "voice-output"
++    output = output_root / variant / "document-0001"
++    output.mkdir(parents=True)
++    (output / "000001.wav").mkdir()
++    stale_manifest = RenderManifest(
++        render_plan_id="sha256:" + "0" * 64,
++        speech=(),
++        complete=False,
++    ).with_identity()
++    save_manifest(stale_manifest, output / "render-manifest.toml")
++
++    inspected = inspect_bundle_render(root, variant=variant, output_root=output_root)
++
++    assert inspected.state == "stale"
++    assert inspected.stale_occurrences
++    assert inspected.force_required
++    assert not inspected.reset_safe
++    assert not inspected.replacement_safe
++    assert inspected.reset_detail is not None
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index d8c3a6c..d67ee37 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -45,6 +45,7 @@ from voicerender import (
+ from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+ from voicerender.book import render_book
+ from voicerender.book_contract import load_renderplan_set
++from voicerender.bundle_render_inspect import inspect_bundle_render
+ from voicerender.errors import ArtifactError
+ from voicerender.events import (
+     RenderEvent,
+@@ -467,6 +468,63 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+     }
+
+
++def test_bundle_render_inspection_selects_book_chapter_and_speech(
++    tmp_path: Path,
++) -> None:
++    workspace, variant = _book(tmp_path, chapters=((7, 3), (5, 2)))
++    plan_path = workspace / "renderplan" / variant / "chapter-0007.renderplan.toml"
++    plan = load_plan(plan_path)
++    output_root = tmp_path / "voice-output"
++    output = output_root / variant / "chapter-0007"
++    output.mkdir(parents=True)
++    item = plan.speech[0]
++    info = atomic_wav(output / item.wav, [0.0, 0.1, -0.1], 24000)
++    artifact = SpeechArtifact(
++        segment_number=item.number,
++        segment_id=item.segment_id or item.computed_id(),
++        wav=item.wav,
++        sha256=f"sha256:{info['sha256']}",
++        frames=int(info["frames"]),
++        sample_rate=int(info["sample_rate"]),
++        channels=int(info["channels"]),
++    )
++    manifest = RenderManifest(
++        render_plan_id=plan.plan_id or plan.computed_id(),
++        speech=(artifact,),
++        complete=False,
++        producer=Producer(name="test", version="1"),
++    ).with_identity()
++    save_manifest(manifest, output / RENDER_MANIFEST_FILENAME)
++    (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
++        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
++    )
++
++    one_speech = inspect_bundle_render(
++        workspace,
++        variant=variant,
++        chapters="7",
++        speech="1",
++        output_root=output_root,
++    )
++    all_speeches = inspect_bundle_render(
++        workspace,
++        variant=variant,
++        chapters="7",
++        output_root=output_root,
++    )
++
++    assert one_speech.state == "complete"
++    assert one_speech.selected_chapters == ("chapter-0007",)
++    assert len(one_speech.selected_occurrences) == 1
++    assert one_speech.rendered_occurrences[0].number == 1
++    assert all_speeches.state == "partial"
++    assert [item.state for item in all_speeches.selected_occurrences] == [
++        "reusable",
++        "missing",
++        "missing",
++    ]
++
++
+ def test_book_propagates_explicit_emphasis_policy(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 2eda7e8..707de7a 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -58,6 +58,7 @@ from voicerender.preflight import preflight_render_plan
+ from voicerender.renderplan_render import (
+     RENDER_DIAGNOSTICS_FILENAME,
+     render_renderplan,
++    render_renderplan_memory,
+ )
+ from voicerender.storage import wav_info
+
+@@ -252,6 +253,36 @@ def _report(adapter: _Adapter, plan: RenderPlan, tmp_path: Path) -> PreflightRep
+     return preflight_render_plan(plan, tmp_path / "preflight.toml")
+
+
++def test_memory_preflight_and_render_are_nonpersisting_and_selection_aware(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    adapter = _install(monkeypatch)
++    plan = _plan("first", "second")
++
++    report = preflight_render_plan(plan)
++    assert report.status == "ok"
++    assert list(tmp_path.iterdir()) == []
++
++    persisted_report = preflight_render_plan(
++        plan, tmp_path / "persisted-preflight.toml"
++    )
++    assert report == persisted_report
++    existing_files = list(tmp_path.iterdir())
++
++    result = render_renderplan_memory(plan, preflight=report, speech_numbers={2})
++
++    assert result.selection_complete
++    assert result.selected_count == result.rendered_count == 1
++    assert result.rendered[0].number == 2
++    assert result.rendered[0].speech.id
++    assert adapter.synthesized_texts == ["second"]
++
++    ordered = render_renderplan_memory(plan, preflight=report)
++    assert [item.number for item in ordered.rendered] == [1, 2]
++    assert adapter.synthesized_texts == ["second", "first", "second"]
++    assert list(tmp_path.iterdir()) == existing_files
++
++
+ def test_preflight_and_render_share_optional_token_lowering(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/voicerender/__init__.py b/voicerender/__init__.py
+index 2951a93..c1148e7 100644
+--- a/voicerender/__init__.py
++++ b/voicerender/__init__.py
+@@ -26,6 +26,11 @@ from .bundle_batch import (
+ )
+ from .bundle_contract import BundleContractError
+ from .bundle_inspect import BundleInspectResult, inspect_bundle
++from .bundle_render_inspect import (
++    BundleRenderInspection,
++    RenderOccurrenceInspection,
++    inspect_bundle_render,
++)
+ from .bundle_roles import (
+     BundleRequiredRole,
+     BundleRoleBinding,
+@@ -129,7 +134,13 @@ from .profile_roles import (
+ )
+ from .progress import EtaConfidence, RenderProgress
+ from .render import render, render_plan
+-from .renderplan_render import RenderPlanResult, render_renderplan
++from .renderplan_render import (
++    RenderedOccurrence,
++    RenderPlanMemoryResult,
++    RenderPlanResult,
++    render_renderplan,
++    render_renderplan_memory,
++)
+ from .renderprofile import (
+     create_render_profile,
+     load_render_profile,
+@@ -198,6 +209,7 @@ __all__ = [
+     "BundleBatchRenderSummary",
+     "BundleContractError",
+     "BundleInspectResult",
++    "BundleRenderInspection",
+     "BundleRenderResult",
+     "BundleRequiredRole",
+     "BundleRoleBinding",
+@@ -253,13 +265,16 @@ __all__ = [
+     "RenderEventCallbackError",
+     "RenderEventKind",
+     "RenderManifest",
++    "RenderOccurrenceInspection",
+     "RenderPlan",
++    "RenderPlanMemoryResult",
+     "RenderPlanResult",
+     "RenderProfile",
+     "RenderProfileFragment",
+     "RenderProgress",
+     "RenderResult",
+     "RenderScope",
++    "RenderedOccurrence",
+     "RenderedSpeech",
+     "RequestMeasure",
+     "ResolvedPreparedVoice",
+@@ -301,6 +316,7 @@ __all__ = [
+     "estimate_render_document",
+     "estimate_renderplan",
+     "inspect_bundle",
++    "inspect_bundle_render",
+     "inspect_bundle_roles",
+     "inspect_voice",
+     "install_model",
+@@ -329,6 +345,7 @@ __all__ = [
+     "render_bundle_batch",
+     "render_plan",
+     "render_renderplan",
++    "render_renderplan_memory",
+     "resolve_prepared_voice",
+     "resolve_reference_audio",
+     "resolve_voice",
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 474ed8d..dd054af 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -657,6 +657,7 @@ def _resolve_request(
+     reset_stale_output: bool,
+     fail_fast: bool,
+     emphasis_policy: EmphasisPolicy,
++    inspect_output: bool = False,
+ ) -> BookRenderRequest:
+     workspace_path = _resolve_workspace(workspace)
+     renderplan_base = _resolve_root(
+@@ -728,10 +729,10 @@ def _resolve_request(
+             f"VoiceRender output variant is not a directory: {output_variant_dir}",
+             code="workspace.invalid",
+         )
+-    _assert_safe_output_metadata(
+-        output_variant_dir / BOOK_REPORT_FILENAME, output_variant_dir
+-    )
+-
++    if not inspect_output:
++        _assert_safe_output_metadata(
++            output_variant_dir / BOOK_REPORT_FILENAME, output_variant_dir
++        )
+     loaded_chapters: list[_LoadedChapter] = []
+     chapter_outputs: set[Path] = set()
+     for entry in selected_entries:
+@@ -767,17 +768,18 @@ def _resolve_request(
+                 f"selected chapters share an output directory: {chapter_output}",
+                 code="workspace.invalid",
+             )
+-        _assert_safe_output_metadata(
+-            chapter_output_resolved / RENDER_MANIFEST_FILENAME,
+-            chapter_output_resolved,
+-        )
+-        _assert_safe_output_metadata(
+-            chapter_output_resolved / "preflight.toml", chapter_output_resolved
+-        )
+-        _assert_safe_output_metadata(
+-            chapter_output_resolved / RECHECK_PREFLIGHT_FILENAME,
+-            chapter_output_resolved,
+-        )
++        if not inspect_output:
++            _assert_safe_output_metadata(
++                chapter_output_resolved / RENDER_MANIFEST_FILENAME,
++                chapter_output_resolved,
++            )
++            _assert_safe_output_metadata(
++                chapter_output_resolved / "preflight.toml", chapter_output_resolved
++            )
++            _assert_safe_output_metadata(
++                chapter_output_resolved / RECHECK_PREFLIGHT_FILENAME,
++                chapter_output_resolved,
++            )
+         chapter_outputs.add(chapter_output_resolved)
+         speech_numbers = (
+             None
+diff --git a/voicerender/bundle_render_inspect.py b/voicerender/bundle_render_inspect.py
+new file mode 100644
+index 0000000..e270670
+--- /dev/null
++++ b/voicerender/bundle_render_inspect.py
+@@ -0,0 +1,471 @@
++"""Read-only, selection-aware inspection of persisted bundle render outputs."""
++
++from __future__ import annotations
++
++import json
++import re
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Literal
++
++from renderplan import RenderPlan, SpeechArtifact, SpeechItem, load_manifest
++
++from .audio_boundaries import BOUNDARY_POLICY_ID
++from .book import (
++    RECHECK_PREFLIGHT_FILENAME,
++    BookRenderError,
++    _resolve_request,
++)
++from .bundle_contract import BundleKind, load_bundle_identity
++from .document import _resolve_document_request
++from .renderplan_render import (
++    RENDER_DIAGNOSTICS_FILENAME,
++    RENDER_MANIFEST_FILENAME,
++)
++from .storage import verified_wav
++
++RenderOccurrenceState = Literal["reusable", "missing", "stale", "corrupt"]
++BundleRenderState = Literal["complete", "partial", "not_started", "stale", "corrupt"]
++
++
++@dataclass(frozen=True, slots=True)
++class RenderOccurrenceInspection:
++    """Persisted state for one selected chapter/speech occurrence."""
++
++    chapter_id: str
++    number: int
++    segment_id: str
++    wav_path: Path
++    state: RenderOccurrenceState
++    detail: str | None = None
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "chapter_id": self.chapter_id,
++            "number": self.number,
++            "segment_id": self.segment_id,
++            "wav_path": str(self.wav_path),
++            "state": self.state,
++            "detail": self.detail,
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class BundleRenderInspection:
++    """Selection-specific render readiness, without changing workspace files."""
++
++    kind: BundleKind
++    bundle: Path
++    variant: str
++    render_profile_id: str
++    selected_chapters: tuple[str, ...]
++    occurrences: tuple[RenderOccurrenceInspection, ...]
++    force_required: bool
++    reset_safe: bool
++    reset_detail: str | None = None
++
++    @property
++    def replacement_safe(self) -> bool:
++        """Whether VoiceRender certifies force/reset replacement of selected outputs."""
++        return self.reset_safe
++
++    @property
++    def selected_occurrences(self) -> tuple[RenderOccurrenceInspection, ...]:
++        return self.occurrences
++
++    @property
++    def rendered_occurrences(self) -> tuple[RenderOccurrenceInspection, ...]:
++        return tuple(item for item in self.occurrences if item.state == "reusable")
++
++    @property
++    def reusable_occurrences(self) -> tuple[RenderOccurrenceInspection, ...]:
++        return self.rendered_occurrences
++
++    @property
++    def missing_occurrences(self) -> tuple[RenderOccurrenceInspection, ...]:
++        return tuple(item for item in self.occurrences if item.state == "missing")
++
++    @property
++    def stale_occurrences(self) -> tuple[RenderOccurrenceInspection, ...]:
++        return tuple(item for item in self.occurrences if item.state == "stale")
++
++    @property
++    def corrupt_occurrences(self) -> tuple[RenderOccurrenceInspection, ...]:
++        return tuple(item for item in self.occurrences if item.state == "corrupt")
++
++    @property
++    def state(self) -> BundleRenderState:
++        states = {item.state for item in self.occurrences}
++        if "stale" in states:
++            return "stale"
++        if "corrupt" in states:
++            return "corrupt"
++        if not states or states == {"reusable"}:
++            return "complete"
++        if states == {"missing"}:
++            return "not_started"
++        return "partial"
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "format": "voicerender-bundle-render-inspection",
++            "version": 1,
++            "kind": self.kind,
++            "bundle": str(self.bundle),
++            "variant": self.variant,
++            "render_profile_id": self.render_profile_id,
++            "selected_chapters": list(self.selected_chapters),
++            "state": self.state,
++            "selected_count": len(self.occurrences),
++            "rendered_count": len(self.rendered_occurrences),
++            "missing_count": len(self.missing_occurrences),
++            "stale_count": len(self.stale_occurrences),
++            "corrupt_count": len(self.corrupt_occurrences),
++            "force_required": self.force_required,
++            "reset_safe": self.reset_safe,
++            "reset_detail": self.reset_detail,
++            "replacement_safe": self.replacement_safe,
++            "occurrences": [item.to_dict() for item in self.occurrences],
++        }
++
++
++def inspect_bundle_render(
++    bundle: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    speech: str = "all",
++    renderplan_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++) -> BundleRenderInspection:
++    """Inspect selected bundle output artifacts without preflight or filesystem writes."""
++    identity = load_bundle_identity(bundle)
++    if identity.kind == "book":
++        request = _resolve_request(
++            identity.root,
++            variant=variant,
++            chapter_selector=chapters,
++            speech_selector=speech,
++            renderplan_root=renderplan_root,
++            output_root=output_root,
++            cache_dir=None,
++            force=False,
++            reset_stale_output=False,
++            fail_fast=False,
++            emphasis_policy="reject",
++            inspect_output=True,
++        )
++        chapter_plans = tuple(
++            (
++                chapter.entry.id,
++                chapter.plan,
++                chapter.output_dir,
++                chapter.speech_numbers,
++            )
++            for chapter in request._loaded_chapters
++        )
++        profile_id = request.render_profile_id
++    else:
++        if chapters.strip().casefold() != "all":
++            raise BookRenderError(
++                "--chapters must be 'all' for a document bundle",
++                code="selection.invalid",
++            )
++        request = _resolve_document_request(
++            identity.root,
++            variant=variant,
++            speech=speech,
++            renderplan_root=renderplan_root,
++            output_root=output_root,
++            cache_dir=None,
++            force=False,
++            reset_stale_output=False,
++            emphasis_policy="reject",
++        )
++        chapter_plans = (
++            (
++                request.document_id,
++                request.plan,
++                request.output_dir,
++                request.speech_numbers,
++            ),
++        )
++        profile_id = request.render_profile_id
++
++    occurrences: list[RenderOccurrenceInspection] = []
++    force_required = False
++    reset_detail: str | None = None
++    for chapter_id, plan, output_dir, selected_numbers in chapter_plans:
++        chapter_occurrences, chapter_force, chapter_reset_detail = _inspect_plan_output(
++            chapter_id,
++            plan,
++            output_dir,
++            selected_numbers,
++        )
++        occurrences.extend(chapter_occurrences)
++        force_required = force_required or chapter_force
++        if chapter_reset_detail is not None:
++            reset_detail = chapter_reset_detail
++    selected_chapters = tuple(chapter_id for chapter_id, *_ in chapter_plans)
++    return BundleRenderInspection(
++        kind=identity.kind,
++        bundle=identity.root,
++        variant=variant,
++        render_profile_id=profile_id,
++        selected_chapters=selected_chapters,
++        occurrences=tuple(occurrences),
++        force_required=force_required,
++        reset_safe=all(
++            _reset_is_safe(output_dir) for _, _, output_dir, _ in chapter_plans
++        ),
++        reset_detail=reset_detail,
++    )
++
++
++def _inspect_plan_output(
++    chapter_id: str,
++    plan: RenderPlan,
++    output_dir: Path,
++    selected_numbers: frozenset[int] | None,
++) -> tuple[tuple[RenderOccurrenceInspection, ...], bool, str | None]:
++    selected_items = tuple(
++        item
++        for item in plan.speech
++        if selected_numbers is None or item.number in selected_numbers
++    )
++    expected = {
++        (item.number, item.segment_id or item.computed_id()): item
++        for item in plan.speech
++    }
++    if not selected_items:
++        return (), False, None
++
++    manifest_path = output_dir / RENDER_MANIFEST_FILENAME
++    if manifest_path.is_symlink():
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "corrupt",
++                "manifest is a symlink",
++            ),
++            True,
++            _reset_safety_detail(output_dir),
++        )
++    if not manifest_path.exists():
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "missing",
++                "render manifest is absent",
++            ),
++            False,
++            _reset_safety_detail(output_dir),
++        )
++    if not manifest_path.is_file():
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "corrupt",
++                "manifest is not a regular file",
++            ),
++            True,
++            _reset_safety_detail(output_dir),
++        )
++
++    try:
++        manifest = load_manifest(manifest_path)
++    except (OSError, ValueError, TypeError) as exc:
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "corrupt",
++                f"invalid manifest: {exc}",
++            ),
++            True,
++            _reset_safety_detail(output_dir),
++        )
++
++    plan_id = plan.plan_id or plan.computed_id()
++    if manifest.render_plan_id != plan_id:
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "stale",
++                "manifest belongs to a different RenderPlan",
++            ),
++            True,
++            _reset_safety_detail(output_dir),
++        )
++    try:
++        manifest.validate_against(plan)
++    except (ValueError, TypeError) as exc:
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "corrupt",
++                f"invalid manifest: {exc}",
++            ),
++            True,
++            _reset_safety_detail(output_dir),
++        )
++
++    if not _current_audio_policy(output_dir):
++        return (
++            _uniform_occurrences(
++                chapter_id,
++                selected_items,
++                output_dir,
++                "stale",
++                "render output uses a different or unknown audio-boundary policy",
++            ),
++            True,
++            _reset_safety_detail(output_dir),
++        )
++
++    artifacts: dict[tuple[int, str], SpeechArtifact] = {}
++    for artifact in manifest.speech:
++        key = (artifact.segment_number, artifact.segment_id)
++        if key in artifacts or key not in expected:
++            return (
++                _uniform_occurrences(
++                    chapter_id,
++                    selected_items,
++                    output_dir,
++                    "corrupt",
++                    "manifest contains duplicate or unknown speech occurrences",
++                ),
++                True,
++                _reset_safety_detail(output_dir),
++            )
++        if artifact.wav != expected[key].wav:
++            return (
++                _uniform_occurrences(
++                    chapter_id,
++                    selected_items,
++                    output_dir,
++                    "corrupt",
++                    "manifest WAV name does not match the RenderPlan",
++                ),
++                True,
++                _reset_safety_detail(output_dir),
++            )
++        artifacts[key] = artifact
++
++    found: list[RenderOccurrenceInspection] = []
++    for item in selected_items:
++        segment_id = item.segment_id or item.computed_id()
++        key = (item.number, segment_id)
++        artifact = artifacts.get(key)
++        wav_path = output_dir / item.wav
++        if artifact is None:
++            state: RenderOccurrenceState = "missing"
++            detail = "no verified manifest artifact is recorded"
++        else:
++            metadata = {
++                "sha256": artifact.sha256.removeprefix("sha256:"),
++                "frames": artifact.frames,
++                "sample_rate": artifact.sample_rate,
++                "channels": artifact.channels,
++            }
++            if verified_wav(wav_path, metadata):
++                state = "reusable"
++                detail = None
++            elif wav_path.exists() or wav_path.is_symlink():
++                state = "corrupt"
++                detail = "WAV artifact fails manifest integrity verification"
++            else:
++                state = "missing"
++                detail = "manifest artifact WAV is absent"
++        found.append(
++            RenderOccurrenceInspection(
++                chapter_id,
++                item.number,
++                segment_id,
++                wav_path,
++                state,
++                detail,
++            )
++        )
++    return tuple(found), False, _reset_safety_detail(output_dir)
++
++
++def _uniform_occurrences(
++    chapter_id: str,
++    items: tuple[SpeechItem, ...],
++    output_dir: Path,
++    state: RenderOccurrenceState,
++    detail: str,
++) -> tuple[RenderOccurrenceInspection, ...]:
++    return tuple(
++        RenderOccurrenceInspection(
++            chapter_id,
++            item.number,
++            item.segment_id or item.computed_id(),
++            output_dir / item.wav,
++            state,
++            detail,
++        )
++        for item in items
++    )
++
++
++def _current_audio_policy(output_dir: Path) -> bool:
++    path = output_dir / RENDER_DIAGNOSTICS_FILENAME
++    if path.is_symlink() or not path.is_file():
++        return False
++    try:
++        data = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return False
++    return (
++        isinstance(data, dict)
++        and data.get("audio_boundary_policy") == BOUNDARY_POLICY_ID
++    )
++
++
++def _reset_is_safe(output_dir: Path) -> bool:
++    if not output_dir.exists():
++        return True
++    if not output_dir.is_dir() or output_dir.is_symlink():
++        return False
++    owned_names = {
++        RENDER_MANIFEST_FILENAME,
++        RENDER_DIAGNOSTICS_FILENAME,
++        "preflight.toml",
++        RECHECK_PREFLIGHT_FILENAME,
++    }
++    try:
++        for child in output_dir.iterdir():
++            is_owned = child.name in owned_names or re.fullmatch(
++                r"\d{6,}\.wav", child.name
++            )
++            if is_owned and not child.is_symlink() and child.is_dir():
++                return False
++    except OSError:
++        return False
++    return True
++
++
++def _reset_safety_detail(output_dir: Path) -> str | None:
++    if _reset_is_safe(output_dir):
++        return None
++    return "reset/force would encounter an unsafe owned output path"
++
++
++__all__ = [
++    "BundleRenderInspection",
++    "RenderOccurrenceInspection",
++    "inspect_bundle_render",
++]
+diff --git a/voicerender/preflight.py b/voicerender/preflight.py
+index 10135e5..2807aa7 100644
+--- a/voicerender/preflight.py
++++ b/voicerender/preflight.py
+@@ -75,13 +75,13 @@ def _preflight_progress_event(
+
+ def preflight_render_plan(
+     plan: RenderPlan,
+-    output: str | Path,
++    output: str | Path | None = None,
+     *,
+     emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+     max_open_sessions: int = 1,
+     on_event: RenderEventCallback | None = None,
+ ) -> PreflightReport:
+-    """Measure each required speech occurrence, then validate and persist its report."""
++    """Measure each required speech occurrence and optionally persist the validated report."""
+     if not isinstance(plan, RenderPlan):
+         raise PlanError("preflight input must be a RenderPlan")
+     max_open_sessions = validate_max_open_sessions(max_open_sessions)
+@@ -240,7 +240,8 @@ def preflight_render_plan(
+             producer=Producer(name="voicerender", version=_voicerender_version()),
+         ).with_identity()
+         report.validate_against(plan)
+-        save_preflight(report, output)
++        if output is not None:
++            save_preflight(report, output)
+         emit_render_event(
+             on_event,
+             _preflight_progress_event(
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 41044c7..6a56bea 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -8,7 +8,7 @@ import re
+ import shutil
+ import tempfile
+ from collections.abc import Callable, Collection, Mapping
+-from dataclasses import asdict, dataclass
++from dataclasses import asdict, dataclass, replace
+ from pathlib import Path
+ from time import monotonic, sleep
+ from typing import Any, Literal
+@@ -31,7 +31,7 @@ from renderplan import (
+ )
+
+ from .audio_boundaries import BOUNDARY_POLICY_ID, trim_renderer_trailing_silence
+-from .engines.base import EngineSelection, SpeechRequest
++from .engines.base import EngineSelection, RenderedSpeech, SpeechRequest
+ from .engines.registry import get_adapter
+ from .error_diagnostics import (
+     ERROR_DIAGNOSTIC_SCHEMA,
+@@ -123,64 +123,83 @@ class _RenderFailure:
+     error_diagnostic: dict[str, object] | None = None
+
+
+-def _capture_exception_diagnostic(error: BaseException) -> dict[str, object]:
+-    """Capture structured details without allowing diagnostics to mask failures."""
+-    try:
+-        return exception_diagnostic(error)
+-    except Exception:  # noqa: BLE001 - retain the original render failure.
+-        error_type = type(error)
+-        return {
+-            "schema": ERROR_DIAGNOSTIC_SCHEMA,
+-            "type": error_type.__name__,
+-            "module": error_type.__module__,
+-            "message": "[diagnostic serialization failed; original error preserved]",
+-        }
++@dataclass(frozen=True, slots=True)
++class RenderedOccurrence:
++    """One normalized in-memory speech result, in RenderPlan occurrence order."""
+
++    number: int
++    segment_id: str
++    speech: RenderedSpeech
+
+-def _render_progress_event(
+-    kind: RenderEventKind,
+-    tracker: ProgressTracker,
+-    **context: Any,
+-) -> RenderEvent:
+-    snapshot = tracker.snapshot()
+-    fields: dict[str, Any] = {
+-        "completed_count": snapshot.completed_count,
+-        "total_count": snapshot.total_count,
+-        "progress": snapshot.progress,
+-        "rendered_count": snapshot.rendered_count,
+-        "reused_count": snapshot.reused_count,
+-        "failed_count": snapshot.failed_count,
+-        "selected_count": snapshot.total_count,
+-        "phase_completed_count": snapshot.completed_count,
+-        "phase_total_count": snapshot.total_count,
+-        "phase_progress": snapshot.progress,
+-        "elapsed_seconds": snapshot.elapsed_seconds,
+-        "eta_seconds": snapshot.eta_seconds,
+-        "eta_confidence": snapshot.eta_confidence,
+-        "progress_snapshot": snapshot,
+-        "scope": "render",
+-        "phase": "render",
+-    }
+-    fields.update(context)
+-    return RenderEvent(kind=kind, **fields)
+
++@dataclass(frozen=True, slots=True)
++class RenderPlanMemoryResult:
++    """Non-persisting execution result for a selected RenderPlan speech set."""
+
+-def render_renderplan(
++    render_plan_id: str
++    selected_count: int
++    rendered: tuple[RenderedOccurrence, ...]
++    warnings: tuple[str, ...] = ()
++    fresh_preflight: PreflightReport | None = None
++    error: str | None = None
++    error_code: str | None = None
++    error_segment_number: int | None = None
++    error_segment_id: str | None = None
++    error_engine: str | None = None
++    error_type: str | None = None
++    error_diagnostic: Mapping[str, object] | None = None
++    pending_composition: bool = False
++
++    @property
++    def occurrences(self) -> tuple[RenderedOccurrence, ...]:
++        """Compatibility alias for the stable ``rendered`` result field."""
++        return self.rendered
++
++    @property
++    def rendered_count(self) -> int:
++        return len(self.rendered)
++
++    @property
++    def selection_complete(self) -> bool:
++        return self.rendered_count == self.selected_count and self.error is None
++
++    @property
++    def failed(self) -> bool:
++        return not self.selection_complete
++
++
++@dataclass(frozen=True, slots=True)
++class _ExecutionContext:
++    plan: RenderPlan
++    preflight: PreflightReport
++    selected_items: tuple[SpeechItem, ...]
++    emphasis_policy: EmphasisPolicy
++    conversions: Mapping[tuple[int, str], SpeechRequestConversion]
++    deferred_controls: tuple[dict[str, Any], ...]
++
++
++@dataclass(frozen=True, slots=True)
++class _NormalizedSynthesis:
++    speech: RenderedSpeech
++    boundary_info: dict[str, Any]
++    render_result: dict[str, Any]
++    synthesis_seconds: float
++
++
++@dataclass(frozen=True, slots=True)
++class _SpeechExecution:
++    session: Any | None
++    outcome: MeasurementOutcome | None
++    synthesis: _NormalizedSynthesis | None
++    failure: _RenderFailure | None
++
++
++def _prepare_execution_context(
+     plan: RenderPlan | str | Path,
+-    *,
+     preflight: PreflightReport | str | Path,
+-    output_dir: str | Path,
+-    cache_dir: str | Path | None = None,
+-    force: bool = False,
+-    reset_stale_output: bool = False,
+-    recheck_report_path: str | Path | None = None,
+-    speech_numbers: Collection[int] | None = None,
+-    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
+-    max_open_sessions: int = 1,
+-    on_event: RenderEventCallback | None = None,
+-) -> RenderPlanResult:
+-    """Render selected speech items, retaining verified artifacts from prior runs."""
+-    max_open_sessions = validate_max_open_sessions(max_open_sessions)
++    speech_numbers: Collection[int] | None,
++    emphasis_policy: EmphasisPolicy | str,
++) -> _ExecutionContext:
+     parsed_plan = load_plan(plan) if isinstance(plan, (str, Path)) else plan
+     if not isinstance(parsed_plan, RenderPlan):
+         raise PlanError("render input must be a RenderPlan")
+@@ -212,7 +231,6 @@ def render_renderplan(
+             raise PlanError(
+                 f"Speech occurrence {key} does not have a matching OK preflight check"
+             )
+-
+     try:
+         policy = EmphasisPolicy(emphasis_policy)
+     except (TypeError, ValueError) as exc:
+@@ -246,7 +264,7 @@ def render_renderplan(
+         ): speech_request_conversion_from_renderplan(item, emphasis_policy=policy)
+         for item in selected_items
+     }
+-    deferred_controls = [
++    deferred_controls = tuple(
+         {
+             "segment_number": item.number,
+             "segment_id": item.segment_id or item.computed_id(),
+@@ -255,7 +273,192 @@ def render_renderplan(
+         }
+         for item in emphasis_items
+         if policy is EmphasisPolicy.DEFER_TO_COMPOSE
+-    ]
++    )
++    return _ExecutionContext(
++        parsed_plan,
++        report,
++        selected_items,
++        policy,
++        conversions,
++        deferred_controls,
++    )
++
++
++def _measure_prepared_speech(
++    current: _PreparedSpeech, session: Any
++) -> MeasurementOutcome:
++    try:
++        measured = session.measure(current.request)
++    except Exception as exc:  # noqa: BLE001 - capacity/runtime errors are centrally classified.
++        return classify_measurement(exc)
++    return classify_measurement(measured)
++
++
++def _synthesize_prepared_speech(
++    current: _PreparedSpeech, session: Any
++) -> _NormalizedSynthesis:
++    synthesis_started = monotonic()
++    rendered_speech = session.synthesize(current.request)
++    synthesis_seconds = max(0.0, monotonic() - synthesis_started)
++    if rendered_speech.id != current.request.id:
++        raise ArtifactError(
++            "Renderer returned an artifact for a different speech request"
++        )
++    normalized_audio, boundary = trim_renderer_trailing_silence(
++        rendered_speech.audio, sample_rate=rendered_speech.sample_rate
++    )
++    boundary_info = asdict(boundary)
++    render_result: dict[str, Any] = {}
++    resolved_mode = rendered_speech.metadata.get("short_sentence_mode")
++    if isinstance(resolved_mode, str):
++        render_result["short_sentence_mode"] = resolved_mode
++    return _NormalizedSynthesis(
++        replace(rendered_speech, audio=normalized_audio),
++        boundary_info,
++        render_result,
++        synthesis_seconds,
++    )
++
++
++def _measurement_failure(
++    plan: RenderPlan, current: _PreparedSpeech, outcome: MeasurementOutcome
++) -> _RenderFailure:
++    item = current.item
++    fresh = (
++        _failure_report(plan, item, current.segment_id, outcome)
++        if item.preflight_required
++        else None
++    )
++    return _RenderFailure(
++        outcome.error or "Immediate renderer remeasurement did not return an exact fit",
++        fresh_preflight=fresh,
++        error_code=(
++            "preflight.replan"
++            if fresh is not None and fresh.status == "replan"
++            else "preflight.reject"
++            if fresh is not None
++            else "engine.measurement_failed"
++        ),
++        error_segment_number=item.number,
++        error_segment_id=current.segment_id,
++        error_engine=current.selection.engine,
++    )
++
++
++def _execute_prepared_speech(
++    plan: RenderPlan,
++    current: _PreparedSpeech,
++    sessions: EngineSessionPool,
++    *,
++    context: Mapping[str, object],
++) -> _SpeechExecution:
++    """Run the shared session, measurement, and normalized synthesis path."""
++    session = sessions.acquire(current.session_key, current.selection, context=context)
++    if isinstance(session, SessionOpenFailure):
++        item = current.item
++        failure = _RenderFailure(
++            f"Cannot open renderer session: {session.error}",
++            fresh_preflight=(
++                _rejected_report(plan, item, current.segment_id, session.error)
++                if item.preflight_required
++                else None
++            ),
++            error_code=(
++                "preflight.reject"
++                if item.preflight_required
++                else "engine.session_failed"
++            ),
++            error_segment_number=item.number,
++            error_segment_id=current.segment_id,
++            error_engine=current.selection.engine,
++            error_type=type(session.error).__name__,
++            error_diagnostic=_capture_exception_diagnostic(session.error),
++        )
++        return _SpeechExecution(None, None, None, failure)
++
++    outcome = _measure_prepared_speech(current, session)
++    if outcome.disposition is not PreflightDisposition.OK:
++        return _SpeechExecution(
++            session,
++            outcome,
++            None,
++            _measurement_failure(plan, current, outcome),
++        )
++    return _SpeechExecution(
++        session,
++        outcome,
++        _synthesize_prepared_speech(current, session),
++        None,
++    )
++
++
++def _capture_exception_diagnostic(error: BaseException) -> dict[str, object]:
++    """Capture structured details without allowing diagnostics to mask failures."""
++    try:
++        return exception_diagnostic(error)
++    except Exception:  # noqa: BLE001 - retain the original render failure.
++        error_type = type(error)
++        return {
++            "schema": ERROR_DIAGNOSTIC_SCHEMA,
++            "type": error_type.__name__,
++            "module": error_type.__module__,
++            "message": "[diagnostic serialization failed; original error preserved]",
++        }
++
++
++def _render_progress_event(
++    kind: RenderEventKind,
++    tracker: ProgressTracker,
++    **context: Any,
++) -> RenderEvent:
++    snapshot = tracker.snapshot()
++    fields: dict[str, Any] = {
++        "completed_count": snapshot.completed_count,
++        "total_count": snapshot.total_count,
++        "progress": snapshot.progress,
++        "rendered_count": snapshot.rendered_count,
++        "reused_count": snapshot.reused_count,
++        "failed_count": snapshot.failed_count,
++        "selected_count": snapshot.total_count,
++        "phase_completed_count": snapshot.completed_count,
++        "phase_total_count": snapshot.total_count,
++        "phase_progress": snapshot.progress,
++        "elapsed_seconds": snapshot.elapsed_seconds,
++        "eta_seconds": snapshot.eta_seconds,
++        "eta_confidence": snapshot.eta_confidence,
++        "progress_snapshot": snapshot,
++        "scope": "render",
++        "phase": "render",
++    }
++    fields.update(context)
++    return RenderEvent(kind=kind, **fields)
++
++
++def render_renderplan(
++    plan: RenderPlan | str | Path,
++    *,
++    preflight: PreflightReport | str | Path,
++    output_dir: str | Path,
++    cache_dir: str | Path | None = None,
++    force: bool = False,
++    reset_stale_output: bool = False,
++    recheck_report_path: str | Path | None = None,
++    speech_numbers: Collection[int] | None = None,
++    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    max_open_sessions: int = 1,
++    on_event: RenderEventCallback | None = None,
++) -> RenderPlanResult:
++    """Render selected speech items, retaining verified artifacts from prior runs."""
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
++    context = _prepare_execution_context(
++        plan, preflight, speech_numbers, emphasis_policy
++    )
++    parsed_plan = context.plan
++    report = context.preflight
++    selected_items = context.selected_items
++    policy = context.emphasis_policy
++    conversions = context.conversions
++    deferred_controls = list(context.deferred_controls)
+     diagnostics: dict[str, Any] = {
+         "schema": "voicerender.render-diagnostics.v1",
+         "audio_boundary_policy": BOUNDARY_POLICY_ID,
+@@ -459,41 +662,26 @@ def render_renderplan(
+                             )
+                     else:
+                         fingerprint["execution_status"] = "synthesized"
+-                        session = sessions.acquire(
+-                            current.session_key,
+-                            current.selection,
++                        execution = _execute_prepared_speech(
++                            parsed_plan,
++                            current,
++                            sessions,
+                             context=item_context,
+                         )
+-                        if isinstance(session, SessionOpenFailure):
+-                            fingerprint["execution_status"] = "session_open_failed"
++                        if execution.outcome is not None:
++                            fingerprint["capacity"] = _measurement_fingerprint(
++                                execution.outcome
++                            )
++                        if execution.failure is not None:
++                            failure = execution.failure
++                            fingerprint["execution_status"] = (
++                                "session_open_failed"
++                                if execution.session is None
++                                else "remeasurement_failed"
++                            )
+                             execution_fingerprints[key] = (
+                                 _finalize_execution_fingerprint(fingerprint)
+                             )
+-                            failure = _RenderFailure(
+-                                f"Cannot open renderer session: {session.error}",
+-                                fresh_preflight=(
+-                                    _rejected_report(
+-                                        parsed_plan,
+-                                        item,
+-                                        current.segment_id,
+-                                        session.error,
+-                                    )
+-                                    if item.preflight_required
+-                                    else None
+-                                ),
+-                                error_code=(
+-                                    "preflight.reject"
+-                                    if item.preflight_required
+-                                    else "engine.session_failed"
+-                                ),
+-                                error_segment_number=item.number,
+-                                error_segment_id=current.segment_id,
+-                                error_engine=current.selection.engine,
+-                                error_type=type(session.error).__name__,
+-                                error_diagnostic=_capture_exception_diagnostic(
+-                                    session.error
+-                                ),
+-                            )
+                             progress_tracker.complete("failed")
+                             emit_render_event(
+                                 on_event,
+@@ -502,8 +690,8 @@ def render_renderplan(
+                                     progress_tracker,
+                                     **item_context,
+                                     status="failed",
+-                                    error_type=type(session.error).__name__,
+-                                    error_code=getattr(session.error, "code", None),
++                                    error_type=failure.error_type or "MeasurementError",
++                                    error_code=failure.error_code,
+                                     error_message=failure.message,
+                                     render_diagnostics=str(
+                                         out / RENDER_DIAGNOSTICS_FILENAME
+@@ -514,83 +702,21 @@ def render_renderplan(
+                                 ),
+                             )
+                             break
+-
+-                        try:
+-                            measured = session.measure(current.request)
+-                        except Exception as exc:  # noqa: BLE001 - Capacity/runtime errors are centrally classified.
+-                            outcome = classify_measurement(exc)
+-                        else:
+-                            outcome = classify_measurement(measured)
+-                        fingerprint["capacity"] = _measurement_fingerprint(outcome)
+-                        if outcome.disposition is not PreflightDisposition.OK:
+-                            fresh = (
+-                                _failure_report(
+-                                    parsed_plan,
+-                                    item,
+-                                    current.segment_id,
+-                                    outcome,
+-                                )
+-                                if item.preflight_required
+-                                else None
+-                            )
+-                            fingerprint["execution_status"] = "remeasurement_failed"
+-                            execution_fingerprints[key] = (
+-                                _finalize_execution_fingerprint(fingerprint)
++                        normalized_synthesis = execution.synthesis
++                        if normalized_synthesis is None:
++                            raise RuntimeError(
++                                "speech execution completed without a synthesis result"
+                             )
+-                            failure = _RenderFailure(
+-                                outcome.error
+-                                or "Immediate renderer remeasurement did not return an exact fit",
+-                                fresh_preflight=fresh,
+-                                error_code=(
+-                                    "preflight.replan"
+-                                    if fresh is not None and fresh.status == "replan"
+-                                    else "preflight.reject"
+-                                    if fresh is not None
+-                                    else "engine.measurement_failed"
+-                                ),
+-                                error_segment_number=item.number,
+-                                error_segment_id=current.segment_id,
+-                                error_engine=current.selection.engine,
+-                            )
+-                            progress_tracker.complete("failed")
+-                            emit_render_event(
+-                                on_event,
+-                                _render_progress_event(
+-                                    RenderEventKind.SEGMENT_FAILED,
+-                                    progress_tracker,
+-                                    **item_context,
+-                                    status="failed",
+-                                    error_type="MeasurementError",
+-                                    error_code=failure.error_code,
+-                                    render_diagnostics=str(
+-                                        out / RENDER_DIAGNOSTICS_FILENAME
+-                                    ),
+-                                ),
+-                            )
+-                            break
+-
+-                        synthesis_started = monotonic()
+-                        rendered_speech = session.synthesize(current.request)
+-                        synthesis_seconds = max(0.0, monotonic() - synthesis_started)
+-                        if rendered_speech.id != current.request.id:
+-                            raise ArtifactError(
+-                                "Renderer returned an artifact for a different speech request"
+-                            )
+-                        normalized_audio, boundary = trim_renderer_trailing_silence(
+-                            rendered_speech.audio,
+-                            sample_rate=rendered_speech.sample_rate,
+-                        )
+-                        boundary_info = asdict(boundary)
++                        synthesis_seconds = normalized_synthesis.synthesis_seconds
++                        rendered_speech = normalized_synthesis.speech
++                        normalized_audio = rendered_speech.audio
++                        boundary_info = normalized_synthesis.boundary_info
+                         fingerprint["audio_boundary"] = boundary_info
+                         diagnostics["audio_boundary"][current.segment_id] = (
+                             boundary_info
+                         )
+-                        render_result = {}
+-                        resolved_mode = rendered_speech.metadata.get(
+-                            "short_sentence_mode"
+-                        )
+-                        if isinstance(resolved_mode, str):
+-                            render_result["short_sentence_mode"] = resolved_mode
++                        render_result = normalized_synthesis.render_result
++                        if render_result:
+                             fingerprint["render_result"] = render_result
+                             diagnostics["render_results"][current.segment_id] = (
+                                 render_result
+@@ -821,6 +947,195 @@ def render_renderplan(
+     return result
+
+
++def render_renderplan_memory(
++    plan: RenderPlan,
++    *,
++    preflight: PreflightReport,
++    speech_numbers: Collection[int] | None = None,
++    emphasis_policy: EmphasisPolicy | str = EmphasisPolicy.REJECT,
++    max_open_sessions: int = 1,
++    on_event: RenderEventCallback | None = None,
++) -> RenderPlanMemoryResult:
++    """Synthesize selected occurrences without creating or writing any files."""
++    max_open_sessions = validate_max_open_sessions(max_open_sessions)
++    context = _prepare_execution_context(
++        plan, preflight, speech_numbers, emphasis_policy
++    )
++    parsed_plan = context.plan
++    selected_items = context.selected_items
++    report_id = parsed_plan.plan_id or parsed_plan.computed_id()
++    progress_tracker = ProgressTracker(len(selected_items))
++    occurrences: list[RenderedOccurrence] = []
++    warnings: list[str] = []
++    if context.deferred_controls:
++        warnings.append(
++            "Rendered speech is unchanged; emphasis remains pending composition."
++        )
++    failure: _RenderFailure | None = None
++
++    emit_render_event(
++        on_event,
++        _render_progress_event(
++            RenderEventKind.RENDER_STARTED,
++            progress_tracker,
++            plan_id=report_id,
++        ),
++    )
++
++    def session_event_callback(kind: RenderEventKind) -> Callable[..., None]:
++        def emit_event(
++            _key: str,
++            selection: EngineSelection,
++            event_context: Mapping[str, object],
++            status: str | None = None,
++            error: Exception | None = None,
++            elapsed: float | None = None,
++        ) -> None:
++            fields = dict(event_context)
++            fields["engine"] = selection.engine
++            if status is not None:
++                fields["status"] = status
++            if error is not None:
++                fields["error_type"] = type(error).__name__
++                fields["error_code"] = getattr(error, "code", None)
++            if elapsed is not None:
++                fields["phase_elapsed_seconds"] = elapsed
++            emit_render_event(
++                on_event, _render_progress_event(kind, progress_tracker, **fields)
++            )
++
++        return emit_event
++
++    with EngineSessionPool(
++        max_open_sessions=max_open_sessions,
++        on_open_started=session_event_callback(RenderEventKind.ENGINE_OPEN_STARTED),
++        on_open_finished=session_event_callback(RenderEventKind.ENGINE_OPEN_FINISHED),
++        on_close_started=session_event_callback(RenderEventKind.ENGINE_CLOSE_STARTED),
++        on_close_finished=session_event_callback(RenderEventKind.ENGINE_CLOSE_FINISHED),
++    ) as sessions:
++        for item in selected_items:
++            segment_id = item.segment_id or item.computed_id()
++            current = _prepare_speech(
++                item,
++                emphasis_policy=context.emphasis_policy,
++                conversion=context.conversions[(item.number, segment_id)],
++            )
++            item_context = {
++                "plan_id": report_id,
++                "segment_number": item.number,
++                "segment_id": segment_id,
++                "role": item.role,
++                "engine": current.selection.engine,
++            }
++            emit_render_event(
++                on_event,
++                _render_progress_event(
++                    RenderEventKind.SEGMENT_STARTED,
++                    progress_tracker,
++                    **item_context,
++                ),
++            )
++            try:
++                execution = _execute_prepared_speech(
++                    parsed_plan,
++                    current,
++                    sessions,
++                    context=item_context,
++                )
++                failure = execution.failure
++                if failure is None:
++                    normalized = execution.synthesis
++                    if normalized is None:
++                        raise RuntimeError(
++                            "speech execution completed without a synthesis result"
++                        )
++                    occurrences.append(
++                        RenderedOccurrence(
++                            number=item.number,
++                            segment_id=segment_id,
++                            speech=normalized.speech,
++                        )
++                    )
++                    warnings.extend(normalized.speech.warnings)
++            except RenderEventCallbackError:
++                raise
++            except Exception as exc:  # noqa: BLE001 - keep the memory result inspectable.
++                code = getattr(exc, "code", None)
++                failure = _RenderFailure(
++                    str(exc) or "Render failed",
++                    error_code=code if isinstance(code, str) else "render.failed",
++                    error_segment_number=item.number,
++                    error_segment_id=segment_id,
++                    error_engine=getattr(exc, "engine", None)
++                    or current.selection.engine,
++                    error_type=type(exc).__name__,
++                    error_diagnostic=_capture_exception_diagnostic(exc),
++                )
++            if failure is not None:
++                progress_tracker.complete("failed")
++                emit_render_event(
++                    on_event,
++                    _render_progress_event(
++                        RenderEventKind.SEGMENT_FAILED,
++                        progress_tracker,
++                        **item_context,
++                        status="failed",
++                        error_type=failure.error_type,
++                        error_code=failure.error_code,
++                        error_message=failure.message,
++                        **diagnostic_summary_fields(failure.error_diagnostic),
++                    ),
++                )
++                break
++            progress_tracker.complete("rendered")
++            emit_render_event(
++                on_event,
++                _render_progress_event(
++                    RenderEventKind.SEGMENT_RENDERED,
++                    progress_tracker,
++                    **item_context,
++                    status="rendered",
++                ),
++            )
++        sessions.close(
++            status="failure_cleanup" if failure is not None else "render_complete"
++        )
++
++    for _item in selected_items[len(occurrences) + (1 if failure else 0) :]:
++        progress_tracker.complete("skipped")
++    result = RenderPlanMemoryResult(
++        render_plan_id=report_id,
++        selected_count=len(selected_items),
++        rendered=tuple(occurrences),
++        warnings=tuple(warnings),
++        fresh_preflight=failure.fresh_preflight if failure is not None else None,
++        error=failure.message if failure is not None else None,
++        error_code=failure.error_code if failure is not None else None,
++        error_segment_number=(
++            failure.error_segment_number if failure is not None else None
++        ),
++        error_segment_id=failure.error_segment_id if failure is not None else None,
++        error_engine=failure.error_engine if failure is not None else None,
++        error_type=failure.error_type if failure is not None else None,
++        error_diagnostic=(failure.error_diagnostic if failure is not None else None),
++        pending_composition=bool(context.deferred_controls),
++    )
++    emit_render_event(
++        on_event,
++        _render_progress_event(
++            RenderEventKind.RENDER_COMPLETED,
++            progress_tracker,
++            plan_id=report_id,
++            status="failed" if result.failed else "completed",
++            error_code=result.error_code,
++            error_type=result.error_type,
++            error_message=result.error,
++            **diagnostic_summary_fields(result.error_diagnostic),
++        ),
++    )
++    return result
++
++
+ def _select_speech_items(
+     plan: RenderPlan, speech_numbers: Collection[int] | None
+ ) -> tuple[SpeechItem, ...]:

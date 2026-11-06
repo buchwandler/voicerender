@@ -1,0 +1,2169 @@
+ .github/workflows/tests.yml        |  14 +-
+ README.md                          |  23 +-
+ pyproject.toml                     |   3 +
+ tests/test_engine_registry.py      |  82 +++-
+ tests/test_phononsynth_engine.py   | 735 ++++++++++++++++++++++++++++++
+ tests/test_renderplan_input.py     |  81 ++++
+ tests/wheel_smoke.py               |   3 +
+ voicerender/engines/phononsynth.py | 909 +++++++++++++++++++++++++++++++++++++
+ voicerender/engines/registry.py    |   6 +
+ 9 files changed, 1844 insertions(+), 12 deletions(-)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index a631c45..f1e0131 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -51,7 +51,7 @@ jobs:
+     strategy:
+       fail-fast: false
+       matrix:
+-        extra: [kokoro, piper, pocket, kitten, sopro, supertonic, inflect]
++        extra: [kokoro, piper, phonon, pocket, kitten, sopro, supertonic, inflect]
+     steps:
+       - uses: actions/checkout@v4
+       - name: Set up Python
+@@ -63,7 +63,7 @@ jobs:
+           python -m pip install --upgrade "pip<26.2"
+           python -m pip install -e ".[${{ matrix.extra }}]" pytest
+       - name: Run API and adapter contracts without model downloads
+-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py
++        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_phononsynth_engine.py
+
+   sopro-contract:
+     runs-on: ubuntu-latest
+@@ -103,9 +103,10 @@ jobs:
+             "kittensynth[cpu]==0.1.4" \
+             "soprosynth[cpu]==0.1.1" \
+             "supertonicsynth[cpu]==0.1.2" \
+-            "inflectsynth[cpu]==0.1.1"
++            "inflectsynth[cpu]==0.1.1" \
++            "phononsynth[cpu]==0.1.1"
+       - name: Run released-set compatibility contracts
+-        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
++        run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_phononsynth_engine.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
+
+   lower-bounds:
+     runs-on: ubuntu-latest
+@@ -224,6 +225,7 @@ jobs:
+                   "chatterboxsynth",
+                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
+                   "pocketsynth", "soprosynth", "supertonicsynth",
++                  "phononsynth",
+                   "qwen3synth",
+               }
+               assert not engine_sdks & base_requirements
+@@ -248,6 +250,7 @@ jobs:
+           import importlib.resources as resources
+           import sys
+
++          from importlib.util import find_spec
+           import voicerender
+           import voicerender.book
+           from renderplan import RenderPlanSet
+@@ -265,16 +268,19 @@ jobs:
+               "kitten",
+               "kokoro",
+               "piper",
++              "phonon",
+               "pocket",
+               "qwen3",
+               "sopro",
+               "supertonic",
+           }
++          assert find_spec("phononsynth") is None
+           assert not any(
+               name.split(".", 1)[0] in {
+                   "chatterboxsynth",
+                   "inflectsynth", "kittensynth", "pykokoro", "pipersynth",
+                   "pocketsynth", "soprosynth", "supertonicsynth", "utterplan",
++                  "phononsynth",
+                   "qwen3synth",
+               }
+               for name in sys.modules
+diff --git a/README.md b/README.md
+index e75a8c6..8603440 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+
+ VoiceRender executes shared [RenderPlan](https://pypi.org/project/renderplan/) files through lazy, request-level synthesis engine adapters. It provides RenderProfile lifecycle tools, no-synthesis preflight reports, exact one-item/one-WAV rendering, content-addressed reuse, and verifiable shared manifests. Audio composition, external-media resolution, mastering, and export are outside VoiceRender.
+
+-The package lives in `voicerender/`; engine SDKs and model assets are installed separately.
++The package lives in `voicerender/`; engine SDKs are optional and loaded lazily, while model-asset lifecycle is delegated to each engine.
+
+ ## Install
+
+@@ -17,6 +17,7 @@ Install only the engine SDK you need:
+ ```bash
+ python -m pip install "voicerender[piper]"
+ python -m pip install "voicerender[sopro]"
++python -m pip install "voicerender[phonon]"
+ ```
+
+ For development from a checkout:
+@@ -25,7 +26,23 @@ For development from a checkout:
+ python -m pip install -e ".[dev]"
+ ```
+
+-Available engine extras are `kokoro`, `piper`, `pocket`, `kitten`, `sopro`, `supertonic`, `inflect`, and `qwen3`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
++Available engine extras are `kokoro`, `piper`, `phonon`, `pocket`, `kitten`, `sopro`, `supertonic`, `inflect`, and `qwen3`. The core package can list engines and import without installing their SDKs. Tests use deterministic fake adapters and do not download models.
++
++### PhononSynth prepared-text synthesis
++
++Install the optional CPU integration and inspect the current model/voice catalog:
++
++```bash
++python -m pip install "voicerender[phonon]"
++voicerender engines inspect phonon
++voicerender voices list --engine phonon --lang en-US
++```
++
++Choose a published model, named voice, and—when needed—one of that model's advertised quality values when creating a profile. PhononSynth owns catalog discovery and model loading; opening a render session can download/install selected model assets unless `--offline` is used with an existing cache. `cache_dir` and `offline` are forwarded to the SDK.
++
++VoiceRender passes the exact prepared text to `PhononVoice.measure_prepared()` and `synthesize_prepared()`. The SDK reports the exact token count but declares no input limit or fit decision, so VoiceRender records unknown capacity (`maximum=None`, `fits=None`) and preflight fails closed; it does not invent a limit or split the request.
++
++The adapter supports named voices and model-quality selection and forwards PhononSynth's supported generation options. It does not support reference voices/cloning, speaker selection, pronunciation overrides, `say_as` spans, linguistic tokens, whole-request phonemes, or word timings. Although the PhononSynth SDK has a streaming API, VoiceRender uses its complete-request synthesis API and does not expose streaming.
+
+ ### Kitten request measurement
+
+@@ -108,7 +125,7 @@ voicerender render examples/plans/chapter.renderplan.toml \
+ voicerender inspect-manifest renders/narration/render-manifest.toml --json
+ ```
+
+-Install the selected engine extra and make its model assets available before preflight/render; VoiceRender does not download models implicitly. Preflight reports `ok`, `replan`, or `reject` for each required speech occurrence. An `ok` report approves that exact RenderPlan under the observed renderer capability; rendering still remeasures each exact request immediately before synthesis. If fresh capacity no longer fits, VoiceRender stops before synthesis for that occurrence and returns a new same-plan/same-occurrence `replan` report; a session-open failure returns a fresh `reject` report. The CLI writes that report to `--recheck-report` when supplied. VoiceRender never creates a child plan, changes text, or adapts chunking. Every RenderPlan speech item maps to exactly one public `SpeechRequest` and one numbered WAV, in plan order; VoiceRender does not split, merge, normalize, or reorder requests. Incremental manifests remain valid when rendering fails partway through. Render results expose an execution fingerprint (VoiceRender/adapter versions, API-probe signature, synthesis identity, voice/options, and measured capacity) separately from `RenderPlan.plan_id`.
++Install the selected engine extra before use. Model-asset behavior is engine-specific and delegated to its SDK; PhononSynth may download/install the selected model when a render session opens unless `--offline` is used with an existing cache. VoiceRender does not implement its own model downloads. Preflight reports `ok`, `replan`, or `reject` for each required speech occurrence. An `ok` report approves that exact RenderPlan under the observed renderer capability; rendering still remeasures each exact request immediately before synthesis. If fresh capacity no longer fits, VoiceRender stops before synthesis for that occurrence and returns a new same-plan/same-occurrence `replan` report; a session-open failure returns a fresh `reject` report. The CLI writes that report to `--recheck-report` when supplied. VoiceRender never creates a child plan, changes text, or adapts chunking. Every RenderPlan speech item maps to exactly one public `SpeechRequest` and one numbered WAV, in plan order; VoiceRender does not split, merge, normalize, or reorder requests. Incremental manifests remain valid when rendering fails partway through. Render results expose an execution fingerprint (VoiceRender/adapter versions, API-probe signature, synthesis identity, voice/options, and measured capacity) separately from `RenderPlan.plan_id`.
+
+ ### Deferred emphasis
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 69c8754..9ef9299 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -28,6 +28,7 @@ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.9,<0.2"]
+ kokoro = ["pykokoro>=0.10.8,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
++phonon = ["phononsynth[cpu]>=0.1.1,<0.2"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+ sopro = ["soprosynth[cpu]>=0.1.0,<0.2"]
+ supertonic = ["supertonicsynth[cpu]>=0.1.2,<0.2"]
+@@ -76,6 +77,8 @@ module = [
+   "kittensynth",
+   "onnxvoice",
+   "pipersynth",
++  "phononsynth",
++  "phononsynth.*",
+   "pocketsynth",
+   "pykokoro",
+   "soprosynth",
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index d403c38..984d0b6 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -22,6 +22,7 @@ ENGINE_IDS = {
+     "chatterbox",
+     "inflect",
+     "kitten",
++    "phonon",
+     "kokoro",
+     "piper",
+     "pocket",
+@@ -35,6 +36,7 @@ PACKAGES = {
+     "kitten": "kittensynth",
+     "kokoro": "pykokoro",
+     "piper": "pipersynth",
++    "phonon": "phononsynth",
+     "pocket": "pocketsynth",
+     "sopro": "soprosynth",
+     "supertonic": "supertonicsynth",
+@@ -47,6 +49,7 @@ ADAPTER_MODULES = {
+     "kitten": "voicerender.engines.kittensynth",
+     "kokoro": "voicerender.engines.kokoro",
+     "piper": "voicerender.engines.pipersynth",
++    "phonon": "voicerender.engines.phononsynth",
+     "pocket": "voicerender.engines.pocketsynth",
+     "sopro": "voicerender.engines.soprosynth",
+     "supertonic": "voicerender.engines.supertonicsynth",
+@@ -57,7 +60,7 @@ ADAPTER_MODULES = {
+ def test_import_and_engine_listing_do_not_import_optional_sdks() -> None:
+     script = r"""
+ import builtins
+-blocked = {"chatterboxsynth", "inflectsynth", "kittensynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
++blocked = {"chatterboxsynth", "inflectsynth", "kittensynth", "phononsynth", "pykokoro", "pipersynth", "pocketsynth", "soprosynth", "supertonicsynth", "qwen3synth"}
+ seen = []
+ original = builtins.__import__
+ def guarded(name, *args, **kwargs):
+@@ -74,7 +77,7 @@ assert not seen
+     # Keep the subprocess isolated from SDKs that may already be imported by pytest.
+     script = script.replace(
+         "blocked_to_ids",
+-        "{'chatterbox', 'inflect', 'kitten', 'kokoro', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
++        "{'chatterbox', 'inflect', 'kitten', 'kokoro', 'phonon', 'piper', 'pocket', 'sopro', 'supertonic', 'qwen3'}",
+     )
+     root = Path(__file__).resolve().parents[1]
+     result = subprocess.run(
+@@ -138,6 +141,12 @@ def _fake_package(package: str) -> ModuleType:
+             "synthesize",
+             "close",
+         ),
++        "PhononVoice": (
++            "from_pretrained",
++            "measure_prepared",
++            "synthesize_prepared",
++            "close",
++        ),
+         "InflectVoice": (
+             "from_pretrained",
+             "from_local",
+@@ -195,6 +204,7 @@ def _fake_package(package: str) -> ModuleType:
+         "SupertonicRuntime",
+         "AtomicSynthesisResult",
+         "DiscoveredModel",
++        "PhononVoice",
+         "InflectVoice",
+         "DescribedVoice",
+         "request_api_contract",
+@@ -238,6 +248,53 @@ def _fake_package(package: str) -> ModuleType:
+     return module
+
+
++def _phonon_contract() -> dict[str, object]:
++    return {
++        "version": 1,
++        "engine": "phonon",
++        "entrypoint": "PhononVoice.synthesize_prepared",
++        "stream_entrypoint": "PhononVoice.stream_prepared",
++        "measure_entrypoint": "PhononVoice.measure_prepared",
++        "input": "prepared_text",
++        "measurement_unit": "model_tokens",
++        "max_input_tokens": None,
++        "features": {
++            "named_voices": True,
++            "streaming": True,
++            "voice_cloning": False,
++            "word_timings": False,
++            "automatic_chunking": False,
++        },
++    }
++
++
++def _phonon_model() -> SimpleNamespace:
++    voice = SimpleNamespace(
++        id="demo-voice",
++        display_name="Demo voice",
++        gender="female",
++        language="en-US",
++        locale="en-US",
++        languages=("en-US",),
++    )
++    return SimpleNamespace(
++        id="demo-model",
++        display_name="Phonon demo",
++        languages=("en-US",),
++        quality_choices=("q4", "fp32"),
++        sample_rate=24000,
++        voices=(voice,),
++        default_voice="demo-voice",
++        source_revision="revision-1",
++        license_spdx="CC-BY-4.0",
++        commercial_use=True,
++        release_version="1.0.0",
++        release_tags={"q4": "release-q4"},
++        source_revisions={"q4": "source-q4"},
++        metadata={},
++    )
++
++
+ def _kitten_contract(**overrides: object) -> dict[str, object]:
+     contract: dict[str, object] = {
+         "version": 2,
+@@ -252,7 +309,7 @@ def _kitten_contract(**overrides: object) -> dict[str, object]:
+     return contract
+
+
+-def test_registry_lists_ten_engines_without_probing() -> None:
++def test_registry_lists_eleven_engines_without_probing() -> None:
+     listed = list_engines()
+     assert {item["id"] for item in listed} == ENGINE_IDS
+     assert {item["package"] for item in listed} == set(PACKAGES.values())
+@@ -263,12 +320,15 @@ def test_registry_lists_ten_engines_without_probing() -> None:
+     assert by_id["pocket"]["supports_reference_voice"] is True
+     assert by_id["kokoro"]["supports_reference_voice"] is True
+     assert by_id["piper"]["supports_reference_voice"] is False
++    assert by_id["phonon"]["package"] == "phononsynth"
++    assert by_id["phonon"]["supports_reference_voice"] is False
+
+
+ def test_soprosynth_alias_normalizes_without_loading_sdk() -> None:
+     assert normalize_engine_id("SoproSynth") == "sopro"
+     assert normalize_engine_id("ChatterboxSynth") == "chatterbox"
+     assert normalize_engine_id("chatterboxsynth") == "chatterbox"
++    assert normalize_engine_id("phononsynth") == "phonon"
+
+
+ @pytest.mark.parametrize(("engine", "package"), sorted(PACKAGES.items()))
+@@ -279,7 +339,9 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+
+     fake = _fake_package(package)
+     monkeypatch.setitem(sys.modules, package, fake)
+-    if engine == "inflect":
++    if engine == "phonon":
++        fake.request_api_contract = _phonon_contract
++    elif engine == "inflect":
+         fake.request_api_contract = lambda: {
+             "version": 1,
+             "supports_request_measurement": True,
+@@ -583,7 +645,12 @@ def test_all_adapters_discover_fake_catalogs_without_model_downloads(
+     from voicerender.engines.catalog import SynthesisTarget
+
+     adapter_module = import_module(ADAPTER_MODULES[engine])
+-    if engine == "piper":
++    if engine == "phonon":
++        fake = _fake_package(PACKAGES[engine])
++        fake.request_api_contract = _phonon_contract
++        fake.discover_models = lambda **kwargs: (_phonon_model(),)
++        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
++    elif engine == "piper":
+         fake = _fake_package(PACKAGES[engine])
+
+         class FakeVoiceAssetManager:
+@@ -709,6 +776,11 @@ def test_all_adapters_resolve_requests_with_fake_optional_sdks(
+
+     from voicerender.engines.selection import EngineRequest
+
++    if engine == "phonon":
++        fake = _fake_package(PACKAGES[engine])
++        fake.request_api_contract = _phonon_contract
++        fake.discover_models = lambda **kwargs: (_phonon_model(),)
++        monkeypatch.setitem(sys.modules, PACKAGES[engine], fake)
+     if engine == "qwen3":
+         fake = _fake_package(PACKAGES[engine])
+         fake.request_api_contract = lambda: SimpleNamespace(
+diff --git a/tests/test_phononsynth_engine.py b/tests/test_phononsynth_engine.py
+new file mode 100644
+index 0000000..1d25aee
+--- /dev/null
++++ b/tests/test_phononsynth_engine.py
+@@ -0,0 +1,735 @@
++"""Adapter tests for the public PhononSynth API."""
++
++from __future__ import annotations
++
++import importlib
++import sys
++from types import ModuleType, SimpleNamespace
++from typing import Any, ClassVar
++
++import numpy as np
++import pytest
++
++from voicerender.engines.base import (
++    EngineSelection,
++    PronunciationSpan,
++    RequestMeasure,
++    SayAsSpan,
++    SpeechRequest,
++    SpeechToken,
++)
++from voicerender.engines.catalog import CatalogRequest
++from voicerender.engines.phononsynth import (
++    PHONON_OPTION_NAMES,
++    PhononSelectionError,
++    PhononSynthEngineAdapter,
++    PhononSynthEngineSession,
++    _target_from_model,
++)
++from voicerender.engines.selection import EngineRequest
++from voicerender.errors import (
++    EmptySpeechTextError,
++    EngineBackendError,
++    InvalidEngineOptionError,
++    InvalidEngineVoiceError,
++    UnsupportedSynthesisFeatureError,
++)
++
++
++def _model() -> Any:
++    return SimpleNamespace(
++        id="phonon-demo",
++        display_name="Phonon demo",
++        languages=("en-US", "de-DE"),
++        quality_choices=("q4", "fp32"),
++        sample_rate=24000,
++        voices=(
++            SimpleNamespace(
++                id="voice-a",
++                display_name="Voice A",
++                gender="female",
++                language="en-US",
++                locale="en-US",
++                languages=("en-US",),
++            ),
++            SimpleNamespace(
++                id="voice-b",
++                display_name="Voice B",
++                gender="male",
++                language="de-DE",
++                locale="de-DE",
++                languages=("de-DE",),
++            ),
++        ),
++        default_voice="voice-a",
++        source_revision="rev-1",
++        license_spdx="CC-BY-4.0",
++        commercial_use=True,
++        release_version="1.2.3",
++        release_tags={"q4": "release-q4"},
++        source_revisions={"q4": "rev-q4"},
++        metadata={"generation": {"temperature": 0.3}, "source_revision": "wrong"},
++    )
++
++
++def _fake_package(
++    *,
++    api_version: Any = 1,
++    contract: Any = None,
++    missing_method: str | None = None,
++) -> Any:
++    module: Any = ModuleType("phononsynth")
++    module.__version__ = "0.1.1"
++    module.REQUEST_API_VERSION = api_version
++    contract_value = contract or {
++        "version": 1,
++        "engine": "phonon",
++        "entrypoint": "PhononVoice.synthesize_prepared",
++        "stream_entrypoint": "PhononVoice.stream_prepared",
++        "measure_entrypoint": "PhononVoice.measure_prepared",
++        "input": "prepared_text",
++        "measurement_unit": "model_tokens",
++        "max_input_tokens": None,
++        "features": {
++            "named_voices": True,
++            "streaming": True,
++            "voice_cloning": False,
++            "word_timings": False,
++            "automatic_chunking": False,
++        },
++    }
++    module.request_api_contract = lambda: contract_value
++    module.SynthesisConfig = type(
++        "SynthesisConfig",
++        (),
++        {
++            "__init__": lambda self, **kwargs: vars(self).update(kwargs),
++            "validated": lambda self: self,
++        },
++    )
++    module.SynthesisResult = type("SynthesisResult", (), {})
++    module.SynthesisMeasure = type("SynthesisMeasure", (), {})
++    module.DiscoveredModel = type("DiscoveredModel", (), {})
++    module.DescribedVoice = type("DescribedVoice", (), {})
++    module.runtime_identity = lambda: {"runtime": "phonon.runtime.v1"}
++    module.discover_models = lambda **_kwargs: (_model(),)
++
++    class FakeVoice:
++        opens: ClassVar[list[tuple[tuple[Any, ...], dict[str, Any]]]] = []
++        measure_calls: ClassVar[list[str]] = []
++        synthesize_calls: ClassVar[list[tuple[str, dict[str, Any]]]] = []
++        close_calls = 0
++        open_error: Exception | None = None
++        measure_error: Exception | None = None
++        synthesize_error: Exception | None = None
++
++        @classmethod
++        def from_pretrained(cls, *args: Any, **kwargs: Any) -> FakeVoice:
++            cls.opens.append((args, kwargs))
++            if cls.open_error is not None:
++                raise cls.open_error
++            return cls()
++
++        def measure_prepared(self, text: str) -> Any:
++            type(self).measure_calls.append(text)
++            if self.measure_error is not None:
++                raise self.measure_error
++            return SimpleNamespace(
++                token_count=17, max_tokens=None, fits=None, model_id="phonon-demo"
++            )
++
++        def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
++            type(self).synthesize_calls.append((text, kwargs))
++            if self.synthesize_error is not None:
++                raise self.synthesize_error
++            return SimpleNamespace(
++                audio=np.asarray([1.2, -1.1, 0.25], dtype=np.float32),
++                sample_rate=24000,
++                voice=kwargs["voice"],
++                model_ref="phonon://phonon-demo",
++                metadata={"token_count": 17, "generation": {"temperature": 0.3}},
++            )
++
++        def close(self) -> None:
++            type(self).close_calls += 1
++
++    if missing_method == "measure_prepared":
++        delattr(FakeVoice, "measure_prepared")
++    module.PhononVoice = FakeVoice
++    module.EmptyTextError = type("EmptyTextError", (Exception,), {})
++    module.InvalidSynthesisConfigError = type(
++        "InvalidSynthesisConfigError", (Exception,), {}
++    )
++    module.UnsupportedModelError = type("UnsupportedModelError", (Exception,), {})
++    module.CatalogUnavailableError = type("CatalogUnavailableError", (Exception,), {})
++    module.CatalogDiscoveryError = type("CatalogDiscoveryError", (Exception,), {})
++    module.TokenizerError = type("TokenizerError", (Exception,), {})
++    module.ManagedModelDependencyError = type(
++        "ManagedModelDependencyError", (Exception,), {}
++    )
++    module.OnnxVoiceContractError = type("OnnxVoiceContractError", (Exception,), {})
++    module.ModelInferenceError = type("ModelInferenceError", (Exception,), {})
++    return module
++
++
++def _selection(**kwargs: Any) -> EngineSelection:
++    values: dict[str, Any] = {
++        "engine": "phonon",
++        "target_id": "phonon-demo",
++        "language": "en-US",
++        "voice": "voice-a",
++        "options": {"quality": "q4"},
++        "metadata": {
++            "source_revision": "rev-1",
++            "release_version": "1.2.3",
++            "release_tags": {"q4": "release-q4"},
++            "source_revisions": {"q4": "rev-q4"},
++        },
++    }
++    values.update(kwargs)
++    return EngineSelection(**values)
++
++
++def test_api_probe_accepts_explicit_phonon_v1_contract(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setitem(sys.modules, "phononsynth", _fake_package())
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert probe.compatible
++    assert probe.status == "ready"
++    assert probe.api_version == 1
++    assert probe.details["request_api_contract"]["engine"] == "phonon"
++
++
++def test_api_probe_reports_missing_package(monkeypatch: pytest.MonkeyPatch) -> None:
++    original_import = importlib.import_module
++
++    def missing(name: str, package: str | None = None) -> Any:
++        if name == "phononsynth":
++            raise ModuleNotFoundError("missing", name="phononsynth")
++        return original_import(name, package)
++
++    monkeypatch.setattr(importlib, "import_module", missing)
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "package_missing"
++
++
++@pytest.mark.parametrize(
++    ("api_version", "status"),
++    [(2, "api_version_incompatible"), ("1", "api_probe_failed")],
++)
++def test_api_probe_rejects_bad_version(
++    monkeypatch: pytest.MonkeyPatch, api_version: Any, status: str
++) -> None:
++    monkeypatch.setitem(
++        sys.modules, "phononsynth", _fake_package(api_version=api_version)
++    )
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.status == status
++
++
++def test_api_probe_rejects_missing_required_method(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setitem(
++        sys.modules, "phononsynth", _fake_package(missing_method="measure_prepared")
++    )
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "api_incompatible"
++    assert "PhononVoice.measure_prepared" in probe.missing_methods
++
++
++def test_api_probe_rejects_missing_required_symbol(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    del package.DiscoveredModel
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "api_incompatible"
++    assert "DiscoveredModel" in probe.missing_symbols
++
++
++def test_api_probe_fails_closed_on_contradictory_contract(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    contract = _fake_package().request_api_contract()
++    contract["features"]["voice_cloning"] = True
++    monkeypatch.setitem(sys.modules, "phononsynth", _fake_package(contract=contract))
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.failed_stage == "request_api_contract"
++    assert "voice_cloning" in probe.details["contract_mismatches"]
++
++
++def test_target_mapping_preserves_normalized_voices_and_provenance() -> None:
++    target = _target_from_model(_model())
++
++    assert target.engine == "phonon"
++    assert target.id == "phonon-demo"
++    assert target.languages == ("en", "de")
++    assert target.qualities == ("q4", "fp32")
++    assert target.voices == ("voice-a", "voice-b")
++    assert target.voice_details[0].gender == "female"
++    assert target.voice_details[0].locale == "en-us"
++    assert target.default_voice == "voice-a"
++    assert target.sample_rate == 24000
++    assert target.metadata["source_revision"] == "rev-1"
++    assert target.metadata["release_version"] == "1.2.3"
++    assert target.metadata["release_tags"] == {"q4": "release-q4"}
++    assert target.metadata["source_revisions"] == {"q4": "rev-q4"}
++    assert target.metadata["license_spdx"] == "CC-BY-4.0"
++    assert target.metadata["commercial_use"] is True
++    assert target.metadata["voice_display_names"]["voice-a"] == "Voice A"
++
++
++def test_discovery_passes_offline_and_refresh_without_opening_a_model(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    calls: list[dict[str, Any]] = []
++    package.discover_models = lambda **kwargs: calls.append(kwargs) or (_model(),)
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    targets = PhononSynthEngineAdapter().discover(
++        CatalogRequest(engine="phonon", language="en-US", offline=True, refresh=True)
++    )
++
++    assert [target.id for target in targets] == ["phonon-demo"]
++    assert calls == [
++        {
++            "language": "en",
++            "offline": True,
++            "refresh": True,
++            "cache_dir": None,
++            "catalog_url": None,
++        }
++    ]
++    assert package.PhononVoice.opens == []
++
++
++def test_resolution_checks_target_language_quality_and_default_voice(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    calls: list[dict[str, Any]] = []
++    package.discover_models = lambda **kwargs: calls.append(kwargs) or (_model(),)
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    selection, diagnostics = PhononSynthEngineAdapter().resolve(
++        EngineRequest(
++            engine="phonon",
++            target_id="phonon-demo",
++            language="en-US",
++            engine_options={"quality": "q4", "temperature": 0.7},
++            offline=True,
++        )
++    )
++
++    assert diagnostics == ()
++    assert selection.voice == "voice-a"
++    assert selection.options["quality"] == "q4"
++    assert selection.options["temperature"] == 0.7
++    assert selection.metadata["source_revision"] == "rev-1"
++    assert calls[0]["offline"] is True
++
++
++@pytest.mark.parametrize(
++    ("engine_request", "code"),
++    [
++        (
++            EngineRequest(engine="phonon", target_id="missing", language="en"),
++            "phonon.model_not_found",
++        ),
++        (
++            EngineRequest(
++                engine="phonon",
++                target_id="phonon-demo",
++                language="en",
++                engine_options={"quality": "q8"},
++            ),
++            "phonon.quality_unavailable",
++        ),
++        (
++            EngineRequest(
++                engine="phonon", target_id="phonon-demo", language="en", voice="bad"
++            ),
++            "phonon.voice_not_found",
++        ),
++        (
++            EngineRequest(engine="phonon", target_id="phonon-demo", language="fr-FR"),
++            "engine_language_incompatible",
++        ),
++        (
++            EngineRequest(
++                engine="phonon", target_id="phonon-demo", language="en", speaker=1
++            ),
++            "phonon.speaker_unsupported",
++        ),
++        (
++            EngineRequest(
++                engine="phonon",
++                target_id="phonon-demo",
++                language="en",
++                options={"voice_source": {"kind": "reference"}},
++            ),
++            "phonon.reference_voice_unsupported",
++        ),
++    ],
++)
++def test_resolution_rejects_invalid_and_unsupported_selection(
++    monkeypatch: pytest.MonkeyPatch, engine_request: EngineRequest, code: str
++) -> None:
++    monkeypatch.setitem(sys.modules, "phononsynth", _fake_package())
++
++    with pytest.raises(PhononSelectionError) as raised:
++        PhononSynthEngineAdapter().resolve(engine_request)
++
++    assert raised.value.diagnostic_code == code
++
++
++def test_validate_selection_rediscovers_catalog_without_opening_model(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++    adapter = PhononSynthEngineAdapter()
++
++    assert adapter.validate_selection(_selection()) == ()
++    invalid = adapter.validate_selection(
++        _selection(language="fr-FR", options={"quality": "q8"}, voice="missing")
++    )
++
++    assert {item.code for item in invalid} == {
++        "engine_language_incompatible",
++        "phonon.quality_unavailable",
++        "phonon.voice_not_found",
++    }
++    assert package.PhononVoice.opens == []
++
++
++def test_profile_has_only_named_voice_quality_and_no_capacity() -> None:
++    fragment = PhononSynthEngineAdapter().renderprofile_fragment(_selection())
++
++    assert fragment.frontend == "phononsynth"
++    assert fragment.pronunciation == "unsupported"
++    assert fragment.token_fields == ()
++    assert fragment.renderer_capacity is None
++    assert fragment.planner_capacity is None
++    assert fragment.binding["renderer"] == "phonon"
++    assert fragment.binding["voice"] == "voice-a"
++    assert fragment.binding["options"]["quality"] == "q4"
++    assert "voice_source" not in fragment.binding["options"]
++
++
++def test_capabilities_are_truthful_and_options_are_canonical() -> None:
++    capabilities = PhononSynthEngineAdapter().capabilities()
++
++    assert capabilities.option_names == PHONON_OPTION_NAMES
++    assert capabilities.supports_named_voices
++    assert capabilities.supports_qualities
++    assert capabilities.supports_request_measurement
++    assert not capabilities.supports_reference_voice
++    assert not capabilities.supports_speakers
++    assert not capabilities.supports_pronunciation_overrides
++    assert not capabilities.supports_say_as
++    assert not capabilities.supports_linguistic_tokens
++    assert not capabilities.supports_whole_request_phonemes
++    assert not capabilities.supports_live
++    assert not capabilities.supports_timestamps
++    assert not capabilities.supports_model_sources
++
++
++def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> None:
++    class Voice:
++        def __init__(self) -> None:
++            self.text: str | None = None
++
++        def measure_prepared(self, text: str) -> Any:
++            self.text = text
++            return SimpleNamespace(
++                token_count=23, max_tokens=None, fits=None, model_id="phonon-demo"
++            )
++
++    voice = Voice()
++    text = "  leading spaces and exact punctuation!\n"
++    request = SpeechRequest(id="request-1", text=text, language="en-US")
++
++    measured = PhononSynthEngineSession(voice, _selection(), None).measure(request)
++
++    assert measured == RequestMeasure(
++        fits=None,
++        amount=23,
++        maximum=None,
++        unit="model_tokens",
++        source="phononsynth.measure_prepared",
++        details={"model_id": "phonon-demo"},
++    )
++    assert voice.text == text
++
++
++def test_measurement_translates_empty_text_error(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++    voice = package.PhononVoice()
++    voice.measure_error = package.EmptyTextError("empty")
++
++    with pytest.raises(EmptySpeechTextError) as raised:
++        PhononSynthEngineSession(voice, _selection(), None).measure(
++            SpeechRequest(id="request-id", text="", language="en-US")
++        )
++
++    assert raised.value.code == "phonon.empty_text"
++    assert raised.value.details["request_id"] == "request-id"
++
++
++def test_synthesis_passes_exact_text_config_voice_and_clamps_pcm(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++    selection = _selection()
++    adapter = PhononSynthEngineAdapter()
++    text = "\tExact text stays unchanged.  "
++    request = SpeechRequest(id="request-2", text=text, language="en-US")
++
++    with adapter.open(selection) as session:
++        rendered = session.synthesize(request)
++
++    voice_type = package.PhononVoice
++    assert voice_type.synthesize_calls[0][0] == text
++    assert voice_type.synthesize_calls[0][1]["voice"] == "voice-a"
++    assert voice_type.synthesize_calls[0][1]["config"].temperature is None
++    assert rendered.id == request.id
++    assert rendered.sample_rate == 24000
++    assert np.array_equal(
++        rendered.audio, np.asarray([1.0, -1.0, 0.25], dtype=np.float32)
++    )
++    assert rendered.metadata["pcm_range"]["clipped_samples"] == 2
++    assert rendered.metadata["quality"] == "q4"
++    assert rendered.metadata["model_ref"] == "phonon://phonon-demo"
++    assert rendered.warnings
++    assert voice_type.close_calls == 1
++
++
++def test_open_passes_runtime_controls_and_generation_config(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++    selection = _selection(
++        options={
++            "quality": "q4",
++            "duration_delta": 0.2,
++            "temperature": 0.6,
++            "seed": 9,
++            "eos_threshold": 2.5,
++            "frames_after_eos": 3,
++            "min_frames_before_eos": 4,
++            "max_frames": 99,
++            "cache_dir": "/tmp/phonon-cache",
++            "catalog_url": "https://example.invalid/catalog.json",
++            "providers": ["CPUExecutionProvider"],
++            "provider_options": {
++                "CPUExecutionProvider": {"arena_extend_strategy": "kSameAsRequested"}
++            },
++            "session_options": {"intra_op_num_threads": 1},
++            "force_download": True,
++        },
++        offline=True,
++        refresh=True,
++    )
++
++    with PhononSynthEngineAdapter().open(selection):
++        pass
++
++    args, kwargs = package.PhononVoice.opens[0]
++    assert args == ("phonon-demo",)
++    assert kwargs == {
++        "quality": "q4",
++        "cache_dir": "/tmp/phonon-cache",
++        "offline": True,
++        "refresh_catalog": True,
++        "force_download": True,
++        "catalog_url": "https://example.invalid/catalog.json",
++        "providers": ["CPUExecutionProvider"],
++        "provider_options": {
++            "CPUExecutionProvider": {"arena_extend_strategy": "kSameAsRequested"}
++        },
++        "session_options": {"intra_op_num_threads": 1},
++    }
++    assert package.PhononVoice.close_calls == 1
++
++
++def test_open_translates_config_error_before_opening_runtime(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++
++    class Config:
++        def __init__(self, **kwargs: Any) -> None:
++            pass
++
++        def validated(self) -> Any:
++            raise package.InvalidSynthesisConfigError("bad generation control")
++
++    package.SynthesisConfig = Config
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    with pytest.raises(InvalidEngineOptionError):
++        PhononSynthEngineAdapter().open(_selection())
++
++    assert package.PhononVoice.opens == []
++
++
++def test_synthesis_translates_backend_and_invalid_voice_errors(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++    selection = _selection()
++    request = SpeechRequest(id="request-3", text="hello", language="en-US")
++    voice = package.PhononVoice()
++    voice.synthesize_error = package.ModelInferenceError("inference failed")
++    with pytest.raises(EngineBackendError) as backend_error:
++        PhononSynthEngineSession(voice, selection, None).synthesize(request)
++    assert backend_error.value.code == "phonon.inference_failed"
++    assert backend_error.value.details["target_id"] == "phonon-demo"
++    assert backend_error.value.details["request_id"] == "request-3"
++
++    voice.synthesize_error = ValueError("Unknown Phonon voice 'bad'")
++    with pytest.raises(InvalidEngineVoiceError) as voice_error:
++        PhononSynthEngineSession(voice, selection, None).synthesize(request)
++    assert voice_error.value.code == "phonon.voice_not_found"
++
++
++def test_runtime_closes_when_synthesis_raises(monkeypatch: pytest.MonkeyPatch) -> None:
++    package = _fake_package()
++    package.PhononVoice.synthesize_error = package.ModelInferenceError("failed")
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    with (
++        pytest.raises(EngineBackendError),
++        PhononSynthEngineAdapter().open(_selection()) as session,
++    ):
++        session.synthesize(SpeechRequest(id="failure", text="hello", language="en-US"))
++
++    assert package.PhononVoice.close_calls == 1
++
++
++@pytest.mark.parametrize(
++    "speech_request",
++    [
++        SpeechRequest(
++            id="tokens",
++            text="hello",
++            language="en-US",
++            tokens=(SpeechToken(start=0, end=5, text="hello"),),
++        ),
++        SpeechRequest(
++            id="pronunciation",
++            text="hello",
++            language="en-US",
++            pronunciation_overrides=(
++                PronunciationSpan(start=0, end=5, phonemes="həˈloʊ"),
++            ),
++        ),
++        SpeechRequest(
++            id="say-as",
++            text="hello",
++            language="en-US",
++            say_as=(SayAsSpan(start=0, end=5, interpret_as="characters"),),
++        ),
++        SpeechRequest(
++            id="phonemes",
++            text="hello",
++            language="en-US",
++            whole_request_phonemes="həˈloʊ",
++        ),
++        SpeechRequest(id="speaker", text="hello", language="en-US", speaker="narrator"),
++    ],
++)
++def test_synthesis_rejects_unsupported_request_semantics(
++    speech_request: SpeechRequest,
++) -> None:
++    class Voice:
++        def synthesize_prepared(self, *_: Any, **__: Any) -> Any:
++            raise AssertionError("unsupported semantics must fail before inference")
++
++    with pytest.raises(UnsupportedSynthesisFeatureError):
++        PhononSynthEngineSession(Voice(), _selection(), None).synthesize(speech_request)
++
++
++def test_identity_tracks_output_inputs_but_not_cache_location(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package()
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++    adapter = PhononSynthEngineAdapter()
++    baseline = _selection()
++
++    def identity(selection: EngineSelection) -> Any:
++        return adapter.canonical_synthesis_identity(selection)
++
++    baseline_identity = identity(baseline)
++    assert baseline_identity == identity(baseline)
++    assert baseline_identity["engine_identity"] == {"runtime": "phonon.runtime.v1"}
++    assert baseline_identity["source_revision"] == "rev-q4"
++    assert identity(baseline) != identity(_selection(options={"quality": "fp32"}))
++    assert identity(baseline) != identity(_selection(voice="voice-b"))
++    for name, value in {
++        "duration_delta": 0.2,
++        "temperature": 0.6,
++        "seed": 9,
++        "eos_threshold": 2.5,
++        "frames_after_eos": 3,
++        "min_frames_before_eos": 4,
++        "max_frames": 99,
++    }.items():
++        assert identity(baseline) != identity(
++            _selection(options={"quality": "q4", name: value})
++        )
++    assert identity(baseline) != identity(
++        _selection(options={"quality": "q4", "providers": ["CUDAExecutionProvider"]})
++    )
++    assert identity(baseline) != identity(
++        _selection(
++            metadata={**dict(baseline.metadata), "source_revisions": {"q4": "rev-new"}}
++        )
++    )
++    assert identity(baseline) != identity(
++        _selection(metadata={**dict(baseline.metadata), "release_version": "1.2.4"})
++    )
++    assert identity(baseline) == identity(
++        _selection(options={"quality": "q4", "cache_dir": "/different/cache"})
++    )
++    assert baseline_identity == identity(_selection(offline=True, refresh=True))
++    package.runtime_identity = lambda: {"runtime": "phonon.runtime.v2"}
++    assert baseline_identity != identity(baseline)
++
++
++def test_profile_and_identity_do_not_claim_reference_or_capacity_support() -> None:
++    adapter = PhononSynthEngineAdapter()
++    fragment = adapter.renderprofile_fragment(_selection())
++
++    assert fragment.binding["renderer_metadata"]["frontend"] == "phononsynth"
++    assert fragment.renderer_capacity is None
++    assert fragment.planner_capacity is None
+diff --git a/tests/test_renderplan_input.py b/tests/test_renderplan_input.py
+index 8ec6cf6..c639307 100644
+--- a/tests/test_renderplan_input.py
++++ b/tests/test_renderplan_input.py
+@@ -36,6 +36,10 @@ from voicerender.engines.inflectsynth import (
+ )
+ from voicerender.engines.kittensynth import KittenSynthEngineAdapter
+ from voicerender.engines.kokoro import PyKokoroEngineAdapter
++from voicerender.engines.phononsynth import (
++    PhononSynthEngineAdapter,
++    PhononSynthEngineSession,
++)
+ from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+ from voicerender.engines.pocketsynth import (
+     PocketSynthEngineAdapter,
+@@ -362,6 +366,7 @@ def test_kittensynth_profile_contract_converts_sparse_optional_context(
+         pytest.param(SupertonicSynthEngineAdapter, False, id="supertonic"),
+         pytest.param(PyKokoroEngineAdapter, True, id="kokoro"),
+         pytest.param(PiperSynthEngineAdapter, True, id="piper"),
++        pytest.param(PhononSynthEngineAdapter, False, id="phonon"),
+     ],
+ )
+ def test_builtin_adapter_capability_controls_renderplan_token_lowering(
+@@ -410,6 +415,56 @@ def test_pocket_renderplan_request_reaches_capacity_measurement(
+     assert measured_requests[0].text == request.text
+
+
++def test_phonon_renderplan_exact_text_reaches_measurement_and_synthesis(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter = PhononSynthEngineAdapter()
++    request = _builtin_renderplan_request(
++        monkeypatch,
++        adapter,
++        speaker=None,
++        text="  Exact RenderPlan text, unchanged!  ",
++    )
++    measured_text: list[str] = []
++    synthesized_text: list[str] = []
++
++    class Voice:
++        def measure_prepared(self, text: str) -> Any:
++            measured_text.append(text)
++            return SimpleNamespace(
++                token_count=8, max_tokens=None, fits=None, model_id="target-v1"
++            )
++
++        def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
++            synthesized_text.append(text)
++            return SimpleNamespace(
++                audio=[0.0, 0.1, -0.1],
++                sample_rate=24000,
++                voice=kwargs["voice"],
++                model_ref="phonon://target-v1",
++                metadata={},
++            )
++
++    session = PhononSynthEngineSession(
++        Voice(),
++        EngineSelection(
++            engine="phonon", target_id="target-v1", language="en-US", voice="voice-a"
++        ),
++        config=None,
++    )
++
++    measured = session.measure(request)
++    session.synthesize(request)
++
++    assert measured.fits is None
++    assert measured.amount == 8
++    assert measured.maximum is None
++    assert measured.unit == "model_tokens"
++    assert measured_text == [request.text]
++    assert synthesized_text == [request.text]
++    assert measured_text == synthesized_text
++
++
+ def test_inflect_renderplan_optional_tokens_reach_synthesis(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -493,6 +548,15 @@ def test_unsupported_engine_sessions_retain_direct_token_rejection() -> None:
+         generation=None,
+         voice_level=None,
+     )
++    phonon = PhononSynthEngineSession(
++        object(),
++        EngineSelection(engine="phonon", target_id="target-v1", language="en-US"),
++        config=None,
++    )
++    with pytest.raises(
++        UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
++    ):
++        phonon.synthesize(request)
+
+     with pytest.raises(
+         UnsupportedSynthesisFeatureError, match="does not support linguistic tokens"
+@@ -508,6 +572,23 @@ def test_unsupported_engine_sessions_retain_direct_token_rejection() -> None:
+         supertonic.synthesize(request)
+
+
++def test_phonon_say_as_is_rejected_before_synthesis() -> None:
++    request = SpeechRequest(
++        id="say-as-request",
++        text="hello",
++        language="en-US",
++        say_as=(SayAsSpan(start=0, end=5, interpret_as="characters"),),
++    )
++    session = PhononSynthEngineSession(
++        object(),
++        EngineSelection(engine="phonon", target_id="target-v1", language="en-US"),
++        config=None,
++    )
++
++    with pytest.raises(UnsupportedSynthesisFeatureError, match="say_as spans"):
++        session.synthesize(request)
++
++
+ def test_request_conversion_preserves_exact_text_binding_and_token_semantics(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/wheel_smoke.py b/tests/wheel_smoke.py
+index f8f41b2..aeb8f2f 100644
+--- a/tests/wheel_smoke.py
++++ b/tests/wheel_smoke.py
+@@ -155,6 +155,7 @@ def main() -> None:
+         "kitten",
+         "kokoro",
+         "piper",
++        "phonon",
+         "pocket",
+         "qwen3",
+         "sopro",
+@@ -162,6 +163,7 @@ def main() -> None:
+     }
+     assert find_spec("chatterboxsynth") is None
+     assert find_spec("qwen3synth") is None
++    assert find_spec("phononsynth") is None
+     listed_engines = list_engines()
+     assert {item["id"] for item in listed_engines} == expected_engine_ids
+     by_id = {item["id"]: item for item in listed_engines}
+@@ -172,6 +174,7 @@ def main() -> None:
+         "kittensynth",
+         "pykokoro",
+         "pipersynth",
++        "phononsynth",
+         "pocketsynth",
+         "qwen3synth",
+         "soprosynth",
+diff --git a/voicerender/engines/phononsynth.py b/voicerender/engines/phononsynth.py
+new file mode 100644
+index 0000000..a829117
+--- /dev/null
++++ b/voicerender/engines/phononsynth.py
+@@ -0,0 +1,909 @@
++"""Request-centric adapter for the public PhononSynth prepared-text API."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from contextlib import AbstractContextManager, contextmanager
++from dataclasses import replace
++from importlib import import_module
++from typing import Any
++
++from ..errors import (
++    EmptySpeechTextError,
++    EngineBackendError,
++    EngineError,
++    EngineSynthesisError,
++    InvalidEngineModelError,
++    InvalidEngineOptionError,
++    InvalidEngineVoiceError,
++    UnsupportedSynthesisFeatureError,
++)
++from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
++from .base import (
++    PCM_RANGE_POLICY,
++    EngineCapabilities,
++    EngineDiagnostic,
++    EngineSelection,
++    RenderedSpeech,
++    RenderProfileFragment,
++    RequestMeasure,
++    SpeechRequest,
++    adapt_pcm_full_scale,
++    distribution_version,
++    validate_rendered_speech,
++)
++from .catalog import CatalogRequest, SynthesisTarget, TargetVoice
++from .metadata import (
++    language_base,
++    language_tags_match,
++    normalize_gender,
++    normalize_locale_tag,
++)
++from .profiles import make_renderprofile_fragment
++
++ENGINE_ID = "phonon"
++PACKAGE_NAME = "phononsynth"
++PHONON_OPTION_NAMES = frozenset(
++    {
++        "quality",
++        "duration_delta",
++        "temperature",
++        "seed",
++        "eos_threshold",
++        "frames_after_eos",
++        "min_frames_before_eos",
++        "max_frames",
++        "cache_dir",
++        "catalog_url",
++        "providers",
++        "provider_options",
++        "session_options",
++        "force_download",
++    }
++)
++_GENERATION_OPTION_NAMES = (
++    "duration_delta",
++    "temperature",
++    "seed",
++    "eos_threshold",
++    "frames_after_eos",
++    "min_frames_before_eos",
++    "max_frames",
++)
++_UNSUPPORTED_OPTION_FIELDS = frozenset(
++    {
++        "voice_source",
++        "reference_audio",
++        "reference_voice",
++        "model_source",
++        "model_path",
++        "local_model",
++        "local_model_path",
++        "bundle_dir",
++    }
++)
++
++
++def _module() -> Any:
++    """Import PhononSynth only for an operation that needs its public API."""
++    return import_module(PACKAGE_NAME)
++
++
++def _value(item: Any, name: str, default: Any = None) -> Any:
++    if isinstance(item, Mapping):
++        return item.get(name, default)
++    return getattr(item, name, default)
++
++
++def _contract_field(contract: Any, name: str, default: Any = None) -> Any:
++    return _value(contract, name, default)
++
++
++def _target_voice(voice: Any, target_languages: tuple[str, ...]) -> TargetVoice:
++    raw_language = normalize_locale_tag(_value(voice, "language"))
++    locale = normalize_locale_tag(_value(voice, "locale"))
++    languages = tuple(
++        dict.fromkeys(
++            base
++            for raw in (_value(voice, "languages", ()) or target_languages)
++            if (base := language_base(raw))
++        )
++    )
++    language = language_base(raw_language) or (languages[0] if languages else "unknown")
++    language_label = str(
++        _value(voice, "language_label")
++        or _value(voice, "display_name")
++        or locale
++        or language
++    )
++    return TargetVoice(
++        id=str(_value(voice, "id", "")),
++        gender=normalize_gender(_value(voice, "gender")),
++        language=language,
++        locale=locale or raw_language or language,
++        language_label=language_label or "unknown",
++        languages=languages or target_languages,
++    )
++
++
++def _target_from_model(model: Any) -> SynthesisTarget:
++    languages = tuple(
++        dict.fromkeys(
++            base
++            for raw in (_value(model, "languages", ()) or ())
++            if (base := language_base(raw))
++        )
++    )
++    raw_voices = tuple(_value(model, "voices", ()) or ())
++    voice_details = tuple(_target_voice(voice, languages) for voice in raw_voices)
++    voices = tuple(detail.id for detail in voice_details)
++    upstream_metadata = _value(model, "metadata", {})
++    metadata = dict(upstream_metadata) if isinstance(upstream_metadata, Mapping) else {}
++    release_tags = _value(model, "release_tags", {})
++    source_revisions = _value(model, "source_revisions", {})
++    release_tags = dict(release_tags) if isinstance(release_tags, Mapping) else {}
++    source_revisions = (
++        dict(source_revisions) if isinstance(source_revisions, Mapping) else {}
++    )
++    metadata.update(
++        {
++            "source": PACKAGE_NAME,
++            "source_revision": _value(model, "source_revision"),
++            "release_version": _value(model, "release_version"),
++            "release_tags": release_tags,
++            "source_revisions": source_revisions,
++            "license_spdx": _value(model, "license_spdx"),
++            "commercial_use": _value(model, "commercial_use"),
++            "languages": languages,
++            "qualities": tuple(_value(model, "quality_choices", ()) or ()),
++            "voice_display_names": {
++                detail.id: str(_value(voice, "display_name") or detail.id)
++                for voice, detail in zip(raw_voices, voice_details, strict=True)
++            },
++        }
++    )
++    default_voice = _value(model, "default_voice")
++    return SynthesisTarget(
++        engine=ENGINE_ID,
++        id=str(_value(model, "id", "")),
++        display_name=str(_value(model, "display_name") or _value(model, "id", "")),
++        languages=languages,
++        status="ready",
++        runtime_available=True,
++        sample_rate=_value(model, "sample_rate"),
++        voices=voices,
++        voice_details=voice_details,
++        default_voice=str(default_voice) if isinstance(default_voice, str) else None,
++        qualities=tuple(
++            str(value) for value in (_value(model, "quality_choices", ()) or ())
++        ),
++        capabilities=frozenset({"predefined_voice"}),
++        metadata=metadata,
++    )
++
++
++def _target_catalog(
++    *,
++    language: str | None,
++    offline: bool,
++    refresh: bool,
++    options: Mapping[str, Any] | None = None,
++) -> tuple[SynthesisTarget, ...]:
++    module = _module()
++    values = options or {}
++    requested_language = language_base(language) if language else None
++    models = module.discover_models(
++        language=requested_language,
++        offline=offline,
++        refresh=refresh,
++        cache_dir=values.get("cache_dir"),
++        catalog_url=values.get("catalog_url"),
++    )
++    targets = tuple(_target_from_model(model) for model in models)
++    if not language:
++        return targets
++    normalized = normalize_locale_tag(language)
++    return tuple(
++        target
++        for target in targets
++        if any(language_tags_match(normalized, item) for item in target.languages)
++    )
++
++
++def _find_target(
++    targets: tuple[SynthesisTarget, ...], target_id: str
++) -> SynthesisTarget | None:
++    requested = target_id.casefold()
++    return next(
++        (target for target in targets if target.id.casefold() == requested), None
++    )
++
++
++def _selection_diagnostic(code: str, message: str, field: str) -> EngineDiagnostic:
++    return EngineDiagnostic(code=code, severity="error", message=message, field=field)
++
++
++class PhononSelectionError(ValueError):
++    """Selection failure with a stable machine-readable diagnostic code."""
++
++    def __init__(
++        self, code: str, message: str, field: str = "synthesis.engine"
++    ) -> None:
++        super().__init__(message)
++        self.diagnostic_code = code
++        self.diagnostic_field = field
++
++
++def _error_context(
++    error: Exception,
++    selection: EngineSelection,
++    request: SpeechRequest | None,
++) -> dict[str, Any]:
++    return {
++        "engine": ENGINE_ID,
++        "engine_version": distribution_version(PACKAGE_NAME),
++        "target_id": selection.target_id,
++        "language": request.language if request is not None else selection.language,
++        "voice": request.voice if request is not None else selection.voice,
++        "speaker": request.speaker if request is not None else selection.speaker,
++        "request_id": request.id if request is not None else None,
++        "native_error_type": type(error).__name__,
++    }
++
++
++def _translate_phonon_error(
++    error: Exception,
++    selection: EngineSelection,
++    request: SpeechRequest | None = None,
++    *,
++    opening: bool = False,
++) -> EngineError:
++    """Translate public PhononSynth failures without inventing capacity semantics."""
++    try:
++        module = _module()
++    except ImportError:
++        module = None
++    error_map: tuple[tuple[str, type[EngineError], str], ...] = (
++        ("EmptyTextError", EmptySpeechTextError, "phonon.empty_text"),
++        (
++            "InvalidSynthesisConfigError",
++            InvalidEngineOptionError,
++            "phonon.invalid_options",
++        ),
++        ("UnsupportedModelError", InvalidEngineModelError, "phonon.model_unsupported"),
++        ("CatalogUnavailableError", EngineBackendError, "phonon.catalog_unavailable"),
++        ("CatalogDiscoveryError", EngineBackendError, "phonon.catalog_error"),
++        ("TokenizerError", EngineBackendError, "phonon.tokenizer_error"),
++        (
++            "ManagedModelDependencyError",
++            EngineBackendError,
++            "phonon.runtime_dependency_error",
++        ),
++        ("OnnxVoiceContractError", EngineBackendError, "phonon.runtime_contract_error"),
++        ("ModelInferenceError", EngineBackendError, "phonon.inference_failed"),
++    )
++    mapped: tuple[type[EngineError], str] | None = None
++    if module is not None:
++        for native_name, error_type, code in error_map:
++            native_type = getattr(module, native_name, None)
++            if isinstance(native_type, type) and isinstance(error, native_type):
++                mapped = error_type, code
++                break
++    if mapped is None and isinstance(error, ValueError):
++        message = str(error).casefold()
++        if "unknown phonon voice" in message or "no default phonon voice" in message:
++            mapped = InvalidEngineVoiceError, "phonon.voice_not_found"
++        elif opening:
++            mapped = InvalidEngineOptionError, "phonon.invalid_options"
++    error_type, code = mapped or (EngineBackendError, "phonon.backend_error")
++    return error_type(
++        str(error),
++        **_error_context(error, selection, request),
++        code=code,
++    )
++
++
++def _serializable_mapping(value: Any) -> dict[str, Any]:
++    if not isinstance(value, Mapping):
++        return {}
++    from ..jsonutil import json_value
++
++    result: dict[str, Any] = {}
++    for key, item in value.items():
++        if not isinstance(key, str):
++            continue
++        try:
++            result[key] = json_value(item, label=f"PhononSynth metadata.{key}")
++        except (TypeError, ValueError):
++            continue
++    return result
++
++
++class PhononSynthEngineSession:
++    """Adapt exact prepared-text requests to one managed PhononSynth voice."""
++
++    def __init__(self, voice: Any, selection: EngineSelection, config: Any) -> None:
++        self._voice = voice
++        self._selection = selection
++        self._config = config
++
++    def measure(self, request: SpeechRequest) -> RequestMeasure:
++        try:
++            measured = self._voice.measure_prepared(request.text)
++        except EngineSynthesisError:
++            raise
++        except Exception as exc:  # Backend errors are normalized at this boundary.
++            raise _translate_phonon_error(exc, self._selection, request) from exc
++        return RequestMeasure(
++            fits=_value(measured, "fits"),
++            amount=_value(measured, "token_count"),
++            maximum=_value(measured, "max_tokens"),
++            unit="model_tokens",
++            source="phononsynth.measure_prepared",
++            details={
++                "model_id": _value(measured, "model_id") or self._selection.target_id,
++            },
++        )
++
++    def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
++        unsupported = (
++            (request.tokens, "linguistic tokens"),
++            (request.pronunciation_overrides, "pronunciation overrides"),
++            (request.say_as, "say_as spans"),
++            (request.whole_request_phonemes is not None, "whole-request phonemes"),
++            (request.speaker is not None, "speaker selection"),
++        )
++        for present, label in unsupported:
++            if present:
++                raise UnsupportedSynthesisFeatureError(
++                    f"PhononSynth does not support {label}",
++                    engine=ENGINE_ID,
++                    target_id=self._selection.target_id,
++                    request_id=request.id,
++                )
++        voice = request.voice or self._selection.voice
++        try:
++            result = self._voice.synthesize_prepared(
++                request.text,
++                voice=voice,
++                config=self._config,
++            )
++        except EngineSynthesisError:
++            raise
++        except Exception as exc:  # Backend errors are normalized at this boundary.
++            raise _translate_phonon_error(exc, self._selection, request) from exc
++
++        result_metadata = _serializable_mapping(_value(result, "metadata", {}))
++        quality = self._selection.options.get("quality")
++        source_revision = self._selection.metadata.get("source_revision")
++        release_version = self._selection.metadata.get("release_version")
++        metadata: dict[str, Any] = {
++            "engine": ENGINE_ID,
++            "target_id": self._selection.target_id,
++            "model_ref": _value(result, "model_ref"),
++            "voice": _value(result, "voice") or voice,
++            "quality": quality,
++            "source_revision": source_revision,
++            "release_version": release_version,
++            "release_tags": _serializable_mapping(
++                self._selection.metadata.get("release_tags", {})
++            ),
++            "source_revisions": _serializable_mapping(
++                self._selection.metadata.get("source_revisions", {})
++            ),
++            "generation": {
++                name: getattr(self._config, name, None)
++                for name in _GENERATION_OPTION_NAMES
++            },
++            "phononsynth": result_metadata,
++        }
++        metadata = {key: value for key, value in metadata.items() if value is not None}
++        adaptation = adapt_pcm_full_scale(
++            _value(result, "audio"), engine_label="PhononSynth"
++        )
++        metadata["pcm_range"] = {
++            "policy": PCM_RANGE_POLICY,
++            "peak_before_clip": adaptation.peak_before_clip,
++            "clipped_samples": adaptation.clipped_samples,
++        }
++        raw_warnings = _value(result, "warnings", ()) or ()
++        warnings = tuple(item for item in raw_warnings if isinstance(item, str))
++        if adaptation.warning:
++            warnings += (adaptation.warning,)
++        rendered = RenderedSpeech(
++            id=request.id,
++            audio=adaptation.audio,
++            sample_rate=_value(result, "sample_rate"),
++            warnings=warnings,
++            word_timings=(),
++            metadata=metadata,
++        )
++        return validate_rendered_speech(
++            request,
++            rendered,
++            engine=ENGINE_ID,
++            engine_version=distribution_version(PACKAGE_NAME),
++            target_id=self._selection.target_id,
++        )
++
++
++class PhononSynthEngineAdapter:
++    """Phonon model discovery, named-voice selection, and prepared-text synthesis."""
++
++    id = ENGINE_ID
++    package_name = PACKAGE_NAME
++
++    def version(self) -> str | None:
++        return distribution_version(self.package_name)
++
++    def probe_api(self) -> EngineApiProbe:
++        probe = probe_public_api(
++            engine=self.id,
++            package=self.package_name,
++            required_symbols=(
++                "PhononVoice",
++                "SynthesisConfig",
++                "SynthesisResult",
++                "SynthesisMeasure",
++                "DiscoveredModel",
++                "DescribedVoice",
++                "discover_models",
++                "runtime_identity",
++                "REQUEST_API_VERSION",
++                "request_api_contract",
++            ),
++            required_methods={
++                "PhononVoice": (
++                    "from_pretrained",
++                    "measure_prepared",
++                    "synthesize_prepared",
++                    "close",
++                ),
++                "__module__": ("discover_models", "runtime_identity"),
++            },
++            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
++            require_explicit_contract=True,
++        )
++        if not probe.compatible:
++            return probe
++        try:
++            contract = _module().request_api_contract()
++            features = _contract_field(contract, "features", {})
++            declared = {
++                "engine": _contract_field(contract, "engine"),
++                "entrypoint": _contract_field(contract, "entrypoint"),
++                "measure_entrypoint": _contract_field(contract, "measure_entrypoint"),
++                "input": _contract_field(contract, "input"),
++                "measurement_unit": _contract_field(contract, "measurement_unit"),
++                "named_voices": _contract_field(features, "named_voices"),
++                "voice_cloning": _contract_field(features, "voice_cloning"),
++                "word_timings": _contract_field(features, "word_timings"),
++                "automatic_chunking": _contract_field(features, "automatic_chunking"),
++            }
++        except Exception as exc:  # noqa: BLE001 - Contract inspection must fail closed.
++            return replace(
++                probe,
++                compatible=False,
++                status="api_probe_failed",
++                failed_stage="request_api_contract",
++                failed_symbol="request_api_contract",
++                error_type=type(exc).__name__,
++                error_message=str(exc),
++            )
++        expected = {
++            "engine": ENGINE_ID,
++            "entrypoint": "PhononVoice.synthesize_prepared",
++            "measure_entrypoint": "PhononVoice.measure_prepared",
++            "input": "prepared_text",
++            "measurement_unit": "model_tokens",
++            "named_voices": True,
++            "voice_cloning": False,
++            "word_timings": False,
++            "automatic_chunking": False,
++        }
++        contradictions = {
++            key: {"expected": expected[key], "actual": value}
++            for key, value in declared.items()
++            if value != expected[key]
++        }
++        if contradictions:
++            return replace(
++                probe,
++                compatible=False,
++                status="api_incompatible",
++                failed_stage="request_api_contract",
++                failed_symbol="request_api_contract",
++                warnings=probe.warnings
++                + (
++                    "PhononSynth request contract contradicts VoiceRender adapter semantics.",
++                ),
++                details={**dict(probe.details), "contract_mismatches": contradictions},
++            )
++        return replace(
++            probe, details={**dict(probe.details), "request_api_contract": declared}
++        )
++
++    def compatible_api(self) -> bool:
++        return self.probe_api().compatible
++
++    def capabilities(self) -> EngineCapabilities:
++        return EngineCapabilities(
++            id=self.id,
++            voice_binding_namespace=ENGINE_ID,
++            voice_binding_scope="target",
++            option_names=PHONON_OPTION_NAMES,
++            supports_named_voices=True,
++            supports_reference_voice=False,
++            supports_speakers=False,
++            supports_pronunciation_overrides=False,
++            supports_say_as=False,
++            supports_linguistic_tokens=False,
++            supports_whole_request_phonemes=False,
++            supports_lexicons=False,
++            supports_model_sources=False,
++            supports_qualities=True,
++            supports_live=False,
++            supports_timestamps=False,
++            supports_voice_level_calibration=False,
++            supports_request_measurement=True,
++        )
++
++    def renderprofile_fragment(
++        self, selection: EngineSelection
++    ) -> RenderProfileFragment:
++        return make_renderprofile_fragment(
++            self,
++            selection,
++            frontend=PACKAGE_NAME,
++            pronunciation="unsupported",
++        )
++
++    def discover(self, request: CatalogRequest) -> tuple[SynthesisTarget, ...]:
++        try:
++            return _target_catalog(
++                language=request.language,
++                offline=request.offline,
++                refresh=request.refresh,
++            )
++        except Exception as exc:  # Discovery failures have a stable public error.
++            raise EngineBackendError(
++                f"PhononSynth model catalog is unavailable: {exc}",
++                engine=ENGINE_ID,
++                native_error_type=type(exc).__name__,
++                code="phonon.catalog_unavailable",
++            ) from exc
++
++    def resolve(self, request: Any) -> tuple[EngineSelection, tuple[Any, ...]]:
++        options = dict(getattr(request, "options", {}) or {})
++        engine_options = dict(getattr(request, "engine_options", {}) or {})
++        for name in _UNSUPPORTED_OPTION_FIELDS:
++            if options.get(name) is not None or engine_options.get(name) is not None:
++                raise PhononSelectionError(
++                    "phonon.model_source_unsupported"
++                    if name
++                    in _UNSUPPORTED_OPTION_FIELDS
++                    - {
++                        "voice_source",
++                        "reference_audio",
++                        "reference_voice",
++                    }
++                    else "phonon.reference_voice_unsupported",
++                    f"PhononSynth does not support selection field {name!r}.",
++                    "synthesis.engine_options",
++                )
++        unknown = sorted(set(engine_options) - PHONON_OPTION_NAMES)
++        if unknown:
++            raise PhononSelectionError(
++                "phonon.option_unsupported",
++                f"Unsupported PhononSynth option(s): {', '.join(unknown)}.",
++                "synthesis.engine_options",
++            )
++        options.update(engine_options)
++        speaker = getattr(request, "speaker", None)
++        if speaker is not None:
++            raise PhononSelectionError(
++                "phonon.speaker_unsupported",
++                "PhononSynth does not support speaker selection.",
++                "render.target.speaker",
++            )
++        offline = bool(getattr(request, "offline", False))
++        refresh = bool(getattr(request, "refresh", False))
++        language = normalize_locale_tag(getattr(request, "language", None))
++        requested_target_id = getattr(request, "target_id", None)
++        try:
++            targets = _target_catalog(
++                language=None,
++                offline=offline,
++                refresh=refresh,
++                options=options,
++            )
++        except Exception as exc:  # Catalog failures become stable selection errors.
++            raise PhononSelectionError(
++                "phonon.catalog_unavailable",
++                f"PhononSynth model catalog is unavailable: {exc}",
++                "synthesis.engine",
++            ) from exc
++        if requested_target_id:
++            target = _find_target(targets, str(requested_target_id))
++            if target is None:
++                raise PhononSelectionError(
++                    "phonon.model_not_found",
++                    f"PhononSynth model {requested_target_id!r} was not found.",
++                    "render.target.id",
++                )
++        elif len(targets) == 1:
++            target = targets[0]
++        else:
++            raise PhononSelectionError(
++                "phonon.model_required",
++                "Select a PhononSynth model explicitly; no single unambiguous default exists.",
++                "render.target.id",
++            )
++        if (
++            language
++            and target.languages
++            and not any(
++                language_tags_match(language, available)
++                for available in target.languages
++            )
++        ):
++            raise PhononSelectionError(
++                "engine_language_incompatible",
++                f"PhononSynth model {target.id!r} supports {', '.join(target.languages)}, "
++                f"not {language!r}.",
++                "render.target.language",
++            )
++        language = language or (target.languages[0] if target.languages else "en-us")
++        quality = options.get("quality")
++        if quality is not None and quality not in target.qualities:
++            raise PhononSelectionError(
++                "phonon.quality_unavailable",
++                f"Quality {quality!r} is not available on PhononSynth model {target.id!r}.",
++                "render.options.quality",
++            )
++        voice = getattr(request, "voice", None) or target.default_voice
++        if not target.voices:
++            raise PhononSelectionError(
++                "phonon.voice_required",
++                f"PhononSynth model {target.id!r} does not publish a named voice.",
++                "render.target.voice",
++            )
++        if not voice:
++            raise PhononSelectionError(
++                "phonon.voice_required",
++                f"Select a named voice for PhononSynth model {target.id!r}.",
++                "render.target.voice",
++            )
++        if voice not in target.voices:
++            raise PhononSelectionError(
++                "phonon.voice_not_found",
++                f"Voice {voice!r} is not available on PhononSynth model {target.id!r}.",
++                "render.target.voice",
++            )
++        selected_options = {
++            name: options[name] for name in PHONON_OPTION_NAMES if name in options
++        }
++        metadata = dict(target.metadata)
++        metadata.update(
++            {
++                "languages": target.languages,
++                "voices": target.voices,
++                "default_voice": target.default_voice,
++                "sample_rate": target.sample_rate,
++                "qualities": target.qualities,
++            }
++        )
++        selection = EngineSelection(
++            engine=ENGINE_ID,
++            target_id=target.id,
++            language=language,
++            voice=str(voice),
++            options=selected_options,
++            metadata=metadata,
++            offline=offline,
++            refresh=refresh,
++        )
++        return selection, ()
++
++    def validate_selection(
++        self, selection: EngineSelection
++    ) -> tuple[EngineDiagnostic, ...]:
++        try:
++            targets = _target_catalog(
++                language=None,
++                offline=selection.offline,
++                refresh=selection.refresh,
++                options=selection.options,
++            )
++        except Exception as exc:  # noqa: BLE001 - Catalog failures are selection diagnostics.
++            return (
++                _selection_diagnostic(
++                    "phonon.catalog_unavailable",
++                    f"PhononSynth model catalog is unavailable: {exc}",
++                    "synthesis.engine",
++                ),
++            )
++        target = _find_target(targets, selection.target_id)
++        if target is None:
++            return (
++                _selection_diagnostic(
++                    "phonon.model_not_found",
++                    f"PhononSynth model {selection.target_id!r} was not found.",
++                    "render.target.id",
++                ),
++            )
++        diagnostics: list[EngineDiagnostic] = []
++        if selection.speaker is not None:
++            diagnostics.append(
++                _selection_diagnostic(
++                    "phonon.speaker_unsupported",
++                    "PhononSynth does not support speaker selection.",
++                    "render.target.speaker",
++                )
++            )
++        if target.languages and not any(
++            language_tags_match(selection.language, available)
++            for available in target.languages
++        ):
++            diagnostics.append(
++                _selection_diagnostic(
++                    "engine_language_incompatible",
++                    f"PhononSynth model {target.id!r} supports {', '.join(target.languages)}, "
++                    f"not {selection.language!r}.",
++                    "render.target.language",
++                )
++            )
++        quality = selection.options.get("quality")
++        if quality is not None and quality not in target.qualities:
++            diagnostics.append(
++                _selection_diagnostic(
++                    "phonon.quality_unavailable",
++                    f"Quality {quality!r} is not available on PhononSynth model {target.id!r}.",
++                    "render.options.quality",
++                )
++            )
++        voice = selection.voice or target.default_voice
++        if not target.voices or not voice:
++            diagnostics.append(
++                _selection_diagnostic(
++                    "phonon.voice_required",
++                    f"PhononSynth model {target.id!r} requires a published named voice.",
++                    "render.target.voice",
++                )
++            )
++        elif voice not in target.voices:
++            diagnostics.append(
++                _selection_diagnostic(
++                    "phonon.voice_not_found",
++                    f"Voice {voice!r} is not available on PhononSynth model {target.id!r}.",
++                    "render.target.voice",
++                )
++            )
++        if (
++            isinstance(target.sample_rate, bool)
++            or not isinstance(target.sample_rate, int)
++            or target.sample_rate <= 0
++        ):
++            diagnostics.append(
++                _selection_diagnostic(
++                    "phonon.invalid_model_metadata",
++                    f"PhononSynth model {target.id!r} has an invalid sample rate.",
++                    "render.target.id",
++                )
++            )
++        return tuple(diagnostics)
++
++    def target_metadata(self, selection: EngineSelection) -> Mapping[str, Any]:
++        try:
++            targets = _target_catalog(
++                language=None,
++                offline=selection.offline,
++                refresh=selection.refresh,
++                options=selection.options,
++            )
++        except Exception:  # noqa: BLE001 - Metadata is optional profile enrichment.
++            return dict(selection.metadata)
++        target = _find_target(targets, selection.target_id)
++        if target is None:
++            return dict(selection.metadata)
++        return {
++            **dict(target.metadata),
++            "languages": target.languages,
++            "voices": target.voices,
++            "default_voice": target.default_voice,
++            "sample_rate": target.sample_rate,
++            "qualities": target.qualities,
++        }
++
++    def canonical_synthesis_identity(
++        self, selection: EngineSelection
++    ) -> Mapping[str, Any]:
++        module = _module()
++        options = selection.options
++        source_revisions = selection.metadata.get("source_revisions", {})
++        release_tags = selection.metadata.get("release_tags", {})
++        quality = options.get("quality")
++        selected_revision = (
++            source_revisions.get(quality)
++            if isinstance(source_revisions, Mapping) and quality is not None
++            else None
++        ) or selection.metadata.get("source_revision")
++        selected_release_tag = (
++            release_tags.get(quality)
++            if isinstance(release_tags, Mapping) and quality is not None
++            else None
++        )
++        acoustic_options = {
++            key: options[key]
++            for key in ("providers", "provider_options", "session_options")
++            if key in options
++        }
++        return {
++            "schema": "voicerender.phonon-synthesis-identity.v1",
++            "engine": ENGINE_ID,
++            "engine_version": self.version(),
++            "target_id": selection.target_id,
++            "language": normalize_locale_tag(selection.language),
++            "voice": selection.voice,
++            "quality": quality,
++            "source_revision": selected_revision,
++            "release_version": selection.metadata.get("release_version"),
++            "release_tag": selected_release_tag,
++            "release_tags": dict(release_tags)
++            if isinstance(release_tags, Mapping)
++            else {},
++            "source_revisions": (
++                dict(source_revisions) if isinstance(source_revisions, Mapping) else {}
++            ),
++            "generation": {
++                name: options.get(name) for name in _GENERATION_OPTION_NAMES
++            },
++            "providers": acoustic_options,
++            "pcm_range_policy": PCM_RANGE_POLICY,
++            "engine_identity": dict(module.runtime_identity()),
++        }
++
++    def open(
++        self, selection: EngineSelection
++    ) -> AbstractContextManager[PhononSynthEngineSession]:
++        module = _module()
++        options = dict(selection.options)
++        try:
++            config = module.SynthesisConfig(
++                **{name: options.get(name) for name in _GENERATION_OPTION_NAMES}
++            ).validated()
++            voice = module.PhononVoice.from_pretrained(
++                selection.target_id,
++                quality=options.get("quality"),
++                cache_dir=options.get("cache_dir"),
++                offline=selection.offline,
++                refresh_catalog=selection.refresh,
++                force_download=bool(options.get("force_download", False)),
++                catalog_url=options.get("catalog_url"),
++                providers=options.get("providers"),
++                provider_options=options.get("provider_options"),
++                session_options=options.get("session_options"),
++            )
++        except EngineSynthesisError:
++            raise
++        except Exception as exc:  # Opening errors are classified centrally.
++            raise _translate_phonon_error(exc, selection, opening=True) from exc
++
++        @contextmanager
++        def session() -> Any:
++            try:
++                yield PhononSynthEngineSession(voice, selection, config)
++            finally:
++                voice.close()
++
++        return session()
++
++
++__all__ = [
++    "ENGINE_ID",
++    "PACKAGE_NAME",
++    "PHONON_OPTION_NAMES",
++    "PhononSelectionError",
++    "PhononSynthEngineAdapter",
++    "PhononSynthEngineSession",
++]
+diff --git a/voicerender/engines/registry.py b/voicerender/engines/registry.py
+index d8302d3..4d513dc 100644
+--- a/voicerender/engines/registry.py
++++ b/voicerender/engines/registry.py
+@@ -59,6 +59,11 @@ _ENGINE_MODULES: dict[str, BuiltinEngineSpec] = {
+     "piper": BuiltinEngineSpec(
+         "pipersynth", "voicerender.engines.pipersynth", "PiperSynthEngineAdapter"
+     ),
++    "phonon": BuiltinEngineSpec(
++        "phononsynth",
++        "voicerender.engines.phononsynth",
++        "PhononSynthEngineAdapter",
++    ),
+     "qwen3": BuiltinEngineSpec(
+         "qwen3synth", "voicerender.engines.qwen3synth", "Qwen3SynthEngineAdapter", True
+     ),
+@@ -89,6 +94,7 @@ def normalize_engine_id(engine: str) -> str:
+         "chatterboxsynth": "chatterbox",
+         "pykokoro": "kokoro",
+         "pipersynth": "piper",
++        "phononsynth": "phonon",
+         "pocketsynth": "pocket",
+         "qwen3synth": "qwen3",
+         "soprosynth": "sopro",

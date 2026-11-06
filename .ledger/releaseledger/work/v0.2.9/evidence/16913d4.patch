@@ -1,0 +1,232 @@
+ tests/test_render_book.py       | 51 +++++++++++++++++++++++++++++++++++++++++
+ tests/test_renderplan_render.py | 14 +++++------
+ voicerender/book.py             | 39 +++++++++++++++++++++----------
+ voicerender/report_contract.py  |  5 ++++
+ voicerender/variants.py         |  6 ++---
+ 5 files changed, 93 insertions(+), 22 deletions(-)
+
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index ccf3317..d8c3a6c 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -1421,3 +1421,54 @@ def test_book_report_and_events_propagate_error_diagnostic_summary(
+     human_output = capsys.readouterr().out
+     assert "root cause RuntimeError: provider execution failed" in human_output
+     assert str(outcome.render_diagnostics) in human_output
++
++
++def test_book_report_omits_large_fingerprints_and_rejects_oversize_atomically(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    from voicerender.report_contract import MAX_BUNDLE_REPORT_BYTES
++    from voicerender.variants import list_bundle_variants
++
++    _install_fake_execution(monkeypatch)
++    workspace, variant = _book(tmp_path, chapters=((1, 1),))
++    result = book_module.render_book(workspace, variant=variant)
++    original_outcome = result.outcomes[0]
++    fingerprints = tuple(
++        {
++            "fingerprint_id": f"sha256:{index:064x}",
++            "canonical_synthesis_identity": "x" * 3_000,
++        }
++        for index in range(1_000)
++    )
++    detailed_outcome = replace(original_outcome, execution_fingerprint=fingerprints)
++    detailed_result = replace(result, outcomes=(detailed_outcome,))
++
++    book_module._write_book_report(detailed_result)
++    report_bytes = result.report_path.read_bytes()
++    report = tomllib.loads(report_bytes.decode("utf-8"))
++    item = report["item"][0]
++    assert len(report_bytes) <= MAX_BUNDLE_REPORT_BYTES
++    assert "execution_fingerprint" not in item
++    assert "execution_fingerprint_json" not in item
++    assert (
++        detailed_result.outcomes[0].execution_fingerprint[0]["fingerprint_id"]
++        == (fingerprints[0]["fingerprint_id"])
++    )
++
++    listed = list_bundle_variants(
++        workspace, output_root=workspace / "voicerender"
++    ).variants[0]
++    assert listed.render_status == "complete"
++    assert listed.output_error is None
++
++    oversized_outcome = replace(
++        detailed_outcome, error_message="x" * (MAX_BUNDLE_REPORT_BYTES + 1)
++    )
++    oversized_result = replace(detailed_result, outcomes=(oversized_outcome,))
++    with pytest.raises(BookRenderError) as error:
++        book_module._write_book_report(oversized_result)
++    assert error.value.code == "report.too_large"
++    assert str(result.report_path) in str(error.value)
++    assert str(MAX_BUNDLE_REPORT_BYTES) in str(error.value)
++    assert result.report_path.read_bytes() == report_bytes
++    assert not list(result.report_path.parent.glob(f".{result.report_path.name}.*.tmp"))
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 84bfd28..2eda7e8 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -1445,13 +1445,13 @@ def test_render_book_cli_integrates_real_fake_engine_for_cumulative_qc(
+     fingerprint = first["items"][0]["execution_fingerprint"][0]
+     assert fingerprint["adapter_id"] == _ENGINE_ID
+     assert fingerprint["capacity"]["metric"] == "model_tokens"
+-    book_report = tomllib.loads(
+-        (output_root / variant / "voicerender-report.toml").read_text(encoding="utf-8")
+-    )
+-    report_fingerprint = json.loads(
+-        book_report["item"][0]["execution_fingerprint_json"]
+-    )
+-    assert report_fingerprint[0]["fingerprint_id"] == fingerprint["fingerprint_id"]
++    book_report_path = output_root / variant / "voicerender-report.toml"
++    book_report = tomllib.loads(book_report_path.read_text(encoding="utf-8"))
++    from voicerender.report_contract import MAX_BUNDLE_REPORT_BYTES
++
++    assert book_report_path.stat().st_size <= MAX_BUNDLE_REPORT_BYTES
++    assert "execution_fingerprint_json" not in book_report["item"][0]
++    assert "execution_fingerprint" not in book_report["item"][0]
+     assert first["items"][0]["manifest_complete"] is False
+     assert (output_root / variant / "chapter-0001" / "000001.wav").is_file()
+     assert adapter.synthesized_texts == ["speech one"]
+diff --git a/voicerender/book.py b/voicerender/book.py
+index 2b3abc2..474ed8d 100644
+--- a/voicerender/book.py
++++ b/voicerender/book.py
+@@ -62,6 +62,11 @@ from .renderplan_render import (
+     _verified_manifest_artifact_count,
+     render_renderplan,
+ )
++from .report_contract import (
++    BOOK_REPORT_FORMAT,
++    BOOK_REPORT_VERSION,
++    MAX_BUNDLE_REPORT_BYTES,
++)
+ from .session_pool import validate_max_open_sessions
+ from .storage import verified_wav
+
+@@ -1305,7 +1310,10 @@ def _skipped_outcome(chapter: _LoadedChapter, index: int) -> ChapterRenderOutcom
+
+
+ def _outcome_to_dict(
+-    outcome: ChapterRenderOutcome, output_variant_dir: Path
++    outcome: ChapterRenderOutcome,
++    output_variant_dir: Path,
++    *,
++    include_execution_fingerprint: bool = True,
+ ) -> dict[str, Any]:
+     item: dict[str, Any] = {
+         "index": outcome.index,
+@@ -1334,7 +1342,7 @@ def _outcome_to_dict(
+         item["recheck_report"] = _relative_posix(
+             outcome.recheck_report, output_variant_dir
+         )
+-    if outcome.execution_fingerprint:
++    if include_execution_fingerprint and outcome.execution_fingerprint:
+         item["execution_fingerprint"] = list(outcome.execution_fingerprint)
+     if outcome.error_code is not None:
+         item["error_code"] = outcome.error_code
+@@ -1368,8 +1376,8 @@ def _relative_posix(path: Path, base: Path) -> str:
+ def _write_book_report(result: BookRenderResult) -> None:
+     request = result.request
+     payload: dict[str, Any] = {
+-        "format": "voicerender-bundle-book-report",
+-        "version": 1,
++        "format": BOOK_REPORT_FORMAT,
++        "version": BOOK_REPORT_VERSION,
+         "variant": request.variant_name,
+         "emphasis_policy": request.emphasis_policy.value,
+         "pending_composition": result.pending_composition,
+@@ -1385,7 +1393,9 @@ def _write_book_report(result: BookRenderResult) -> None:
+             "speech": request.speech_selector,
+         },
+         "item": [
+-            _outcome_to_dict(outcome, request.output_variant_dir)
++            _outcome_to_dict(
++                outcome, request.output_variant_dir, include_execution_fingerprint=False
++            )
+             for outcome in result.outcomes
+         ],
+     }
+@@ -1405,13 +1415,18 @@ def _write_book_report(result: BookRenderResult) -> None:
+         assert isinstance(item, Mapping)
+         lines.extend(["", "[[item]]"])
+         for key, value in item.items():
+-            if key == "execution_fingerprint":
+-                key = "execution_fingerprint_json"
+-                value = json.dumps(
+-                    value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+-                )
+             lines.append(f"{key} = {_toml_value(value)}")
++
+     destination = result.report_path
++    content = "\n".join(lines) + "\n"
++    encoded = content.encode("utf-8")
++    if len(encoded) > MAX_BUNDLE_REPORT_BYTES:
++        raise BookRenderError(
++            f"VoiceRender book report {destination} is {len(encoded)} bytes; "
++            f"maximum is {MAX_BUNDLE_REPORT_BYTES} bytes",
++            code="report.too_large",
++        )
++
+     temporary: Path | None = None
+     try:
+         destination.parent.mkdir(parents=True, exist_ok=True)
+@@ -1419,8 +1434,8 @@ def _write_book_report(result: BookRenderResult) -> None:
+             prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+         )
+         temporary = Path(temporary_name)
+-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+-            stream.write("\n".join(lines) + "\n")
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(encoded)
+             stream.flush()
+             os.fsync(stream.fileno())
+         os.replace(temporary, destination)
+diff --git a/voicerender/report_contract.py b/voicerender/report_contract.py
+new file mode 100644
+index 0000000..ab9ca43
+--- /dev/null
++++ b/voicerender/report_contract.py
+@@ -0,0 +1,5 @@
++"""Shared size and identity contract for VoiceRender bundle reports."""
++
++MAX_BUNDLE_REPORT_BYTES = 2 * 1024 * 1024
++BOOK_REPORT_FORMAT = "voicerender-bundle-book-report"
++BOOK_REPORT_VERSION = 1
+diff --git a/voicerender/variants.py b/voicerender/variants.py
+index cbe48c7..338d25f 100644
+--- a/voicerender/variants.py
++++ b/voicerender/variants.py
+@@ -28,6 +28,7 @@ from .bundle_contract import (
+ )
+ from .document_contract import load_document_workspace
+ from .renderplan_render import RENDER_MANIFEST_FILENAME
++from .report_contract import BOOK_REPORT_FORMAT, MAX_BUNDLE_REPORT_BYTES
+
+ PlanStatus = Literal["valid", "invalid"]
+ RenderStatus = Literal["not_rendered", "complete", "partial", "failed", "unknown"]
+@@ -36,7 +37,6 @@ VariantState = Literal[
+ ]
+ UnitKind = Literal["chapters", "documents"]
+ REPORT_FILENAME = "voicerender-report.toml"
+-_MAX_REPORT_BYTES = 2 * 1024 * 1024
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -627,13 +627,13 @@ def _inspect_output(
+
+ def _load_report(path: Path, kind: BundleKind) -> _Report:
+     try:
+-        if path.stat().st_size > _MAX_REPORT_BYTES:
++        if path.stat().st_size > MAX_BUNDLE_REPORT_BYTES:
+             raise ValueError("render report exceeds the 2 MiB size limit")
+         data = tomllib.loads(path.read_text(encoding="utf-8"))
+         if not isinstance(data, dict):
+             raise TypeError("render report root must be a TOML table")
+         expected_format = (
+-            "voicerender-bundle-book-report"
++            BOOK_REPORT_FORMAT
+             if kind == "book"
+             else "voicerender-bundle-document-report"
+         )

@@ -1,0 +1,1027 @@
+ README.md                       |  25 ++++
+ docs/renderprofile.md           |  23 ++++
+ pyproject.toml                  |   2 +-
+ tests/test_cli.py               |   2 +
+ tests/test_kokoro_reference.py  | 295 +++++++++++++++++++++++++++++++++++++++-
+ tests/test_preflight.py         |  90 +++++++++++-
+ tests/test_profile_roles_cli.py | 157 +++++++++++++++++++++
+ tests/test_voice_descriptors.py |  75 ++++++++++
+ voicerender/engines/kokoro.py   |  79 ++++++++++-
+ voicerender/models.py           |   6 +-
+ voicerender/voices_api.py       |   5 +-
+ 11 files changed, 743 insertions(+), 16 deletions(-)
+
+diff --git a/README.md b/README.md
+index 8603440..8c0c2f7 100644
+--- a/README.md
++++ b/README.md
+@@ -250,6 +250,31 @@ Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source
+
+ Create a local Inno voice or use a portable VoiceFolio reference for AkinVox. A local `kind="reference"` pins an absolute path and SHA-256, so it is machine-specific. A managed `kind="managed_reference"` pins the VoiceFolio ref, source digest, source format, revision, repository, and path without storing a cache path.
+
++### Static AKinVox English/German voices
++
++The static `akinvox-multispeaker-v1` target exposes PyKokoro's discovered, fixed `AV_*` voices for English and German. Choose it when selecting a built-in voice. It does not clone a reference recording and does not require a transcript. The separate `en-akinvox-cloning-v1` target is reference-conditioned and requires exact transcript text.
++
++Discover each language's available voices from runtime metadata:
++
++```bash
++voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang en --json
++voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang de --json
++```
++
++Keep the requested language explicit and select a voice from that language. In particular, the target's default voice is English-only, so a German profile must name a German voice:
++
++```bash
++voicerender profile create \
++  --engine kokoro --target akinvox-multispeaker-v1 \
++  --language en-US --voice AV_ariala -o akinvox-english.renderprofile.toml
++
++voicerender profile create \
++  --engine kokoro --target akinvox-multispeaker-v1 \
++  --language de-DE --voice AV_thorsten -o akinvox-german.renderprofile.toml
++```
++
++Selection and preflight reject cross-language voices and an incompatible implicit default before synthesis opens. PyKokoro discovery remains the source of the voice roster and language capabilities.
++
+ ### Primary multi-role VoiceFolio workflow
+
+ When the VoiceFolio catalog entry contains its transcript, the profile commands bind it automatically. No local reference WAV or Kokoro-specific `voice_enrollment` JSON is needed:
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 28f31db..66ade14 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -233,6 +233,29 @@ voicerender render \
+
+ Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference. Install the selected engine extra and make its model assets available before preflight/render. See [UtterPlan](https://pypi.org/project/utterplan/) and the [RenderPlan package contract](https://pypi.org/project/renderplan/) for the producer/consumer boundary.
+
++## Static Kokoro multispeaker voices
++
++The static AKinVox English/German target `akinvox-multispeaker-v1` selects one of its discovered built-in voices. It does not consume reference audio or a transcript. This is distinct from the reference-conditioned `en-akinvox-cloning-v1` workflow below, which requires an exact transcript.
++
++List available voices by language, then create a profile with an explicit compatible language and voice:
++
++```bash
++voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang en --json
++voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang de --json
++
++voicerender profile create \
++  --engine kokoro --target akinvox-multispeaker-v1 \
++  --language en-US --voice AV_ariala \
++  -o akinvox-english.renderprofile.toml
++
++voicerender profile create \
++  --engine kokoro --target akinvox-multispeaker-v1 \
++  --language de-DE --voice AV_thorsten \
++  -o akinvox-german.renderprofile.toml
++```
++
++VoiceRender checks discovered per-voice language capabilities during selection and preflight. The model default `AV_ariala` is English-only, so omit `--voice` only when the effective default supports the requested language. A German request with the English default or an explicit English voice fails with an actionable diagnostic before synthesis.
++
+ ## Reference-voice sources
+
+ A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They are machine-specific; validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references. The profile stores the VoiceFolio ref, source digest and format, revision, repository, and path—not a cache or materialized-audio path. Older managed profiles without `source_format` remain valid.
+diff --git a/pyproject.toml b/pyproject.toml
+index 9ef9299..c4a3e26 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -26,7 +26,7 @@ dependencies = [
+ chatterbox = ["chatterboxsynth[cpu]>=0.1.1,<0.2"]
+ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.9,<0.2"]
+-kokoro = ["pykokoro>=0.10.8,<0.11"]
++kokoro = ["pykokoro>=0.10.11,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+ phonon = ["phononsynth[cpu]>=0.1.1,<0.2"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 9600b83..a353545 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -1200,6 +1200,8 @@ def test_cli_kokoro_profile_create_round_trips_voice_level_gain(
+         sample_rate=24000,
+         max_tokens=512,
+         source="test",
++        default_voice=None,
++        voice_details=(),
+         distribution_id="v1.0-test",
+     )
+     monkeypatch.setattr(models, "get_model_info", lambda *_args, **_kwargs: (model, ()))
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index ac0ec66..070bc45 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -23,6 +23,7 @@ from voicerender.engines.base import (
+     SpeechRequest,
+     validate_rendered_speech,
+ )
++from voicerender.engines.catalog import SynthesisTarget, TargetVoice
+ from voicerender.engines.kokoro import (
+     PYKOKORO_REQUEST_API_VERSION,
+     PYKOKORO_REQUIRED,
+@@ -34,6 +35,7 @@ from voicerender.engines.kokoro import (
+     _target_from_capabilities,
+     _translate_pykokoro_error,
+     _version_supported,
++    _voice_languages,
+ )
+ from voicerender.engines.selection import EngineRequest
+ from voicerender.errors import (
+@@ -41,17 +43,101 @@ from voicerender.errors import (
+     EngineSelectionError,
+     InvalidSpeechRequestError,
+ )
+-from voicerender.models import ModelDiscoveryError
++from voicerender.models import ModelDiscoveryError, ModelInfo
+ from voicerender.voice_sources import local_reference_source
+
+
+-def test_pykokoro_minimum_version_is_0108() -> None:
+-    assert not _version_supported("0.10.7")
+-    assert _version_supported("0.10.8")
+-    assert _version_supported("0.10.10")
++def test_pykokoro_minimum_version_is_01011() -> None:
++    assert not _version_supported("0.10.10")
++    assert _version_supported("0.10.11")
++    assert _version_supported("0.10.12")
+     assert not _version_supported("0.11.0")
+
+
++def test_akinvox_voice_languages_are_projected_from_discovery() -> None:
++    english_voices = (
++        "AV_ariala",
++        "AV_brody",
++        "AV_david",
++        "AV_elliott",
++        "AV_ralph",
++        "AV_cori",
++        "AV_phil",
++        "AV_helen",
++    )
++    german_voices = (
++        "AV_thorsten",
++        "AV_bernd",
++        "AV_eva_k",
++        "AV_karlsson",
++        "AV_kerstin",
++        "AV_mucky",
++        "AV_hokuspokus",
++        "AV_julia",
++    )
++    languages = ("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch")
++    voices = english_voices + german_voices
++    details = tuple(
++        SimpleNamespace(
++            name=voice,
++            gender="female" if voice == "AV_ariala" else "unknown",
++            language=language,
++            locale=language,
++            language_label="English" if language == "en" else "German",
++        )
++        for language, names in (("en", english_voices), ("de", german_voices))
++        for voice in names
++    )
++    target = _target_from_capabilities(
++        SimpleNamespace(
++            model_id="akinvox-multispeaker-v1",
++            languages=languages,
++            voices=voices,
++            voice_details=details,
++            default_voice="AV_ariala",
++            qualities=("fp32",),
++            aliases=(),
++            status="ready",
++            runtime_available=True,
++            sample_rate=24000,
++            source="github",
++            g2p_backend="akinvox-multispeaker-v1",
++            frontend="akinvox-multispeaker-v1",
++            lexicons=(),
++            experimental=False,
++            redistribution_allowed=True,
++            voice_mode="static",
++            supports_reference_enrollment=False,
++            supports_voice_enrollment=False,
++            voice_enrollers=(),
++        )
++    )
++    projected = {detail.id: detail for detail in target.voice_details}
++
++    assert len(target.voices) == 16
++    assert len(projected) == 16
++    assert target.default_voice == "AV_ariala"
++    assert "named_voices" in target.capabilities
++    assert projected["AV_ariala"].languages == ("en", "en-us", "en-gb")
++    assert projected["AV_thorsten"].languages == ("de", "de-de", "de-at", "de-ch")
++    assert projected["AV_ariala"].gender == "female"
++    assert projected["AV_ariala"].language == "en"
++    assert projected["AV_ariala"].locale == "en"
++    assert projected["AV_ariala"].language_label == "English"
++    assert sum(detail.language == "en" for detail in projected.values()) == 8
++    assert sum(detail.language == "de" for detail in projected.values()) == 8
++
++
++def test_voice_language_projection_prefers_explicit_and_locale_tags() -> None:
++    languages = ("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch")
++
++    assert _voice_languages(
++        SimpleNamespace(languages=("EN_us", "de_AT"), language="unknown"), languages
++    ) == ("en-us", "de-at")
++    assert _voice_languages(SimpleNamespace(language="de_AT"), languages) == ("de-at",)
++    assert _voice_languages(SimpleNamespace(language="unknown"), languages) == ()
++
++
+ def test_pykokoro_incompatibility_diagnostic_matches_package_requirement(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -84,6 +170,7 @@ def _model(
+         languages=("en", "fr"),
+         voices=("af_heart",) if voice_mode == "static" else (),
+         default_voice="af_heart" if voice_mode == "static" else "",
++        voice_details=(),
+         qualities=("fp32",),
+         sample_rate=24000,
+         max_tokens=512,
+@@ -128,7 +215,7 @@ def _install(
+         "closed": 0,
+     }
+     module = ModuleType("pykokoro")
+-    module.__version__ = "0.10.8"
++    module.__version__ = "0.10.11"
+     module.__file__ = "/fake/pykokoro/__init__.py"
+
+     class FakeSynthesisRequest:
+@@ -223,7 +310,7 @@ def _api_probe_module(
+     *, api_version: int = 2, supports_say_as: bool = True
+ ) -> ModuleType:
+     module = ModuleType("pykokoro")
+-    module.__version__ = "0.10.8"
++    module.__version__ = "0.10.11"
+     module.__file__ = "/fake/pykokoro/__init__.py"
+
+     class FakeSynthesizer:
+@@ -424,6 +511,200 @@ def test_discovered_capabilities_preserve_reference_and_enroller_metadata() -> N
+     assert reference.metadata["voice_mode"] == "reference"
+
+
++def _multilingual_target() -> SynthesisTarget:
++    english_languages = ("en", "en-us", "en-gb")
++    german_languages = ("de", "de-de", "de-at", "de-ch")
++    voice_details = (
++        TargetVoice(
++            id="AV_ariala",
++            language="en",
++            locale="en",
++            language_label="English",
++            languages=english_languages,
++        ),
++        TargetVoice(
++            id="AV_cori",
++            language="en",
++            locale="en",
++            language_label="English",
++            languages=english_languages,
++        ),
++        TargetVoice(
++            id="AV_thorsten",
++            language="de",
++            locale="de",
++            language_label="German",
++            languages=german_languages,
++        ),
++        TargetVoice(
++            id="AV_julia",
++            language="de",
++            locale="de",
++            language_label="German",
++            languages=german_languages,
++        ),
++        TargetVoice(
++            id="AV_bernd",
++            language="de",
++            locale="de",
++            language_label="German",
++            languages=german_languages,
++        ),
++    )
++    return SynthesisTarget(
++        engine="kokoro",
++        id="akinvox-multispeaker-v1",
++        display_name="AKinVox English/German Multispeaker",
++        languages=("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch"),
++        status="ready",
++        runtime_available=True,
++        voices=tuple(detail.id for detail in voice_details),
++        voice_details=voice_details,
++        default_voice="AV_ariala",
++        qualities=("fp32",),
++        metadata={
++            "source": "github",
++            "g2p_backend": "akinvox-multispeaker-v1",
++            "frontend": "akinvox-multispeaker-v1",
++            "voice_mode": "static",
++            "max_tokens": 510,
++        },
++    )
++
++
++def _validate_multilingual_selection(
++    monkeypatch: pytest.MonkeyPatch,
++    *,
++    language: str,
++    voice: str | None,
++) -> tuple[ModelInfo, tuple[Any, ...]]:
++    target = _multilingual_target()
++    model = ModelInfo.from_target(target)
++    monkeypatch.setattr(
++        "voicerender.models.get_model_info",
++        lambda *_args, **_kwargs: (model, target),
++    )
++    adapter = PyKokoroEngineAdapter()
++    monkeypatch.setattr(adapter, "_pronunciation_diagnostics", lambda _selection: [])
++    diagnostics = adapter.validate_selection(
++        EngineSelection(
++            engine="kokoro",
++            target_id=target.id,
++            language=language,
++            voice=voice,
++        )
++    )
++    return model, diagnostics
++
++
++def test_model_info_preserves_neutral_discovered_voice_details() -> None:
++    target = _multilingual_target()
++    model = ModelInfo.from_target(target)
++
++    assert model.voice_details == target.voice_details
++    assert model.default_voice == "AV_ariala"
++
++
++def test_explicit_cross_language_voice_is_rejected_in_selection(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    _, diagnostics = _validate_multilingual_selection(
++        monkeypatch, language="de-DE", voice="AV_cori"
++    )
++    mismatch = next(
++        item for item in diagnostics if item.code == "pykokoro.voice_language_incompatible"
++    )
++
++    assert mismatch.severity == "error"
++    assert mismatch.field == "render.target.voice"
++    assert mismatch.details == {
++        "voice": "AV_cori",
++        "language": "de-DE",
++        "supported_languages": ["en", "en-us", "en-gb"],
++        "available_voices": ["AV_thorsten", "AV_julia", "AV_bernd"],
++        "implicit_default": False,
++    }
++
++
++def test_german_selection_rejects_the_implicit_english_default(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    _, diagnostics = _validate_multilingual_selection(
++        monkeypatch, language="de-DE", voice=None
++    )
++    mismatch = next(
++        item for item in diagnostics if item.code == "pykokoro.voice_language_incompatible"
++    )
++
++    assert mismatch.details["voice"] == "AV_ariala"
++    assert mismatch.details["implicit_default"] is True
++    assert mismatch.details["available_voices"] == [
++        "AV_thorsten",
++        "AV_julia",
++        "AV_bernd",
++    ]
++    assert "default voice is English" in mismatch.message
++
++
++@pytest.mark.parametrize(
++    ("language", "voice"),
++    (
++        ("en-US", "AV_ariala"),
++        ("en-GB", "AV_cori"),
++        ("de-DE", "AV_thorsten"),
++        ("de-AT", "AV_julia"),
++        ("de-CH", "AV_bernd"),
++    ),
++)
++def test_compatible_multilingual_voice_language_pairs_validate(
++    monkeypatch: pytest.MonkeyPatch, language: str, voice: str
++) -> None:
++    _, diagnostics = _validate_multilingual_selection(
++        monkeypatch, language=language, voice=voice
++    )
++
++    assert not any(
++        item.code == "pykokoro.voice_language_incompatible" for item in diagnostics
++    )
++
++
++@pytest.mark.parametrize(
++    ("language", "voice"),
++    (
++        ("en-US", "AV_ariala"),
++        ("en-GB", "AV_cori"),
++        ("de-DE", "AV_thorsten"),
++        ("de-AT", "AV_julia"),
++    ),
++)
++def test_akinvox_requests_preserve_explicit_language_target_and_voice(
++    monkeypatch: pytest.MonkeyPatch, language: str, voice: str
++) -> None:
++    adapter, state = _install(monkeypatch, _model())
++    selection = EngineSelection(
++        engine="kokoro",
++        target_id="akinvox-multispeaker-v1",
++        language=language,
++        voice=voice,
++    )
++    request = SpeechRequest(
++        id="akinvox-request",
++        text="An explicit multilingual request.",
++        language=language,
++        voice=voice,
++    )
++
++    with adapter.open(selection) as session:
++        session.synthesize(request)
++
++    assert state["config"].model_variant == "akinvox-multispeaker-v1"
++    assert state["config"].voice == voice
++    assert state["config"].generation.lang == language
++    native_request = state["syntheses"][0]
++    assert native_request.language == language
++    assert native_request.voice == voice
++
++
+ def test_inno_reference_is_lazily_enrolled_reused_and_measured_without_enrollment(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 3e5cfb1..419f777 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -34,9 +34,10 @@ from voicerender.engines.base import (
+     RequestMeasure,
+     SpeechRequest,
+ )
++from voicerender.engines.catalog import SynthesisTarget, TargetVoice
+ from voicerender.engines.kittensynth import KittenSynthEngineAdapter
+ from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+-from voicerender.engines.registry import _ADAPTERS
++from voicerender.engines.registry import _ADAPTERS, get_adapter
+ from voicerender.engines.selection import EngineRequest
+ from voicerender.errors import EngineUnavailableError, SpeechRequestTooLongError
+ from voicerender.events import RenderEvent, RenderEventKind
+@@ -386,6 +387,7 @@ def _plan(
+     *texts: tuple[str, bool, str],
+     binding: dict[str, Any] | None = None,
+     source_count: int = 1,
++    language: str = "en-US",
+ ) -> RenderPlan:
+     flow: list[SpeechItem] = []
+     for number, (text, required, level) in enumerate(texts, start=1):
+@@ -411,7 +413,7 @@ def _plan(
+             SpeechItem(
+                 number=number,
+                 text=text,
+-                language="en-US",
++                language=language,
+                 role="narrator",
+                 binding=item_binding,
+                 source=source,
+@@ -893,6 +895,90 @@ def test_piper_render_defers_emphasis_to_composition_without_native_option(
+     assert (tmp_path / "emphasis" / item.wav).is_file()
+
+
++@pytest.mark.parametrize("voice", ("AV_cori", None), ids=("explicit", "default"))
++def test_kokoro_preflight_rejects_cross_language_voice_before_runtime_open(
++    monkeypatch: pytest.MonkeyPatch,
++    voice: str | None,
++) -> None:
++    voices = (
++        TargetVoice(
++            id="AV_ariala",
++            language="en",
++            language_label="English",
++            languages=("en", "en-us"),
++        ),
++        TargetVoice(
++            id="AV_cori",
++            language="en",
++            language_label="English",
++            languages=("en", "en-us"),
++        ),
++        TargetVoice(
++            id="AV_thorsten",
++            language="de",
++            language_label="German",
++            languages=("de", "de-de"),
++        ),
++    )
++    target = SynthesisTarget(
++        engine="kokoro",
++        id="akinvox-multispeaker-v1",
++        display_name="AKinVox English/German Multispeaker",
++        languages=("en", "en-us", "de", "de-de"),
++        voices=tuple(voice.id for voice in voices),
++        voice_details=voices,
++        default_voice="AV_ariala",
++        qualities=("fp32",),
++        metadata={"source": "test", "frontend": "akinvox-multispeaker-v1"},
++    )
++    monkeypatch.setattr(
++        "voicerender.engines.kokoro._discover_targets",
++        lambda **_kwargs: (target,),
++    )
++    adapter = get_adapter("kokoro")
++    monkeypatch.setattr(
++        adapter,
++        "probe_api",
++        lambda: EngineApiProbe(
++            engine="kokoro",
++            package="pykokoro",
++            compatible=True,
++            status="ready",
++            expected_api_version=2,
++            api_version=2,
++            contract_source="explicit",
++        ),
++    )
++    monkeypatch.setattr(adapter, "version", lambda: "0.10.11")
++    monkeypatch.setattr(adapter, "_pronunciation_diagnostics", lambda _selection: [])
++    monkeypatch.setattr(
++        adapter,
++        "open",
++        lambda *_args, **_kwargs: pytest.fail("incompatible bindings must fail before runtime open"),
++    )
++    binding = {
++        "renderer": "kokoro",
++        "target_id": target.id,
++        "options": {"quality": "fp32"},
++    }
++    if voice is not None:
++        binding["voice"] = voice
++    plan = _plan(
++        ("German request with an English voice", True, "sentence"),
++        binding=binding,
++        language="de-DE",
++    )
++
++    report = preflight_render_plan(plan)
++
++    assert report.status == "reject"
++    assert report.checks[0].status == "error"
++    assert "pykokoro.voice_language_incompatible" in (report.checks[0].detail or "")
++    assert "AV_thorsten" in (report.checks[0].detail or "")
++    if voice is None:
++        assert "default voice is English" in (report.checks[0].detail or "")
++
++
+ def test_preflight_persists_all_fit_report_reuses_session_and_never_synthesizes(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index e523e90..391381e 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -9,6 +9,9 @@ import pytest
+ from renderplan import PausePolicy, RenderProfile, RoleProfile
+
+ from voicerender import cli
++from voicerender.engines.api_probe import EngineApiProbe
++from voicerender.engines.catalog import SynthesisTarget, TargetVoice
++from voicerender.engines.kokoro import PyKokoroEngineAdapter
+ from voicerender.renderprofile import load_render_profile, save_render_profile
+
+
+@@ -30,6 +33,160 @@ def _write_profile(path: Path) -> RenderProfile:
+     return profile
+
+
++def _install_akinvox_profile_discovery(monkeypatch) -> None:
++    english_languages = ("en", "en-us", "en-gb")
++    german_languages = ("de", "de-de", "de-at", "de-ch")
++    voice_details = (
++        TargetVoice(
++            id="AV_ariala",
++            language="en",
++            locale="en",
++            language_label="English",
++            languages=english_languages,
++        ),
++        TargetVoice(
++            id="AV_cori",
++            language="en",
++            locale="en",
++            language_label="English",
++            languages=english_languages,
++        ),
++        TargetVoice(
++            id="AV_thorsten",
++            language="de",
++            locale="de",
++            language_label="German",
++            languages=german_languages,
++        ),
++        TargetVoice(
++            id="AV_julia",
++            language="de",
++            locale="de",
++            language_label="German",
++            languages=german_languages,
++        ),
++        TargetVoice(
++            id="AV_bernd",
++            language="de",
++            locale="de",
++            language_label="German",
++            languages=german_languages,
++        ),
++    )
++    target = SynthesisTarget(
++        engine="kokoro",
++        id="akinvox-multispeaker-v1",
++        display_name="AKinVox English/German Multispeaker",
++        languages=("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch"),
++        status="ready",
++        runtime_available=True,
++        voices=tuple(detail.id for detail in voice_details),
++        voice_details=voice_details,
++        default_voice="AV_ariala",
++        qualities=("fp32",),
++        metadata={
++            "source": "github",
++            "g2p_backend": "akinvox-multispeaker-v1",
++            "frontend": "akinvox-multispeaker-v1",
++            "voice_mode": "static",
++            "max_tokens": 510,
++        },
++    )
++    probe = EngineApiProbe(
++        engine="kokoro",
++        package="pykokoro",
++        compatible=True,
++        status="ready",
++        expected_api_version=2,
++        api_version=2,
++        contract_source="explicit",
++    )
++    monkeypatch.setattr(
++        "voicerender.engines.kokoro._discover_targets",
++        lambda **_kwargs: (target,),
++    )
++    monkeypatch.setattr(PyKokoroEngineAdapter, "probe_api", lambda _self: probe)
++    monkeypatch.setattr(PyKokoroEngineAdapter, "version", lambda _self: "0.10.11")
++    monkeypatch.setattr(
++        PyKokoroEngineAdapter,
++        "open",
++        lambda *_args, **_kwargs: pytest.fail("profile selection must not open synthesis"),
++    )
++
++
++@pytest.mark.parametrize(
++    ("language", "voice"),
++    (
++        ("en-US", "AV_ariala"),
++        ("en-GB", "AV_cori"),
++        ("de-DE", "AV_thorsten"),
++        ("de-AT", "AV_julia"),
++        ("de-CH", "AV_bernd"),
++    ),
++)
++def test_profile_create_accepts_compatible_akinvox_bindings(
++    monkeypatch, tmp_path: Path, capsys, language: str, voice: str
++) -> None:
++    _install_akinvox_profile_discovery(monkeypatch)
++    output = tmp_path / "akinvox.renderprofile.toml"
++
++    exit_code = cli.main(
++        [
++            "profile",
++            "create",
++            "--engine",
++            "kokoro",
++            "--target",
++            "akinvox-multispeaker-v1",
++            "--language",
++            language,
++            "--voice",
++            voice,
++            "--option",
++            'quality="fp32"',
++            "-o",
++            str(output),
++            "--json",
++        ]
++    )
++    payload = json.loads(capsys.readouterr().out)
++
++    assert exit_code == 0
++    assert payload["path"] == str(output)
++    assert load_render_profile(output).roles["narrator"].binding["voice"] == voice
++
++
++@pytest.mark.parametrize(
++    ("language", "voice"),
++    (("de-DE", "AV_cori"), ("en-US", "AV_julia"), ("de-DE", None)),
++)
++def test_profile_create_rejects_incompatible_akinvox_bindings(
++    monkeypatch, tmp_path: Path, capsys, language: str, voice: str | None
++) -> None:
++    _install_akinvox_profile_discovery(monkeypatch)
++    output = tmp_path / "invalid.renderprofile.toml"
++    args = [
++        "profile",
++        "create",
++        "--engine",
++        "kokoro",
++        "--target",
++        "akinvox-multispeaker-v1",
++        "--language",
++        language,
++    ]
++    if voice is not None:
++        args.extend(("--voice", voice))
++    args.extend(("-o", str(output), "--json"))
++
++    exit_code = cli.main(args)
++    payload = json.loads(capsys.readouterr().out)
++
++    assert exit_code == 1
++    assert "pykokoro.voice_language_incompatible" in payload["error"]
++    assert not output.exists()
++
++
+ def test_profile_role_set_writes_only_explicit_output(
+     tmp_path: Path, monkeypatch, capsys
+ ) -> None:
+diff --git a/tests/test_voice_descriptors.py b/tests/test_voice_descriptors.py
+index 46e7170..3af88fd 100644
+--- a/tests/test_voice_descriptors.py
++++ b/tests/test_voice_descriptors.py
+@@ -39,6 +39,81 @@ def _target() -> SynthesisTarget:
+     )
+
+
++def _multilingual_target() -> SynthesisTarget:
++    english_voices = (
++        "AV_ariala",
++        "AV_brody",
++        "AV_david",
++        "AV_elliott",
++        "AV_ralph",
++        "AV_cori",
++        "AV_phil",
++        "AV_helen",
++    )
++    german_voices = (
++        "AV_thorsten",
++        "AV_bernd",
++        "AV_eva_k",
++        "AV_karlsson",
++        "AV_kerstin",
++        "AV_mucky",
++        "AV_hokuspokus",
++        "AV_julia",
++    )
++    languages = ("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch")
++    english_languages = ("en", "en-us", "en-gb")
++    german_languages = ("de", "de-de", "de-at", "de-ch")
++    voice_details = tuple(
++        TargetVoice(
++            id=voice,
++            language=language,
++            locale=language,
++            language_label="English" if language == "en" else "German",
++            languages=english_languages if language == "en" else german_languages,
++        )
++        for language, voices in (("en", english_voices), ("de", german_voices))
++        for voice in voices
++    )
++    return SynthesisTarget(
++        engine="kokoro",
++        id="akinvox-multispeaker-v1",
++        display_name="AKinVox English/German Multispeaker",
++        languages=languages,
++        runtime_available=True,
++        voices=english_voices + german_voices,
++        voice_details=voice_details,
++        default_voice="AV_ariala",
++        metadata={"source": "test"},
++    )
++
++
++def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
++    monkeypatch,
++) -> None:
++    target = _multilingual_target()
++    monkeypatch.setattr(
++        "voicerender.voices_api.discover_targets", lambda *a, **k: (target,)
++    )
++
++    english = list_voices(
++        engine="kokoro", target_id=target.id, language="en-US"
++    )
++    german = list_voices(
++        engine="kokoro", target_id=target.id, language="de-DE"
++    )
++    german_underscore = list_voices(
++        engine="kokoro", target_id=target.id, language="de_AT"
++    )
++
++    assert {item.voice for item in english} == set(target.voices[:8])
++    assert {item.voice for item in german} == set(target.voices[8:])
++    assert {item.voice for item in german_underscore} == set(target.voices[8:])
++    assert all(item.languages == ("en", "en-us", "en-gb") for item in english)
++    assert all(
++        item.languages == ("de", "de-de", "de-at", "de-ch") for item in german
++    )
++
++
+ def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
+     target = _target()
+     monkeypatch.setattr(
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index df4e9bf..16ed5ee 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -63,7 +63,8 @@ from .registry import normalize_engine_id
+ logger = logging.getLogger(__name__)
+
+
+-PYKOKORO_REQUIRED = ">=0.10.8,<0.11"
++_PYKOKORO_MINIMUM_VERSION = "0.10.11"
++PYKOKORO_REQUIRED = f">={_PYKOKORO_MINIMUM_VERSION},<0.11"
+ PYKOKORO_REQUEST_API_VERSION = 2
+ _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
+
+@@ -84,7 +85,8 @@ def _version_supported(version: str) -> bool:
+         return False
+     major, minor = int(match.group(1)), int(match.group(2))
+     patch = int(match.group(3) or 0)
+-    return (major, minor, patch) >= (0, 10, 8) and (major, minor) == (0, 10)
++    minimum = tuple(int(part) for part in _PYKOKORO_MINIMUM_VERSION.split("."))
++    return (major, minor, patch) >= minimum and (major, minor) == (0, 10)
+
+
+ def _package_metadata() -> str | None:
+@@ -180,6 +182,23 @@ def _registry_error(exc: Exception) -> ModelDiscoveryError:
+     return ModelDiscoveryError(message, code=code)
+
+
++def _voice_languages(detail: Any, target_languages: tuple[str, ...]) -> tuple[str, ...]:
++    explicit = tuple(getattr(detail, "languages", ()) or ())
++    if explicit:
++        return tuple(normalize_language_key(item) for item in explicit)
++
++    raw = str(getattr(detail, "language", "") or "")
++    normalized = normalize_language_key(raw) if raw else ""
++    if not normalized or normalized == "unknown":
++        return ()
++    if "-" in normalized:
++        return (normalized,)
++
++    base = language_base(normalized)
++    matched = tuple(item for item in target_languages if language_base(item) == base)
++    return matched or (normalized,)
++
++
+ def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
+     languages = tuple(capabilities.languages)
+     fallback = languages[0] if languages else "unknown"
+@@ -200,6 +219,7 @@ def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
+             language=str(getattr(detail, "language", fallback)),
+             locale=str(getattr(detail, "locale", fallback)),
+             language_label=str(getattr(detail, "language_label", fallback)),
++            languages=_voice_languages(detail, languages),
+         )
+     voice_details = tuple(
+         indexed.get(
+@@ -1484,6 +1504,61 @@ class PyKokoroEngineAdapter:
+                     field="render.target.voice",
+                 )
+             )
++        if "voice_source" not in selection.options and selection.speaker is None:
++            effective_voice = selection.voice or model.default_voice
++            detail = next(
++                (item for item in model.voice_details if item.id == effective_voice),
++                None,
++            )
++            if (
++                effective_voice is not None
++                and detail is not None
++                and detail.languages
++                and not language_matches(selection.language, detail.languages)
++            ):
++                available_voices = [
++                    item.id
++                    for item in model.voice_details
++                    if item.languages
++                    and language_matches(selection.language, item.languages)
++                ]
++                supported_languages = ", ".join(detail.languages)
++                if selection.voice is None:
++                    default_language = detail.language_label
++                    if default_language == "unknown":
++                        default_language = supported_languages
++                    message = (
++                        f"Voice {effective_voice!r} does not support language "
++                        f"{selection.language!r} on target {selection.target_id!r}. "
++                        f"The target's default voice is {default_language}; select one "
++                        f"of the compatible voices: {', '.join(available_voices)}."
++                    )
++                else:
++                    suggestion = (
++                        f"Select one of the compatible voices: {', '.join(available_voices)}."
++                        if available_voices
++                        else "No discovered voices support this language."
++                    )
++                    message = (
++                        f"Voice {effective_voice!r} does not support language "
++                        f"{selection.language!r} on target {selection.target_id!r}. "
++                        f"Supported language(s): {supported_languages}. {suggestion}"
++                    )
++                diagnostics.append(
++                    EngineDiagnostic(
++                        code="pykokoro.voice_language_incompatible",
++                        severity="error",
++                        message=message,
++                        field="render.target.voice",
++                        details={
++                            "voice": effective_voice,
++                            "language": selection.language,
++                            "supported_languages": list(detail.languages),
++                            "available_voices": available_voices,
++                            "implicit_default": selection.voice is None,
++                        },
++                    )
++                )
+         source_value = selection.options.get("voice_source")
+         enrollment_value = selection.options.get("voice_enrollment")
+         if source_value is not None:
+diff --git a/voicerender/models.py b/voicerender/models.py
+index 9f4c722..e6e523b 100644
+--- a/voicerender/models.py
++++ b/voicerender/models.py
+@@ -415,7 +415,7 @@ class ModelInfo:
+     source: str
+     languages: tuple[str, ...]
+     voices: tuple[str, ...]
+-    default_voice: str
++    default_voice: str | None
+     qualities: tuple[str, ...]
+     g2p_backend: str | None
+     lexicons: tuple[str, ...] | None
+@@ -431,6 +431,7 @@ class ModelInfo:
+     sample_rate: int | None
+     max_tokens: int | None
+     metadata: Mapping[str, Any] = field(default_factory=dict)
++    voice_details: tuple[Any, ...] = ()
+
+     @classmethod
+     def from_target(cls, target: Any) -> ModelInfo:
+@@ -442,7 +443,7 @@ class ModelInfo:
+             source=str(metadata.get("source") or target.engine),
+             languages=tuple(target.languages),
+             voices=voices,
+-            default_voice=str(target.default_voice or (voices[0] if voices else "")),
++            default_voice=target.default_voice,
+             qualities=tuple(target.qualities),
+             g2p_backend=metadata.get("g2p_backend"),
+             lexicons=tuple(lexicons) if lexicons is not None else None,
+@@ -457,6 +458,7 @@ class ModelInfo:
+             engine=target.engine,
+             sample_rate=target.sample_rate or metadata.get("sample_rate"),
+             max_tokens=metadata.get("max_tokens"),
++            voice_details=tuple(target.voice_details),
+             metadata=metadata,
+         )
+
+diff --git a/voicerender/voices_api.py b/voicerender/voices_api.py
+index 7e9678d..ff34a10 100644
+--- a/voicerender/voices_api.py
++++ b/voicerender/voices_api.py
+@@ -6,6 +6,7 @@ from collections.abc import Mapping
+ from dataclasses import dataclass, field
+ from typing import Any, Literal
+
++from .engines.metadata import normalize_language_key
+ from .engines.registry import discover_targets, list_engines, normalize_engine_id
+ from .errors import ProfileError
+ from .jsonutil import json_value
+@@ -130,8 +131,8 @@ def _descriptor(
+ def _language_matches(descriptor: VoiceDescriptor, language: str | None) -> bool:
+     if language is None:
+         return True
+-    expected = language.casefold()
+-    return any(item.casefold() == expected for item in descriptor.languages)
++    expected = normalize_language_key(language)
++    return any(normalize_language_key(item) == expected for item in descriptor.languages)
+
+
+ def _target_descriptors(target: Any) -> list[VoiceDescriptor]:

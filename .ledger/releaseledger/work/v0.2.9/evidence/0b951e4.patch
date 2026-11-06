@@ -1,0 +1,198 @@
+ tests/test_kokoro_reference.py     |  8 ++++++--
+ tests/test_phononsynth_engine.py   | 12 ++++++++++--
+ tests/test_preflight.py            |  4 +++-
+ tests/test_profile_roles_cli.py    |  4 +++-
+ tests/test_voice_descriptors.py    | 12 +++---------
+ voicerender/engines/phononsynth.py | 15 ++++++---------
+ voicerender/voices_api.py          |  4 +++-
+ 7 files changed, 34 insertions(+), 25 deletions(-)
+
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 070bc45..738c736 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -612,7 +612,9 @@ def test_explicit_cross_language_voice_is_rejected_in_selection(
+         monkeypatch, language="de-DE", voice="AV_cori"
+     )
+     mismatch = next(
+-        item for item in diagnostics if item.code == "pykokoro.voice_language_incompatible"
++        item
++        for item in diagnostics
++        if item.code == "pykokoro.voice_language_incompatible"
+     )
+
+     assert mismatch.severity == "error"
+@@ -633,7 +635,9 @@ def test_german_selection_rejects_the_implicit_english_default(
+         monkeypatch, language="de-DE", voice=None
+     )
+     mismatch = next(
+-        item for item in diagnostics if item.code == "pykokoro.voice_language_incompatible"
++        item
++        for item in diagnostics
++        if item.code == "pykokoro.voice_language_incompatible"
+     )
+
+     assert mismatch.details["voice"] == "AV_ariala"
+diff --git a/tests/test_phononsynth_engine.py b/tests/test_phononsynth_engine.py
+index 470cbe0..beb64bc 100644
+--- a/tests/test_phononsynth_engine.py
++++ b/tests/test_phononsynth_engine.py
+@@ -237,7 +237,6 @@ def test_api_probe_rejects_bad_version(
+     assert probe.status == status
+
+
+-
+ def test_api_probe_rejects_v1_with_actionable_error_without_opening_model(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -278,6 +277,7 @@ def test_api_probe_rejects_missing_or_false_authoritative_fit_contract(
+     assert "phononsynth>=0.1.2,<0.2" in probe.error_message
+     assert package.PhononVoice.opens == []
+
++
+ def test_api_probe_rejects_missing_required_method(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -536,7 +536,14 @@ def test_measurement_preserves_authoritative_fit_and_exact_prepared_text() -> No
+         SimpleNamespace(token_count=23, max_tokens=20, fits=True),
+         SimpleNamespace(token_count=23, max_tokens=30, fits=False),
+     ],
+-    ids=("unknown-fit", "boolean-count", "negative-count", "zero-maximum", "too-long-fit", "too-short-fit"),
++    ids=(
++        "unknown-fit",
++        "boolean-count",
++        "negative-count",
++        "zero-maximum",
++        "too-long-fit",
++        "too-short-fit",
++    ),
+ )
+ def test_measurement_rejects_invalid_contract_values(measurement: Any) -> None:
+     class Voice:
+@@ -553,6 +560,7 @@ def test_measurement_rejects_invalid_contract_values(measurement: Any) -> None:
+     assert raised.value.details["max_tokens"] == measurement.max_tokens
+     assert raised.value.details["fits"] == measurement.fits
+
++
+ def test_measurement_translates_empty_text_error(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 971bc09..64dd267 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -1097,7 +1097,9 @@ def test_kokoro_preflight_rejects_cross_language_voice_before_runtime_open(
+     monkeypatch.setattr(
+         adapter,
+         "open",
+-        lambda *_args, **_kwargs: pytest.fail("incompatible bindings must fail before runtime open"),
++        lambda *_args, **_kwargs: pytest.fail(
++            "incompatible bindings must fail before runtime open"
++        ),
+     )
+     binding = {
+         "renderer": "kokoro",
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 391381e..67289ea 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -110,7 +110,9 @@ def _install_akinvox_profile_discovery(monkeypatch) -> None:
+     monkeypatch.setattr(
+         PyKokoroEngineAdapter,
+         "open",
+-        lambda *_args, **_kwargs: pytest.fail("profile selection must not open synthesis"),
++        lambda *_args, **_kwargs: pytest.fail(
++            "profile selection must not open synthesis"
++        ),
+     )
+
+
+diff --git a/tests/test_voice_descriptors.py b/tests/test_voice_descriptors.py
+index 3af88fd..83101e0 100644
+--- a/tests/test_voice_descriptors.py
++++ b/tests/test_voice_descriptors.py
+@@ -95,12 +95,8 @@ def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
+         "voicerender.voices_api.discover_targets", lambda *a, **k: (target,)
+     )
+
+-    english = list_voices(
+-        engine="kokoro", target_id=target.id, language="en-US"
+-    )
+-    german = list_voices(
+-        engine="kokoro", target_id=target.id, language="de-DE"
+-    )
++    english = list_voices(engine="kokoro", target_id=target.id, language="en-US")
++    german = list_voices(engine="kokoro", target_id=target.id, language="de-DE")
+     german_underscore = list_voices(
+         engine="kokoro", target_id=target.id, language="de_AT"
+     )
+@@ -109,9 +105,7 @@ def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
+     assert {item.voice for item in german} == set(target.voices[8:])
+     assert {item.voice for item in german_underscore} == set(target.voices[8:])
+     assert all(item.languages == ("en", "en-us", "en-gb") for item in english)
+-    assert all(
+-        item.languages == ("de", "de-de", "de-at", "de-ch") for item in german
+-    )
++    assert all(item.languages == ("de", "de-de", "de-at", "de-ch") for item in german)
+
+
+ def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
+diff --git a/voicerender/engines/phononsynth.py b/voicerender/engines/phononsynth.py
+index 566e547..c8f842f 100644
+--- a/voicerender/engines/phononsynth.py
++++ b/voicerender/engines/phononsynth.py
+@@ -257,15 +257,14 @@ def _error_context(
+     }
+
+
+-
+-def _validated_measurement(
+-    measured: Any, selection: EngineSelection
+-) -> RequestMeasure:
++def _validated_measurement(measured: Any, selection: EngineSelection) -> RequestMeasure:
+     amount = _value(measured, "token_count")
+     maximum = _value(measured, "max_tokens")
+     fits = _value(measured, "fits")
+
+-    valid_amount = isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
++    valid_amount = (
++        isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
++    )
+     valid_maximum = maximum is None or (
+         isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
+     )
+@@ -296,6 +295,7 @@ def _validated_measurement(
+         details={"model_id": _value(measured, "model_id") or selection.target_id},
+     )
+
++
+ def _translate_phonon_error(
+     error: Exception,
+     selection: EngineSelection,
+@@ -560,10 +560,7 @@ class PhononSynthEngineAdapter:
+                 failed_stage="request_api_contract",
+                 failed_symbol="request_api_contract",
+                 error_message=_PHONON_API_COMPATIBILITY_MESSAGE,
+-                warnings=probe.warnings
+-                + (
+-                    _PHONON_API_COMPATIBILITY_MESSAGE,
+-                ),
++                warnings=probe.warnings + (_PHONON_API_COMPATIBILITY_MESSAGE,),
+                 details={**dict(probe.details), "contract_mismatches": contradictions},
+             )
+         return replace(
+diff --git a/voicerender/voices_api.py b/voicerender/voices_api.py
+index ff34a10..795fe1e 100644
+--- a/voicerender/voices_api.py
++++ b/voicerender/voices_api.py
+@@ -132,7 +132,9 @@ def _language_matches(descriptor: VoiceDescriptor, language: str | None) -> bool
+     if language is None:
+         return True
+     expected = normalize_language_key(language)
+-    return any(normalize_language_key(item) == expected for item in descriptor.languages)
++    return any(
++        normalize_language_key(item) == expected for item in descriptor.languages
++    )
+
+
+ def _target_descriptors(target: Any) -> list[VoiceDescriptor]:

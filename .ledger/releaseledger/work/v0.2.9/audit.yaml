@@ -1,0 +1,202 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.2.9
+git_base_ref: v0.2.8
+git_base_sha: 4bdac4e18fcb9909689889f1237fa4d4f083357d
+git_head_ref: HEAD
+git_head_sha: 38197830ba6c1adf66c05a4b53a5a462869ab9c1
+git_range: 4bdac4e18fcb9909689889f1237fa4d4f083357d..38197830ba6c1adf66c05a4b53a5a462869ab9c1
+commit_count: 9
+rows:
+  - sha: 16913d40e23b25987b17274d02248d8456360c7e
+    source_ref: git:16913d40e23b25987b17274d02248d8456360c7e
+    short_sha: 16913d4
+    changed_paths:
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/report_contract.py
+      - voicerender/variants.py
+    stats:
+      files_changed: 5
+      insertions: 93
+      deletions: 22
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: report"
+  - sha: 7c5933312eb77b2d38fe3051086ca85f4e3f363a
+    source_ref: git:7c5933312eb77b2d38fe3051086ca85f4e3f363a
+    short_sha: 7c59333
+    changed_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/wheel_smoke.py
+      - voicerender/engines/phononsynth.py
+      - voicerender/engines/registry.py
+    stats:
+      files_changed: 9
+      insertions: 1844
+      deletions: 12
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: add support for phononsynth"
+  - sha: d72b77973b675971c38158a3e51fe14011eb2004
+    source_ref: git:d72b77973b675971c38158a3e51fe14011eb2004
+    short_sha: d72b779
+    changed_paths:
+      - tests/test_bundle_inspect.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 8
+      insertions: 1175
+      deletions: 180
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: add api for readio"
+  - sha: 81f5f519c5b17f49053da10705730ddf78a6c1ed
+    source_ref: git:81f5f519c5b17f49053da10705730ddf78a6c1ed
+    short_sha: 81f5f51
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_voice_descriptors.py
+      - voicerender/engines/kokoro.py
+      - voicerender/models.py
+      - voicerender/voices_api.py
+    stats:
+      files_changed: 11
+      insertions: 743
+      deletions: 16
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: add support for akinvox-multispeaker"
+  - sha: 05e2511c2e77b9b4b20e1220397332b6bef08029
+    source_ref: git:05e2511c2e77b9b4b20e1220397332b6bef08029
+    short_sha: 05e2511
+    changed_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_renderplan_input.py
+      - voicerender/engines/phononsynth.py
+    stats:
+      files_changed: 8
+      insertions: 291
+      deletions: 29
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: fix phononsynth"
+  - sha: 0b951e4c9690afd7c7392046dd3a63794fdd9990
+    source_ref: git:0b951e4c9690afd7c7392046dd3a63794fdd9990
+    short_sha: 0b951e4
+    changed_paths:
+      - tests/test_kokoro_reference.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_voice_descriptors.py
+      - voicerender/engines/phononsynth.py
+      - voicerender/voices_api.py
+    stats:
+      files_changed: 7
+      insertions: 34
+      deletions: 25
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "chore: fix format"
+  - sha: f3679d382a40a07f8046129f536d43f62ebba4f5
+    source_ref: git:f3679d382a40a07f8046129f536d43f62ebba4f5
+    short_sha: f3679d3
+    changed_paths:
+      - tests/test_engine_registry.py
+      - tests/test_supertonicsynth_engine.py
+      - voicerender/engines/supertonicsynth.py
+    stats:
+      files_changed: 3
+      insertions: 237
+      deletions: 3
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "fix: supersonicsynth"
+  - sha: 0581372760acc6ed4017c81ff8329be0e6452b0f
+    source_ref: git:0581372760acc6ed4017c81ff8329be0e6452b0f
+    short_sha: 0581372
+    changed_paths:
+      - voicerender/bundle_render_inspect.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 2
+      insertions: 19
+      deletions: 18
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "chore: mypy"
+  - sha: 38197830ba6c1adf66c05a4b53a5a462869ab9c1
+    source_ref: git:38197830ba6c1adf66c05a4b53a5a462869ab9c1
+    short_sha: "3819783"
+    changed_paths:
+      - tests/test_profile_roles_cli.py
+    stats:
+      files_changed: 1
+      insertions: 6
+      deletions: 3
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "fix: pytest"

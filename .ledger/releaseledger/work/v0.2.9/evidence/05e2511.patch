@@ -1,0 +1,582 @@
+ .github/workflows/tests.yml        |   2 +-
+ README.md                          |   2 +-
+ pyproject.toml                     |   2 +-
+ tests/test_engine_registry.py      |   4 +-
+ tests/test_phononsynth_engine.py   |  89 ++++++++++++++++++++---
+ tests/test_preflight.py            | 143 +++++++++++++++++++++++++++++++++++++
+ tests/test_renderplan_input.py     |   4 +-
+ voicerender/engines/phononsynth.py |  74 +++++++++++++++----
+ 8 files changed, 291 insertions(+), 29 deletions(-)
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index f1e0131..b4df311 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -104,7 +104,7 @@ jobs:
+             "soprosynth[cpu]==0.1.1" \
+             "supertonicsynth[cpu]==0.1.2" \
+             "inflectsynth[cpu]==0.1.1" \
+-            "phononsynth[cpu]==0.1.1"
++            "phononsynth[cpu]==0.1.2"
+       - name: Run released-set compatibility contracts
+         run: python -m pytest -q tests/test_engine_registry.py tests/test_backends.py tests/test_phononsynth_engine.py tests/test_soprosynth_engine.py tests/test_sopro_release_compatibility.py
+
+diff --git a/README.md b/README.md
+index 8c0c2f7..7489916 100644
+--- a/README.md
++++ b/README.md
+@@ -40,7 +40,7 @@ voicerender voices list --engine phonon --lang en-US
+
+ Choose a published model, named voice, and—when needed—one of that model's advertised quality values when creating a profile. PhononSynth owns catalog discovery and model loading; opening a render session can download/install selected model assets unless `--offline` is used with an existing cache. `cache_dir` and `offline` are forwarded to the SDK.
+
+-VoiceRender passes the exact prepared text to `PhononVoice.measure_prepared()` and `synthesize_prepared()`. The SDK reports the exact token count but declares no input limit or fit decision, so VoiceRender records unknown capacity (`maximum=None`, `fits=None`) and preflight fails closed; it does not invent a limit or split the request.
++VoiceRender passes the exact prepared text to `PhononVoice.measure_prepared()` and `synthesize_prepared()`. The Phonon extra requires PhononSynth 0.1.2 or later in the 0.1 series, whose request API reports an authoritative boolean fit alongside the exact token count. No finite text-token maximum is declared, so VoiceRender accepts only an explicit `fits=True`, rejects `fits=False`, and fails closed if the fit result is missing. It does not invent a limit or split the request.
+
+ The adapter supports named voices and model-quality selection and forwards PhononSynth's supported generation options. It does not support reference voices/cloning, speaker selection, pronunciation overrides, `say_as` spans, linguistic tokens, whole-request phonemes, or word timings. Although the PhononSynth SDK has a streaming API, VoiceRender uses its complete-request synthesis API and does not expose streaming.
+
+diff --git a/pyproject.toml b/pyproject.toml
+index c4a3e26..74812e4 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -28,7 +28,7 @@ inflect = ["inflectsynth[cpu]>=0.1.1,<0.2"]
+ kitten = ["kittensynth[cpu]>=0.1.9,<0.2"]
+ kokoro = ["pykokoro>=0.10.11,<0.11"]
+ piper = ["pipersynth>=0.2.5,<0.3"]
+-phonon = ["phononsynth[cpu]>=0.1.1,<0.2"]
++phonon = ["phononsynth[cpu]>=0.1.2,<0.2"]
+ pocket = ["pocketsynth[cpu]>=0.2.5,<0.3"]
+ sopro = ["soprosynth[cpu]>=0.1.0,<0.2"]
+ supertonic = ["supertonicsynth[cpu]>=0.1.2,<0.2"]
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index 984d0b6..1bfb183 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -250,13 +250,14 @@ def _fake_package(package: str) -> ModuleType:
+
+ def _phonon_contract() -> dict[str, object]:
+     return {
+-        "version": 1,
++        "version": 2,
+         "engine": "phonon",
+         "entrypoint": "PhononVoice.synthesize_prepared",
+         "stream_entrypoint": "PhononVoice.stream_prepared",
+         "measure_entrypoint": "PhononVoice.measure_prepared",
+         "input": "prepared_text",
+         "measurement_unit": "model_tokens",
++        "measurement_fit_is_authoritative": True,
+         "max_input_tokens": None,
+         "features": {
+             "named_voices": True,
+@@ -340,6 +341,7 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+     fake = _fake_package(package)
+     monkeypatch.setitem(sys.modules, package, fake)
+     if engine == "phonon":
++        fake.REQUEST_API_VERSION = 2
+         fake.request_api_contract = _phonon_contract
+     elif engine == "inflect":
+         fake.request_api_contract = lambda: {
+diff --git a/tests/test_phononsynth_engine.py b/tests/test_phononsynth_engine.py
+index 1d25aee..470cbe0 100644
+--- a/tests/test_phononsynth_engine.py
++++ b/tests/test_phononsynth_engine.py
+@@ -74,15 +74,15 @@ def _model() -> Any:
+
+ def _fake_package(
+     *,
+-    api_version: Any = 1,
++    api_version: Any = 2,
+     contract: Any = None,
+     missing_method: str | None = None,
+ ) -> Any:
+     module: Any = ModuleType("phononsynth")
+-    module.__version__ = "0.1.1"
++    module.__version__ = "0.1.2"
+     module.REQUEST_API_VERSION = api_version
+     contract_value = contract or {
+-        "version": 1,
++        "version": 2,
+         "engine": "phonon",
+         "entrypoint": "PhononVoice.synthesize_prepared",
+         "stream_entrypoint": "PhononVoice.stream_prepared",
+@@ -90,6 +90,7 @@ def _fake_package(
+         "input": "prepared_text",
+         "measurement_unit": "model_tokens",
+         "max_input_tokens": None,
++        "measurement_fit_is_authoritative": True,
+         "features": {
+             "named_voices": True,
+             "streaming": True,
+@@ -135,7 +136,7 @@ def _fake_package(
+             if self.measure_error is not None:
+                 raise self.measure_error
+             return SimpleNamespace(
+-                token_count=17, max_tokens=None, fits=None, model_id="phonon-demo"
++                token_count=17, max_tokens=None, fits=True, model_id="phonon-demo"
+             )
+
+         def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
+@@ -190,7 +191,7 @@ def _selection(**kwargs: Any) -> EngineSelection:
+     return EngineSelection(**values)
+
+
+-def test_api_probe_accepts_explicit_phonon_v1_contract(
++def test_api_probe_accepts_explicit_phonon_v2_contract(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     monkeypatch.setitem(sys.modules, "phononsynth", _fake_package())
+@@ -199,7 +200,7 @@ def test_api_probe_accepts_explicit_phonon_v1_contract(
+
+     assert probe.compatible
+     assert probe.status == "ready"
+-    assert probe.api_version == 1
++    assert probe.api_version == 2
+     assert probe.details["request_api_contract"]["engine"] == "phonon"
+
+
+@@ -221,7 +222,7 @@ def test_api_probe_reports_missing_package(monkeypatch: pytest.MonkeyPatch) -> N
+
+ @pytest.mark.parametrize(
+     ("api_version", "status"),
+-    [(2, "api_version_incompatible"), ("1", "api_probe_failed")],
++    [(1, "api_version_incompatible"), ("1", "api_probe_failed")],
+ )
+ def test_api_probe_rejects_bad_version(
+     monkeypatch: pytest.MonkeyPatch, api_version: Any, status: str
+@@ -236,6 +237,47 @@ def test_api_probe_rejects_bad_version(
+     assert probe.status == status
+
+
++
++def test_api_probe_rejects_v1_with_actionable_error_without_opening_model(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    package = _fake_package(api_version=1)
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "api_version_incompatible"
++    assert probe.expected_api_version == 2
++    assert "authoritative request-measurement contract" in probe.error_message
++    assert "phononsynth>=0.1.2,<0.2" in probe.error_message
++    assert package.PhononVoice.opens == []
++
++
++@pytest.mark.parametrize("field_value", [None, False])
++def test_api_probe_rejects_missing_or_false_authoritative_fit_contract(
++    monkeypatch: pytest.MonkeyPatch, field_value: Any
++) -> None:
++    package = _fake_package()
++    contract = package.request_api_contract()
++    if field_value is None:
++        del contract["measurement_fit_is_authoritative"]
++    else:
++        contract["measurement_fit_is_authoritative"] = field_value
++    package = _fake_package(contract=contract)
++    monkeypatch.setitem(sys.modules, "phononsynth", package)
++
++    probe = PhononSynthEngineAdapter().probe_api()
++
++    assert not probe.compatible
++    assert probe.status == "api_incompatible"
++    assert probe.details["contract_mismatches"]["measurement_fit_is_authoritative"] == {
++        "expected": True,
++        "actual": field_value,
++    }
++    assert "phononsynth>=0.1.2,<0.2" in probe.error_message
++    assert package.PhononVoice.opens == []
++
+ def test_api_probe_rejects_missing_required_method(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -456,7 +498,7 @@ def test_capabilities_are_truthful_and_options_are_canonical() -> None:
+     assert not capabilities.supports_model_sources
+
+
+-def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> None:
++def test_measurement_preserves_authoritative_fit_and_exact_prepared_text() -> None:
+     class Voice:
+         def __init__(self) -> None:
+             self.text: str | None = None
+@@ -464,7 +506,7 @@ def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> Non
+         def measure_prepared(self, text: str) -> Any:
+             self.text = text
+             return SimpleNamespace(
+-                token_count=23, max_tokens=None, fits=None, model_id="phonon-demo"
++                token_count=23, max_tokens=None, fits=True, model_id="phonon-demo"
+             )
+
+     voice = Voice()
+@@ -474,7 +516,7 @@ def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> Non
+     measured = PhononSynthEngineSession(voice, _selection(), None).measure(request)
+
+     assert measured == RequestMeasure(
+-        fits=None,
++        fits=True,
+         amount=23,
+         maximum=None,
+         unit="model_tokens",
+@@ -484,6 +526,33 @@ def test_measurement_preserves_unknown_capacity_and_exact_prepared_text() -> Non
+     assert voice.text == text
+
+
++@pytest.mark.parametrize(
++    "measurement",
++    [
++        SimpleNamespace(token_count=23, max_tokens=None, fits=None),
++        SimpleNamespace(token_count=True, max_tokens=None, fits=True),
++        SimpleNamespace(token_count=-1, max_tokens=None, fits=True),
++        SimpleNamespace(token_count=23, max_tokens=0, fits=True),
++        SimpleNamespace(token_count=23, max_tokens=20, fits=True),
++        SimpleNamespace(token_count=23, max_tokens=30, fits=False),
++    ],
++    ids=("unknown-fit", "boolean-count", "negative-count", "zero-maximum", "too-long-fit", "too-short-fit"),
++)
++def test_measurement_rejects_invalid_contract_values(measurement: Any) -> None:
++    class Voice:
++        def measure_prepared(self, _text: str) -> Any:
++            return measurement
++
++    request = SpeechRequest(id="invalid-measurement", text="hello", language="en-US")
++
++    with pytest.raises(EngineBackendError) as raised:
++        PhononSynthEngineSession(Voice(), _selection(), None).measure(request)
++
++    assert raised.value.code == "phonon.measurement_invalid"
++    assert raised.value.details["token_count"] == measurement.token_count
++    assert raised.value.details["max_tokens"] == measurement.max_tokens
++    assert raised.value.details["fits"] == measurement.fits
++
+ def test_measurement_translates_empty_text_error(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 419f777..971bc09 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -36,6 +36,7 @@ from voicerender.engines.base import (
+ )
+ from voicerender.engines.catalog import SynthesisTarget, TargetVoice
+ from voicerender.engines.kittensynth import KittenSynthEngineAdapter
++from voicerender.engines.phononsynth import PhononSynthEngineAdapter
+ from voicerender.engines.pipersynth import PiperSynthEngineAdapter
+ from voicerender.engines.registry import _ADAPTERS, get_adapter
+ from voicerender.engines.selection import EngineRequest
+@@ -429,6 +430,148 @@ def _plan(
+     ).with_identity()
+
+
++def _install_fake_phononsynth(
++    monkeypatch: pytest.MonkeyPatch,
++    *,
++    amount: int = 23,
++    maximum: int | None = None,
++    fits: bool = True,
++) -> list[tuple[str, Any]]:
++    events: list[tuple[str, Any]] = []
++    model = SimpleNamespace(
++        id="phonon-test-model",
++        display_name="Phonon test model",
++        languages=("en-US",),
++        quality_choices=(),
++        sample_rate=24000,
++        voices=(
++            SimpleNamespace(
++                id="voice-a",
++                gender="unknown",
++                language="en-US",
++                locale="en-US",
++                languages=("en-US",),
++                display_name="Voice A",
++            ),
++        ),
++        default_voice="voice-a",
++    )
++
++    class FakeVoice:
++        @classmethod
++        def from_pretrained(cls, target_id: str, **_kwargs: Any) -> FakeVoice:
++            events.append(("open", target_id))
++            return cls()
++
++        def measure_prepared(self, text: str) -> Any:
++            events.append(("measure", text))
++            return SimpleNamespace(
++                token_count=amount,
++                max_tokens=maximum,
++                fits=fits,
++                model_id="phonon-test-model",
++            )
++
++        def synthesize_prepared(self, *_args: Any, **_kwargs: Any) -> Any:
++            raise AssertionError("preflight must never synthesize")
++
++        def close(self) -> None:
++            events.append(("close", None))
++
++    class SynthesisConfig:
++        def __init__(self, **_kwargs: Any) -> None:
++            pass
++
++        def validated(self) -> SynthesisConfig:
++            return self
++
++    module = ModuleType("phononsynth")
++    module.__version__ = "0.1.2"
++    module.REQUEST_API_VERSION = 2
++    module.request_api_contract = lambda: {
++        "version": 2,
++        "engine": "phonon",
++        "entrypoint": "PhononVoice.synthesize_prepared",
++        "measure_entrypoint": "PhononVoice.measure_prepared",
++        "input": "prepared_text",
++        "measurement_unit": "model_tokens",
++        "measurement_fit_is_authoritative": True,
++        "features": {
++            "named_voices": True,
++            "voice_cloning": False,
++            "word_timings": False,
++            "automatic_chunking": False,
++        },
++    }
++    module.PhononVoice = FakeVoice
++    module.SynthesisConfig = SynthesisConfig
++    module.SynthesisResult = object
++    module.SynthesisMeasure = object
++    module.DiscoveredModel = object
++    module.DescribedVoice = object
++    module.discover_models = lambda **_kwargs: (model,)
++    module.runtime_identity = lambda: {"runtime": "phonon-test-runtime"}
++    monkeypatch.setitem(sys.modules, "phononsynth", module)
++    monkeypatch.setitem(_ADAPTERS, "phonon", PhononSynthEngineAdapter())
++    return events
++
++
++def test_phonon_preflight_accepts_authoritative_fit_without_maximum(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    events = _install_fake_phononsynth(monkeypatch)
++    binding = {
++        "renderer": "phonon",
++        "target_id": "phonon-test-model",
++        "voice": "voice-a",
++    }
++    plan = _plan(("Phonon prepared text", True, "sentence"), binding=binding)
++
++    report = preflight_render_plan(plan, tmp_path / "phonon-authoritative-fit.toml")
++
++    check = report.checks[0]
++    assert report.status == "ok"
++    assert check.status == "ok"
++    assert check.metric == "model_tokens"
++    assert check.measured == 23
++    assert check.maximum is None
++    assert check.source == "phononsynth.measure_prepared"
++    assert [event[0] for event in events] == ["open", "measure", "close"]
++    assert events[1][1] == "Phonon prepared text"
++
++
++def test_phonon_preflight_defers_emphasis_with_authoritative_fit(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    events = _install_fake_phononsynth(monkeypatch)
++    binding = {
++        "renderer": "phonon",
++        "target_id": "phonon-test-model",
++        "voice": "voice-a",
++    }
++    plan = _plan(("Phonon emphasis", True, "sentence"), binding=binding)
++    item = replace(
++        plan.speech[0],
++        segment_id=None,
++        controls=(SpeechControl(start=0, end=5, name="emphasis", params={}),),
++    )
++    plan = replace(plan, flow=(item,), plan_id=None).with_identity()
++
++    report = preflight_render_plan(
++        plan,
++        tmp_path / "phonon-emphasis-deferred.toml",
++        emphasis_policy="defer-to-compose",
++    )
++
++    check = report.checks[0]
++    assert report.status == "ok"
++    assert check.status == "ok"
++    assert "audiocompose.emphasis.gain.v1" in check.detail
++    assert "pending composition" in check.detail
++    assert check.source == "phononsynth.measure_prepared"
++    assert [event[0] for event in events] == ["open", "measure", "close"]
++
++
+ @pytest.mark.parametrize(
+     ("amount", "maximum", "fits", "expected_status"),
+     ((180, 256, True, "ok"), (109, None, True, "ok"), (300, 256, False, "replan")),
+diff --git a/tests/test_renderplan_input.py b/tests/test_renderplan_input.py
+index c639307..946a8e0 100644
+--- a/tests/test_renderplan_input.py
++++ b/tests/test_renderplan_input.py
+@@ -432,7 +432,7 @@ def test_phonon_renderplan_exact_text_reaches_measurement_and_synthesis(
+         def measure_prepared(self, text: str) -> Any:
+             measured_text.append(text)
+             return SimpleNamespace(
+-                token_count=8, max_tokens=None, fits=None, model_id="target-v1"
++                token_count=8, max_tokens=None, fits=True, model_id="target-v1"
+             )
+
+         def synthesize_prepared(self, text: str, **kwargs: Any) -> Any:
+@@ -456,7 +456,7 @@ def test_phonon_renderplan_exact_text_reaches_measurement_and_synthesis(
+     measured = session.measure(request)
+     session.synthesize(request)
+
+-    assert measured.fits is None
++    assert measured.fits is True
+     assert measured.amount == 8
+     assert measured.maximum is None
+     assert measured.unit == "model_tokens"
+diff --git a/voicerender/engines/phononsynth.py b/voicerender/engines/phononsynth.py
+index a829117..566e547 100644
+--- a/voicerender/engines/phononsynth.py
++++ b/voicerender/engines/phononsynth.py
+@@ -18,7 +18,7 @@ from ..errors import (
+     InvalidEngineVoiceError,
+     UnsupportedSynthesisFeatureError,
+ )
+-from .api_probe import SUPPORTED_REQUEST_API_VERSION, EngineApiProbe, probe_public_api
++from .api_probe import EngineApiProbe, probe_public_api
+ from .base import (
+     PCM_RANGE_POLICY,
+     EngineCapabilities,
+@@ -43,6 +43,12 @@ from .profiles import make_renderprofile_fragment
+
+ ENGINE_ID = "phonon"
+ PACKAGE_NAME = "phononsynth"
++PHONONSYNTH_REQUEST_API_VERSION = 2
++_PHONON_API_COMPATIBILITY_MESSAGE = (
++    "PhononSynth request API is incompatible. VoiceRender requires the "
++    "authoritative request-measurement contract. Install "
++    "phononsynth>=0.1.2,<0.2."
++)
+ PHONON_OPTION_NAMES = frozenset(
+     {
+         "quality",
+@@ -251,6 +257,45 @@ def _error_context(
+     }
+
+
++
++def _validated_measurement(
++    measured: Any, selection: EngineSelection
++) -> RequestMeasure:
++    amount = _value(measured, "token_count")
++    maximum = _value(measured, "max_tokens")
++    fits = _value(measured, "fits")
++
++    valid_amount = isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
++    valid_maximum = maximum is None or (
++        isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
++    )
++    if not valid_amount or not isinstance(fits, bool) or not valid_maximum:
++        raise EngineBackendError(
++            "PhononSynth returned an invalid request measurement.",
++            engine=ENGINE_ID,
++            target_id=selection.target_id,
++            code="phonon.measurement_invalid",
++            details={"token_count": amount, "max_tokens": maximum, "fits": fits},
++        )
++
++    if maximum is not None and fits is not (amount <= maximum):
++        raise EngineBackendError(
++            "PhononSynth request measurement contradicts its maximum.",
++            engine=ENGINE_ID,
++            target_id=selection.target_id,
++            code="phonon.measurement_invalid",
++            details={"token_count": amount, "max_tokens": maximum, "fits": fits},
++        )
++
++    return RequestMeasure(
++        fits=fits,
++        amount=amount,
++        maximum=maximum,
++        unit="model_tokens",
++        source="phononsynth.measure_prepared",
++        details={"model_id": _value(measured, "model_id") or selection.target_id},
++    )
++
+ def _translate_phonon_error(
+     error: Exception,
+     selection: EngineSelection,
+@@ -334,16 +379,7 @@ class PhononSynthEngineSession:
+             raise
+         except Exception as exc:  # Backend errors are normalized at this boundary.
+             raise _translate_phonon_error(exc, self._selection, request) from exc
+-        return RequestMeasure(
+-            fits=_value(measured, "fits"),
+-            amount=_value(measured, "token_count"),
+-            maximum=_value(measured, "max_tokens"),
+-            unit="model_tokens",
+-            source="phononsynth.measure_prepared",
+-            details={
+-                "model_id": _value(measured, "model_id") or self._selection.target_id,
+-            },
+-        )
++        return _validated_measurement(measured, self._selection)
+
+     def synthesize(self, request: SpeechRequest) -> RenderedSpeech:
+         unsupported = (
+@@ -461,10 +497,16 @@ class PhononSynthEngineAdapter:
+                 ),
+                 "__module__": ("discover_models", "runtime_identity"),
+             },
+-            expected_api_version=SUPPORTED_REQUEST_API_VERSION,
++            expected_api_version=PHONONSYNTH_REQUEST_API_VERSION,
+             require_explicit_contract=True,
+         )
+         if not probe.compatible:
++            if probe.status == "api_version_incompatible":
++                return replace(
++                    probe,
++                    error_message=_PHONON_API_COMPATIBILITY_MESSAGE,
++                    warnings=probe.warnings + (_PHONON_API_COMPATIBILITY_MESSAGE,),
++                )
+             return probe
+         try:
+             contract = _module().request_api_contract()
+@@ -475,6 +517,9 @@ class PhononSynthEngineAdapter:
+                 "measure_entrypoint": _contract_field(contract, "measure_entrypoint"),
+                 "input": _contract_field(contract, "input"),
+                 "measurement_unit": _contract_field(contract, "measurement_unit"),
++                "measurement_fit_is_authoritative": _contract_field(
++                    contract, "measurement_fit_is_authoritative"
++                ),
+                 "named_voices": _contract_field(features, "named_voices"),
+                 "voice_cloning": _contract_field(features, "voice_cloning"),
+                 "word_timings": _contract_field(features, "word_timings"),
+@@ -496,6 +541,7 @@ class PhononSynthEngineAdapter:
+             "measure_entrypoint": "PhononVoice.measure_prepared",
+             "input": "prepared_text",
+             "measurement_unit": "model_tokens",
++            "measurement_fit_is_authoritative": True,
+             "named_voices": True,
+             "voice_cloning": False,
+             "word_timings": False,
+@@ -513,9 +559,10 @@ class PhononSynthEngineAdapter:
+                 status="api_incompatible",
+                 failed_stage="request_api_contract",
+                 failed_symbol="request_api_contract",
++                error_message=_PHONON_API_COMPATIBILITY_MESSAGE,
+                 warnings=probe.warnings
+                 + (
+-                    "PhononSynth request contract contradicts VoiceRender adapter semantics.",
++                    _PHONON_API_COMPATIBILITY_MESSAGE,
+                 ),
+                 details={**dict(probe.details), "contract_mismatches": contradictions},
+             )
+@@ -902,6 +949,7 @@ class PhononSynthEngineAdapter:
+ __all__ = [
+     "ENGINE_ID",
+     "PACKAGE_NAME",
++    "PHONONSYNTH_REQUEST_API_VERSION",
+     "PHONON_OPTION_NAMES",
+     "PhononSelectionError",
+     "PhononSynthEngineAdapter",

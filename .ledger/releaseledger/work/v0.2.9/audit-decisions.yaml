@@ -1,0 +1,145 @@
+rows:
+  - sha: 16913d40e23b25987b17274d02248d8456360c7e
+    inspected: true
+    inspected_paths:
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/book.py
+      - voicerender/report_contract.py
+      - voicerender/variants.py
+    observed_behavior: "Book reports now omit execution fingerprints from persisted item data and enforce the shared 2 MiB report limit with atomic failure handling."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 7c5933312eb77b2d38fe3051086ca85f4e3f363a
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_renderplan_input.py
+      - tests/wheel_smoke.py
+      - voicerender/engines/phononsynth.py
+      - voicerender/engines/registry.py
+    observed_behavior: "Added the optional PhononSynth engine adapter, registry entry, package extra, model and voice discovery, prepared-text measurement and synthesis, and compatibility coverage."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: d72b77973b675971c38158a3e51fe14011eb2004
+    inspected: true
+    inspected_paths:
+      - tests/test_bundle_inspect.py
+      - tests/test_render_book.py
+      - tests/test_renderplan_render.py
+      - voicerender/__init__.py
+      - voicerender/book.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/preflight.py
+      - voicerender/renderplan_render.py
+    observed_behavior: "Added selection-aware, read-only bundle render inspection plus non-persisting RenderPlan preflight and in-memory rendering APIs."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 81f5f519c5b17f49053da10705730ddf78a6c1ed
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_cli.py
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_voice_descriptors.py
+      - voicerender/engines/kokoro.py
+      - voicerender/models.py
+      - voicerender/voices_api.py
+    observed_behavior: "Added static AkinVox English and German multispeaker voice discovery and language-aware profile selection and preflight validation for Kokoro."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 05e2511c2e77b9b4b20e1220397332b6bef08029
+    inspected: true
+    inspected_paths:
+      - .github/workflows/tests.yml
+      - README.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_renderplan_input.py
+      - voicerender/engines/phononsynth.py
+    observed_behavior: "Updated the PhononSynth integration to require the authoritative request-fit contract and to reject incompatible or invalid measurements before model loading or synthesis."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 0b951e4c9690afd7c7392046dd3a63794fdd9990
+    inspected: true
+    inspected_paths:
+      - tests/test_kokoro_reference.py
+      - tests/test_phononsynth_engine.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_voice_descriptors.py
+      - voicerender/engines/phononsynth.py
+      - voicerender/voices_api.py
+    observed_behavior: "Refined PhononSynth validation diagnostics and formatting while preserving the multilingual voice-selection and measurement behavior introduced earlier."
+    public_impact: none
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Formatting and follow-up validation cleanup; no standalone public release note."
+    stale: false
+  - sha: f3679d382a40a07f8046129f536d43f62ebba4f5
+    inspected: true
+    inspected_paths:
+      - tests/test_engine_registry.py
+      - tests/test_supertonicsynth_engine.py
+      - voicerender/engines/supertonicsynth.py
+    observed_behavior: "Supertonic request normalization now omits an unset seed while preserving explicitly provided integer seeds and passing an unset seed as None to runtime configuration."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 0581372760acc6ed4017c81ff8329be0e6452b0f
+    inspected: true
+    inspected_paths:
+      - voicerender/bundle_render_inspect.py
+      - voicerender/renderplan_render.py
+    observed_behavior: "Refined bundle inspection request handling and corrected in-memory render progress advancement for skipped selected occurrences."
+    public_impact: none
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Follow-up implementation cleanup covered by the broader in-memory and inspection API entry."
+    stale: false
+  - sha: 38197830ba6c1adf66c05a4b53a5a462869ab9c1
+    inspected: true
+    inspected_paths:
+      - tests/test_profile_roles_cli.py
+    observed_behavior: "Adjusted profile-role CLI test expectations after the release feature changes."
+    public_impact: none
+    decision: internal
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Test-only follow-up; no standalone public release note."
+    stale: false
