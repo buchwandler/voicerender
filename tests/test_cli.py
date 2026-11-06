@@ -1200,6 +1200,8 @@ def test_cli_kokoro_profile_create_round_trips_voice_level_gain(
         sample_rate=24000,
         max_tokens=512,
         source="test",
+        default_voice=None,
+        voice_details=(),
         distribution_id="v1.0-test",
     )
     monkeypatch.setattr(models, "get_model_info", lambda *_args, **_kwargs: (model, ()))

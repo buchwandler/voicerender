@@ -233,6 +233,29 @@ voicerender render \
 
 Parsing a RenderProfile is engine-independent. `voicerender profile validate` checks the selected adapter/API, so it requires the selected engine SDK, but performs no model inference. Install the selected engine extra and make its model assets available before preflight/render. See [UtterPlan](https://pypi.org/project/utterplan/) and the [RenderPlan package contract](https://pypi.org/project/renderplan/) for the producer/consumer boundary.
 
+## Static Kokoro multispeaker voices
+
+The static AKinVox English/German target `akinvox-multispeaker-v1` selects one of its discovered built-in voices. It does not consume reference audio or a transcript. This is distinct from the reference-conditioned `en-akinvox-cloning-v1` workflow below, which requires an exact transcript.
+
+List available voices by language, then create a profile with an explicit compatible language and voice:
+
+```bash
+voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang en --json
+voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang de --json
+
+voicerender profile create \
+  --engine kokoro --target akinvox-multispeaker-v1 \
+  --language en-US --voice AV_ariala \
+  -o akinvox-english.renderprofile.toml
+
+voicerender profile create \
+  --engine kokoro --target akinvox-multispeaker-v1 \
+  --language de-DE --voice AV_thorsten \
+  -o akinvox-german.renderprofile.toml
+```
+
+VoiceRender checks discovered per-voice language capabilities during selection and preflight. The model default `AV_ariala` is English-only, so omit `--voice` only when the effective default supports the requested language. A German request with the English default or an explicit English voice fails with an actionable diagnostic before synthesis.
+
 ## Reference-voice sources
 
 A voice source is stored under the role binding's `options.voice_source`. Local `kind = "reference"` bindings include an absolute, normalized WAV path and its computed SHA-256. They are machine-specific; validation checks the digest and rejects changed or missing files rather than updating the pin. Use `kind = "managed_reference"` with `resolver = "voicefolio"` for portable references. The profile stores the VoiceFolio ref, source digest and format, revision, repository, and path—not a cache or materialized-audio path. Older managed profiles without `source_format` remain valid.

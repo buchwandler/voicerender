@@ -34,9 +34,10 @@ from voicerender.engines.base import (
     RequestMeasure,
     SpeechRequest,
 )
+from voicerender.engines.catalog import SynthesisTarget, TargetVoice
 from voicerender.engines.kittensynth import KittenSynthEngineAdapter
 from voicerender.engines.pipersynth import PiperSynthEngineAdapter
-from voicerender.engines.registry import _ADAPTERS
+from voicerender.engines.registry import _ADAPTERS, get_adapter
 from voicerender.engines.selection import EngineRequest
 from voicerender.errors import EngineUnavailableError, SpeechRequestTooLongError
 from voicerender.events import RenderEvent, RenderEventKind
@@ -386,6 +387,7 @@ def _plan(
     *texts: tuple[str, bool, str],
     binding: dict[str, Any] | None = None,
     source_count: int = 1,
+    language: str = "en-US",
 ) -> RenderPlan:
     flow: list[SpeechItem] = []
     for number, (text, required, level) in enumerate(texts, start=1):
@@ -411,7 +413,7 @@ def _plan(
             SpeechItem(
                 number=number,
                 text=text,
-                language="en-US",
+                language=language,
                 role="narrator",
                 binding=item_binding,
                 source=source,
@@ -891,6 +893,90 @@ def test_piper_render_defers_emphasis_to_composition_without_native_option(
     assert manifest.speech[0].segment_id == original_segment_id
     assert manifest.speech[0].sha256 == plain_result.manifest.speech[0].sha256
     assert (tmp_path / "emphasis" / item.wav).is_file()
+
+
+@pytest.mark.parametrize("voice", ("AV_cori", None), ids=("explicit", "default"))
+def test_kokoro_preflight_rejects_cross_language_voice_before_runtime_open(
+    monkeypatch: pytest.MonkeyPatch,
+    voice: str | None,
+) -> None:
+    voices = (
+        TargetVoice(
+            id="AV_ariala",
+            language="en",
+            language_label="English",
+            languages=("en", "en-us"),
+        ),
+        TargetVoice(
+            id="AV_cori",
+            language="en",
+            language_label="English",
+            languages=("en", "en-us"),
+        ),
+        TargetVoice(
+            id="AV_thorsten",
+            language="de",
+            language_label="German",
+            languages=("de", "de-de"),
+        ),
+    )
+    target = SynthesisTarget(
+        engine="kokoro",
+        id="akinvox-multispeaker-v1",
+        display_name="AKinVox English/German Multispeaker",
+        languages=("en", "en-us", "de", "de-de"),
+        voices=tuple(voice.id for voice in voices),
+        voice_details=voices,
+        default_voice="AV_ariala",
+        qualities=("fp32",),
+        metadata={"source": "test", "frontend": "akinvox-multispeaker-v1"},
+    )
+    monkeypatch.setattr(
+        "voicerender.engines.kokoro._discover_targets",
+        lambda **_kwargs: (target,),
+    )
+    adapter = get_adapter("kokoro")
+    monkeypatch.setattr(
+        adapter,
+        "probe_api",
+        lambda: EngineApiProbe(
+            engine="kokoro",
+            package="pykokoro",
+            compatible=True,
+            status="ready",
+            expected_api_version=2,
+            api_version=2,
+            contract_source="explicit",
+        ),
+    )
+    monkeypatch.setattr(adapter, "version", lambda: "0.10.11")
+    monkeypatch.setattr(adapter, "_pronunciation_diagnostics", lambda _selection: [])
+    monkeypatch.setattr(
+        adapter,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("incompatible bindings must fail before runtime open"),
+    )
+    binding = {
+        "renderer": "kokoro",
+        "target_id": target.id,
+        "options": {"quality": "fp32"},
+    }
+    if voice is not None:
+        binding["voice"] = voice
+    plan = _plan(
+        ("German request with an English voice", True, "sentence"),
+        binding=binding,
+        language="de-DE",
+    )
+
+    report = preflight_render_plan(plan)
+
+    assert report.status == "reject"
+    assert report.checks[0].status == "error"
+    assert "pykokoro.voice_language_incompatible" in (report.checks[0].detail or "")
+    assert "AV_thorsten" in (report.checks[0].detail or "")
+    if voice is None:
+        assert "default voice is English" in (report.checks[0].detail or "")
 
 
 def test_preflight_persists_all_fit_report_reuses_session_and_never_synthesizes(

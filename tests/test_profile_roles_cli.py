@@ -9,6 +9,9 @@ import pytest
 from renderplan import PausePolicy, RenderProfile, RoleProfile
 
 from voicerender import cli
+from voicerender.engines.api_probe import EngineApiProbe
+from voicerender.engines.catalog import SynthesisTarget, TargetVoice
+from voicerender.engines.kokoro import PyKokoroEngineAdapter
 from voicerender.renderprofile import load_render_profile, save_render_profile
 
 
@@ -28,6 +31,160 @@ def _write_profile(path: Path) -> RenderProfile:
     ).with_identity()
     save_render_profile(profile, path)
     return profile
+
+
+def _install_akinvox_profile_discovery(monkeypatch) -> None:
+    english_languages = ("en", "en-us", "en-gb")
+    german_languages = ("de", "de-de", "de-at", "de-ch")
+    voice_details = (
+        TargetVoice(
+            id="AV_ariala",
+            language="en",
+            locale="en",
+            language_label="English",
+            languages=english_languages,
+        ),
+        TargetVoice(
+            id="AV_cori",
+            language="en",
+            locale="en",
+            language_label="English",
+            languages=english_languages,
+        ),
+        TargetVoice(
+            id="AV_thorsten",
+            language="de",
+            locale="de",
+            language_label="German",
+            languages=german_languages,
+        ),
+        TargetVoice(
+            id="AV_julia",
+            language="de",
+            locale="de",
+            language_label="German",
+            languages=german_languages,
+        ),
+        TargetVoice(
+            id="AV_bernd",
+            language="de",
+            locale="de",
+            language_label="German",
+            languages=german_languages,
+        ),
+    )
+    target = SynthesisTarget(
+        engine="kokoro",
+        id="akinvox-multispeaker-v1",
+        display_name="AKinVox English/German Multispeaker",
+        languages=("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch"),
+        status="ready",
+        runtime_available=True,
+        voices=tuple(detail.id for detail in voice_details),
+        voice_details=voice_details,
+        default_voice="AV_ariala",
+        qualities=("fp32",),
+        metadata={
+            "source": "github",
+            "g2p_backend": "akinvox-multispeaker-v1",
+            "frontend": "akinvox-multispeaker-v1",
+            "voice_mode": "static",
+            "max_tokens": 510,
+        },
+    )
+    probe = EngineApiProbe(
+        engine="kokoro",
+        package="pykokoro",
+        compatible=True,
+        status="ready",
+        expected_api_version=2,
+        api_version=2,
+        contract_source="explicit",
+    )
+    monkeypatch.setattr(
+        "voicerender.engines.kokoro._discover_targets",
+        lambda **_kwargs: (target,),
+    )
+    monkeypatch.setattr(PyKokoroEngineAdapter, "probe_api", lambda _self: probe)
+    monkeypatch.setattr(PyKokoroEngineAdapter, "version", lambda _self: "0.10.11")
+    monkeypatch.setattr(
+        PyKokoroEngineAdapter,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("profile selection must not open synthesis"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "voice"),
+    (
+        ("en-US", "AV_ariala"),
+        ("en-GB", "AV_cori"),
+        ("de-DE", "AV_thorsten"),
+        ("de-AT", "AV_julia"),
+        ("de-CH", "AV_bernd"),
+    ),
+)
+def test_profile_create_accepts_compatible_akinvox_bindings(
+    monkeypatch, tmp_path: Path, capsys, language: str, voice: str
+) -> None:
+    _install_akinvox_profile_discovery(monkeypatch)
+    output = tmp_path / "akinvox.renderprofile.toml"
+
+    exit_code = cli.main(
+        [
+            "profile",
+            "create",
+            "--engine",
+            "kokoro",
+            "--target",
+            "akinvox-multispeaker-v1",
+            "--language",
+            language,
+            "--voice",
+            voice,
+            "--option",
+            'quality="fp32"',
+            "-o",
+            str(output),
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["path"] == str(output)
+    assert load_render_profile(output).roles["narrator"].binding["voice"] == voice
+
+
+@pytest.mark.parametrize(
+    ("language", "voice"),
+    (("de-DE", "AV_cori"), ("en-US", "AV_julia"), ("de-DE", None)),
+)
+def test_profile_create_rejects_incompatible_akinvox_bindings(
+    monkeypatch, tmp_path: Path, capsys, language: str, voice: str | None
+) -> None:
+    _install_akinvox_profile_discovery(monkeypatch)
+    output = tmp_path / "invalid.renderprofile.toml"
+    args = [
+        "profile",
+        "create",
+        "--engine",
+        "kokoro",
+        "--target",
+        "akinvox-multispeaker-v1",
+        "--language",
+        language,
+    ]
+    if voice is not None:
+        args.extend(("--voice", voice))
+    args.extend(("-o", str(output), "--json"))
+
+    exit_code = cli.main(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert "pykokoro.voice_language_incompatible" in payload["error"]
+    assert not output.exists()
 
 
 def test_profile_role_set_writes_only_explicit_output(

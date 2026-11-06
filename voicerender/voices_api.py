@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .engines.metadata import normalize_language_key
 from .engines.registry import discover_targets, list_engines, normalize_engine_id
 from .errors import ProfileError
 from .jsonutil import json_value
@@ -130,8 +131,8 @@ def _descriptor(
 def _language_matches(descriptor: VoiceDescriptor, language: str | None) -> bool:
     if language is None:
         return True
-    expected = language.casefold()
-    return any(item.casefold() == expected for item in descriptor.languages)
+    expected = normalize_language_key(language)
+    return any(normalize_language_key(item) == expected for item in descriptor.languages)
 
 
 def _target_descriptors(target: Any) -> list[VoiceDescriptor]:

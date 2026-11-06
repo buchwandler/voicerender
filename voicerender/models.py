@@ -415,7 +415,7 @@ class ModelInfo:
     source: str
     languages: tuple[str, ...]
     voices: tuple[str, ...]
-    default_voice: str
+    default_voice: str | None
     qualities: tuple[str, ...]
     g2p_backend: str | None
     lexicons: tuple[str, ...] | None
@@ -431,6 +431,7 @@ class ModelInfo:
     sample_rate: int | None
     max_tokens: int | None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    voice_details: tuple[Any, ...] = ()
 
     @classmethod
     def from_target(cls, target: Any) -> ModelInfo:
@@ -442,7 +443,7 @@ class ModelInfo:
             source=str(metadata.get("source") or target.engine),
             languages=tuple(target.languages),
             voices=voices,
-            default_voice=str(target.default_voice or (voices[0] if voices else "")),
+            default_voice=target.default_voice,
             qualities=tuple(target.qualities),
             g2p_backend=metadata.get("g2p_backend"),
             lexicons=tuple(lexicons) if lexicons is not None else None,
@@ -457,6 +458,7 @@ class ModelInfo:
             engine=target.engine,
             sample_rate=target.sample_rate or metadata.get("sample_rate"),
             max_tokens=metadata.get("max_tokens"),
+            voice_details=tuple(target.voice_details),
             metadata=metadata,
         )
 

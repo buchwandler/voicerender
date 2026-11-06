@@ -39,6 +39,81 @@ def _target() -> SynthesisTarget:
     )
 
 
+def _multilingual_target() -> SynthesisTarget:
+    english_voices = (
+        "AV_ariala",
+        "AV_brody",
+        "AV_david",
+        "AV_elliott",
+        "AV_ralph",
+        "AV_cori",
+        "AV_phil",
+        "AV_helen",
+    )
+    german_voices = (
+        "AV_thorsten",
+        "AV_bernd",
+        "AV_eva_k",
+        "AV_karlsson",
+        "AV_kerstin",
+        "AV_mucky",
+        "AV_hokuspokus",
+        "AV_julia",
+    )
+    languages = ("en", "en-us", "en-gb", "de", "de-de", "de-at", "de-ch")
+    english_languages = ("en", "en-us", "en-gb")
+    german_languages = ("de", "de-de", "de-at", "de-ch")
+    voice_details = tuple(
+        TargetVoice(
+            id=voice,
+            language=language,
+            locale=language,
+            language_label="English" if language == "en" else "German",
+            languages=english_languages if language == "en" else german_languages,
+        )
+        for language, voices in (("en", english_voices), ("de", german_voices))
+        for voice in voices
+    )
+    return SynthesisTarget(
+        engine="kokoro",
+        id="akinvox-multispeaker-v1",
+        display_name="AKinVox English/German Multispeaker",
+        languages=languages,
+        runtime_available=True,
+        voices=english_voices + german_voices,
+        voice_details=voice_details,
+        default_voice="AV_ariala",
+        metadata={"source": "test"},
+    )
+
+
+def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
+    monkeypatch,
+) -> None:
+    target = _multilingual_target()
+    monkeypatch.setattr(
+        "voicerender.voices_api.discover_targets", lambda *a, **k: (target,)
+    )
+
+    english = list_voices(
+        engine="kokoro", target_id=target.id, language="en-US"
+    )
+    german = list_voices(
+        engine="kokoro", target_id=target.id, language="de-DE"
+    )
+    german_underscore = list_voices(
+        engine="kokoro", target_id=target.id, language="de_AT"
+    )
+
+    assert {item.voice for item in english} == set(target.voices[:8])
+    assert {item.voice for item in german} == set(target.voices[8:])
+    assert {item.voice for item in german_underscore} == set(target.voices[8:])
+    assert all(item.languages == ("en", "en-us", "en-gb") for item in english)
+    assert all(
+        item.languages == ("de", "de-de", "de-at", "de-ch") for item in german
+    )
+
+
 def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
     target = _target()
     monkeypatch.setattr(

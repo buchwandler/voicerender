@@ -250,6 +250,31 @@ Kokoro, PocketSynth, SoproSynth, and ChatterboxSynth accept pinned `voice_source
 
 Create a local Inno voice or use a portable VoiceFolio reference for AkinVox. A local `kind="reference"` pins an absolute path and SHA-256, so it is machine-specific. A managed `kind="managed_reference"` pins the VoiceFolio ref, source digest, source format, revision, repository, and path without storing a cache path.
 
+### Static AKinVox English/German voices
+
+The static `akinvox-multispeaker-v1` target exposes PyKokoro's discovered, fixed `AV_*` voices for English and German. Choose it when selecting a built-in voice. It does not clone a reference recording and does not require a transcript. The separate `en-akinvox-cloning-v1` target is reference-conditioned and requires exact transcript text.
+
+Discover each language's available voices from runtime metadata:
+
+```bash
+voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang en --json
+voicerender voices list --engine kokoro --target akinvox-multispeaker-v1 --lang de --json
+```
+
+Keep the requested language explicit and select a voice from that language. In particular, the target's default voice is English-only, so a German profile must name a German voice:
+
+```bash
+voicerender profile create \
+  --engine kokoro --target akinvox-multispeaker-v1 \
+  --language en-US --voice AV_ariala -o akinvox-english.renderprofile.toml
+
+voicerender profile create \
+  --engine kokoro --target akinvox-multispeaker-v1 \
+  --language de-DE --voice AV_thorsten -o akinvox-german.renderprofile.toml
+```
+
+Selection and preflight reject cross-language voices and an incompatible implicit default before synthesis opens. PyKokoro discovery remains the source of the voice roster and language capabilities.
+
 ### Primary multi-role VoiceFolio workflow
 
 When the VoiceFolio catalog entry contains its transcript, the profile commands bind it automatically. No local reference WAV or Kokoro-specific `voice_enrollment` JSON is needed:

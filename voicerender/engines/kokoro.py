@@ -63,7 +63,8 @@ from .registry import normalize_engine_id
 logger = logging.getLogger(__name__)
 
 
-PYKOKORO_REQUIRED = ">=0.10.8,<0.11"
+_PYKOKORO_MINIMUM_VERSION = "0.10.11"
+PYKOKORO_REQUIRED = f">={_PYKOKORO_MINIMUM_VERSION},<0.11"
 PYKOKORO_REQUEST_API_VERSION = 2
 _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
 
@@ -84,7 +85,8 @@ def _version_supported(version: str) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     patch = int(match.group(3) or 0)
-    return (major, minor, patch) >= (0, 10, 8) and (major, minor) == (0, 10)
+    minimum = tuple(int(part) for part in _PYKOKORO_MINIMUM_VERSION.split("."))
+    return (major, minor, patch) >= minimum and (major, minor) == (0, 10)
 
 
 def _package_metadata() -> str | None:
@@ -180,6 +182,23 @@ def _registry_error(exc: Exception) -> ModelDiscoveryError:
     return ModelDiscoveryError(message, code=code)
 
 
+def _voice_languages(detail: Any, target_languages: tuple[str, ...]) -> tuple[str, ...]:
+    explicit = tuple(getattr(detail, "languages", ()) or ())
+    if explicit:
+        return tuple(normalize_language_key(item) for item in explicit)
+
+    raw = str(getattr(detail, "language", "") or "")
+    normalized = normalize_language_key(raw) if raw else ""
+    if not normalized or normalized == "unknown":
+        return ()
+    if "-" in normalized:
+        return (normalized,)
+
+    base = language_base(normalized)
+    matched = tuple(item for item in target_languages if language_base(item) == base)
+    return matched or (normalized,)
+
+
 def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
     languages = tuple(capabilities.languages)
     fallback = languages[0] if languages else "unknown"
@@ -200,6 +219,7 @@ def _target_from_capabilities(capabilities: Any) -> SynthesisTarget:
             language=str(getattr(detail, "language", fallback)),
             locale=str(getattr(detail, "locale", fallback)),
             language_label=str(getattr(detail, "language_label", fallback)),
+            languages=_voice_languages(detail, languages),
         )
     voice_details = tuple(
         indexed.get(
@@ -1484,6 +1504,61 @@ class PyKokoroEngineAdapter:
                     field="render.target.voice",
                 )
             )
+        if "voice_source" not in selection.options and selection.speaker is None:
+            effective_voice = selection.voice or model.default_voice
+            detail = next(
+                (item for item in model.voice_details if item.id == effective_voice),
+                None,
+            )
+            if (
+                effective_voice is not None
+                and detail is not None
+                and detail.languages
+                and not language_matches(selection.language, detail.languages)
+            ):
+                available_voices = [
+                    item.id
+                    for item in model.voice_details
+                    if item.languages
+                    and language_matches(selection.language, item.languages)
+                ]
+                supported_languages = ", ".join(detail.languages)
+                if selection.voice is None:
+                    default_language = detail.language_label
+                    if default_language == "unknown":
+                        default_language = supported_languages
+                    message = (
+                        f"Voice {effective_voice!r} does not support language "
+                        f"{selection.language!r} on target {selection.target_id!r}. "
+                        f"The target's default voice is {default_language}; select one "
+                        f"of the compatible voices: {', '.join(available_voices)}."
+                    )
+                else:
+                    suggestion = (
+                        f"Select one of the compatible voices: {', '.join(available_voices)}."
+                        if available_voices
+                        else "No discovered voices support this language."
+                    )
+                    message = (
+                        f"Voice {effective_voice!r} does not support language "
+                        f"{selection.language!r} on target {selection.target_id!r}. "
+                        f"Supported language(s): {supported_languages}. {suggestion}"
+                    )
+                diagnostics.append(
+                    EngineDiagnostic(
+                        code="pykokoro.voice_language_incompatible",
+                        severity="error",
+                        message=message,
+                        field="render.target.voice",
+                        details={
+                            "voice": effective_voice,
+                            "language": selection.language,
+                            "supported_languages": list(detail.languages),
+                            "available_voices": available_voices,
+                            "implicit_default": selection.voice is None,
+                        },
+                    )
+                )
         source_value = selection.options.get("voice_source")
         enrollment_value = selection.options.get("voice_enrollment")
         if source_value is not None:
