@@ -87,6 +87,31 @@ def _multilingual_target() -> SynthesisTarget:
     )
 
 
+def _base_language_target() -> SynthesisTarget:
+    return SynthesisTarget(
+        engine="kokoro",
+        id="base-lang-target",
+        display_name="Base language target",
+        languages=("en", "de"),
+        runtime_available=True,
+        voices=("voice-en", "voice-de"),
+        voice_details=(
+            TargetVoice(
+                id="voice-en",
+                language="en",
+                locale="en",
+                languages=("en",),
+            ),
+            TargetVoice(
+                id="voice-de",
+                language="de",
+                locale="de",
+                languages=("de",),
+            ),
+        ),
+    )
+
+
 def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
     monkeypatch,
 ) -> None:
@@ -106,6 +131,29 @@ def test_multilingual_voice_filtering_is_language_scoped_and_normalized(
     assert {item.voice for item in german_underscore} == set(target.voices[8:])
     assert all(item.languages == ("en", "en-us", "en-gb") for item in english)
     assert all(item.languages == ("de", "de-de", "de-at", "de-ch") for item in german)
+
+
+def test_base_language_voice_filtering_matches_regional_requests(
+    monkeypatch,
+) -> None:
+    target = _base_language_target()
+    monkeypatch.setattr(
+        "voicerender.voices_api.discover_targets", lambda *a, **k: (target,)
+    )
+
+    english = list_voices(engine="kokoro", target_id=target.id, language="en-US")
+    german = list_voices(engine="kokoro", target_id=target.id, language="de-DE")
+    german_underscore = list_voices(
+        engine="kokoro", target_id=target.id, language="de_AT"
+    )
+    unrelated = list_voices(engine="kokoro", target_id=target.id, language="fr-FR")
+
+    assert {item.voice for item in english} == {"voice-en"}
+    assert {item.voice for item in german} == {"voice-de"}
+    assert {item.voice for item in german_underscore} == {"voice-de"}
+    assert unrelated == ()
+    assert {item.languages for item in english} == {("en",)}
+    assert {item.languages for item in german} == {("de",)}
 
 
 def test_voice_selectors_list_inspect_and_round_trip(monkeypatch) -> None:
