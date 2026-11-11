@@ -144,13 +144,13 @@ voicerender profile bind printer-cast.renderprofile.toml guest \
 
 Kitten remains on its historical eSpeak-only path when no lexicon sources are configured. Request-local IPA spans, local files, named sources, contextual heteronym rules, and eSpeak fallback are reported in effective precedence by `profile show`/`inspect` and preflight. Local source identity uses content and logical SHA-256 values rather than filesystem paths; the ordered named asset IDs, versions, and digests are also part of the synthesis identity. Moving an unchanged local file does not change that source identity, while changing its content does. Offline profiles require their selected named lexicons to be installed.
 
-## Speech artifact boundaries and pause policy
+## Speech artifacts and pause policy
 
-VoiceRender applies engine-neutral, trailing-only silence normalization before persisting synthesized speech WAVs or cache entries. Leading samples are preserved, and an all-silent waveform remains unchanged. This produces speech-tight artifacts; normalization does not trim leading samples and does not insert profile pauses.
+VoiceRender persists the complete validated waveform returned by the selected synthesis engine. It does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, insert silence, or normalize pause boundaries. Speech-boundary conditioning and explicit pause realization belong to downstream AudioCompose.
 
-`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for downstream composition after speech-tail normalization. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports the mode and manual durations, then states that policy pauses are composed after normalized speech or not inserted.
+`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for AudioCompose to realize after synthesis. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports pause durations separately from the raw synthesis artifacts.
 
-The boundary policy is part of cache and render identity. Existing output with a missing or different policy is stale and is not silently reused; RenderPlan rendering reports `output.stale_audio_policy` unless the caller re-renders with `--force` or resets it with `--reset-stale`.
+VoiceRender artifacts produced under the former trailing-silence policy are stale under the raw audio artifact generation and must be rendered again once. Removed samples cannot be recovered, so old output is never upgraded by changing metadata. RenderPlan rendering reports `output.stale_audio_artifact` unless the caller re-renders with `--force` or resets the stale output with `--reset-stale`. Future silence-detector changes do not require re-synthesis.
 
 ## UtterPlan bundle projection
 

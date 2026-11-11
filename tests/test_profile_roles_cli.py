@@ -530,7 +530,7 @@ def test_role_list_and_profile_show_present_the_complete_cast(
     assert "RenderProfile " in show_output
     assert "Planning:" in show_output
     assert "Pauses\n  mode: none" in show_output
-    assert "speech artifact tails: trimmed" in show_output
+    assert "speech artifact audio: complete raw synthesis waveform" in show_output
     assert "no policy pause is inserted" in show_output
     assert "short sentence: off (implicit)" in show_output
     assert "short sentence: off (explicit)" in show_output
@@ -646,5 +646,5 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
     assert "  sentence: 500" in output
     assert "  paragraph: 800" in output
     assert "  parenthetical: 180" in output
-    assert "speech artifact tails: trimmed" in output
-    assert "configured pause is inserted after normalized speech" in output
+    assert "speech artifact audio: complete raw synthesis waveform" in output
+    assert "AudioCompose realizes pauses after raw speech" in output

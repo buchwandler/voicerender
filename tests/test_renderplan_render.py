@@ -571,84 +571,84 @@ def test_verified_cache_reuse_materializes_numbered_wav_and_corruption_regenerat
     assert wav_info(tmp_path / "third" / "000001.wav")["frames"] > 0
 
 
-def test_renderplan_normalizes_audio_before_cache_and_output_and_rejects_old_cache(
+def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+
     adapter = _install(monkeypatch)
     adapter.metadata = {"short_sentence_mode": "wrap"}
     adapter.audio = [0.2] * 24_000 + [0.0] * 9_600
     plan = _plan("speech with renderer tail")
     report = _report(adapter, plan, tmp_path)
-    cache = tmp_path / "boundary-cache"
+    cache = tmp_path / "raw-cache"
 
     first = render_renderplan(
         plan,
         preflight=report,
-        output_dir=tmp_path / "boundary-first",
+        output_dir=tmp_path / "raw-first",
         cache_dir=cache,
     )
     assert not first.failed
     assert first.rendered_count == 1
-    assert first.manifest.speech[0].frames == 24_000
-    assert wav_info(tmp_path / "boundary-first" / "000001.wav")["frames"] == 24_000
-    assert wav_info(next(cache.glob("*.wav")))["frames"] == 24_000
+    assert first.manifest.speech[0].frames == 33_600
+    assert wav_info(tmp_path / "raw-first" / "000001.wav")["frames"] == 33_600
+    assert wav_info(next(cache.glob("*.wav")))["frames"] == 33_600
     fingerprint = first.execution_fingerprint[0]
-    assert fingerprint["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
-    assert fingerprint["audio_boundary"]["input_frames"] == 33_600
-    assert fingerprint["audio_boundary"]["removed_frames"] == 9_600
+    assert fingerprint["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+    assert "audio_boundary" not in fingerprint
     assert fingerprint["render_result"] == {"short_sentence_mode": "wrap"}
     diagnostics = json.loads(
-        (tmp_path / "boundary-first" / RENDER_DIAGNOSTICS_FILENAME).read_text(
+        (tmp_path / "raw-first" / RENDER_DIAGNOSTICS_FILENAME).read_text(
             encoding="utf-8"
         )
     )
-    assert diagnostics["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
-    assert (
-        diagnostics["audio_boundary"][first.manifest.speech[0].segment_id][
-            "output_frames"
-        ]
-        == 24_000
-    )
+    assert diagnostics["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+    assert "audio_boundary" not in diagnostics
     assert diagnostics["render_results"][first.manifest.speech[0].segment_id] == {
         "short_sentence_mode": "wrap"
     }
 
     cache_sidecar = next(cache.glob("*.json"))
     cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
-    assert cache_data["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
+    assert cache_data["schema"] == "voicerender.renderplan-cache.v3"
+    assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+    assert "audio_boundary" not in cache_data
     assert cache_data["render_result"] == {"short_sentence_mode": "wrap"}
-    assert cache_data["audio_boundary"]["output_frames"] == 24_000
     reused = render_renderplan(
         plan,
         preflight=report,
-        output_dir=tmp_path / "boundary-reused",
+        output_dir=tmp_path / "raw-reused",
         cache_dir=cache,
     )
     assert reused.reused_count == 1
-    assert reused.execution_fingerprint[0]["audio_boundary"]["removed_frames"] == 9_600
+    assert "audio_boundary" not in reused.execution_fingerprint[0]
     assert reused.execution_fingerprint[0]["render_result"] == {
         "short_sentence_mode": "wrap"
     }
-    assert wav_info(tmp_path / "boundary-reused" / "000001.wav")["frames"] == 24_000
+    assert wav_info(tmp_path / "raw-reused" / "000001.wav")["frames"] == 33_600
 
-    cache_data["schema"] = "voicerender.renderplan-cache.v1"
+    cache_data["schema"] = "voicerender.renderplan-cache.v2"
+    cache_data.pop("audio_artifact_policy")
+    cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
     cache_sidecar.write_text(json.dumps(cache_data), encoding="utf-8")
     old_cache = render_renderplan(
         plan,
         preflight=report,
-        output_dir=tmp_path / "boundary-old-cache",
+        output_dir=tmp_path / "raw-old-cache",
         cache_dir=cache,
     )
     assert old_cache.rendered_count == 1
+    assert wav_info(tmp_path / "raw-old-cache" / "000001.wav")["frames"] == 33_600
     assert adapter.synthesized_texts == [
         "speech with renderer tail",
         "speech with renderer tail",
     ]
 
 
-@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v0"])
+@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v1"])
 @pytest.mark.parametrize("use_reset", [False, True])
-def test_stale_audio_boundary_policy_requires_explicit_reset(
+def test_stale_audio_artifact_requires_explicit_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     old_policy: str | None,
@@ -667,9 +667,9 @@ def test_stale_audio_boundary_policy_requires_explicit_reset(
     diagnostics_path = output / RENDER_DIAGNOSTICS_FILENAME
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     if old_policy is None:
-        diagnostics.pop("audio_boundary_policy")
+        diagnostics.pop("audio_artifact_policy")
     else:
-        diagnostics["audio_boundary_policy"] = old_policy
+        diagnostics["audio_artifact_policy"] = old_policy
     diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
 
     if not use_reset:
@@ -677,7 +677,7 @@ def test_stale_audio_boundary_policy_requires_explicit_reset(
             render_renderplan(
                 plan, preflight=report, output_dir=output, cache_dir=cache
             )
-        assert stale.value.code == "output.stale_audio_policy"
+        assert stale.value.code == "output.stale_audio_artifact"
         assert "--force" in str(stale.value)
 
     kwargs = {"reset_stale_output": True} if use_reset else {"force": True}
@@ -690,8 +690,8 @@ def test_stale_audio_boundary_policy_requires_explicit_reset(
     )
     assert not refreshed.failed
     updated_diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
-    assert updated_diagnostics["audio_boundary_policy"] == (
-        "voicerender.trailing-silence.v1"
+    assert updated_diagnostics["audio_artifact_policy"] == (
+        "voicerender.raw-synthesis.v1"
     )
 
 

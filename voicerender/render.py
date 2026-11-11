@@ -12,11 +12,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from .audio_boundaries import (
-    BOUNDARY_POLICY_ID,
-    clamp_word_timings_to_audio,
-    trim_renderer_trailing_silence,
-)
+from .audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
 from .engines import get_engine
 from .engines.base import (
     RenderedSpeech,
@@ -39,9 +35,9 @@ from .progress import ProgressTracker
 from .render_lock import exclusive_render_lock as _exclusive_run
 from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
 
-RENDER_ALGORITHM = "voicerender.batch.v2"
+RENDER_ALGORITHM = "voicerender.batch.v3"
 
-_CACHE_SCHEMA = "voicerender.batch-cache.v2"
+_CACHE_SCHEMA = "voicerender.batch-cache.v3"
 
 
 def _identity(
@@ -72,7 +68,7 @@ def _identity(
             key: value for key, value in binding.options.items() if key != "offline"
         },
         "algorithm": algorithm,
-        "audio_boundary_policy": BOUNDARY_POLICY_ID,
+        "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
     }
 
 
@@ -126,18 +122,11 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
         not isinstance(data, dict)
         or data.get("key") != key
         or data.get("schema") != _CACHE_SCHEMA
-        or data.get("audio_boundary_policy") != BOUNDARY_POLICY_ID
+        or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
     ):
         return None
     info = data.get("wav")
-    boundary = data.get("audio_boundary")
-    if (
-        not isinstance(info, dict)
-        or not verified_wav(wav, info)
-        or not isinstance(boundary, dict)
-        or boundary.get("policy") != BOUNDARY_POLICY_ID
-        or boundary.get("output_frames") != info.get("frames")
-    ):
+    if not isinstance(info, dict) or not verified_wav(wav, info):
         return None
     return wav, data
 
@@ -232,13 +221,13 @@ def render(
                 "wav": None,
                 "timings": [],
                 "timing_source": "absent",
-                "audio_boundary": None,
                 "error": None,
             }
         )
     document: dict[str, Any] = {
         "schema": SCHEMA_MANIFEST,
         "source_plan_id": source_plan_id,
+        "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
         "profile_name": profile.name,
         "effective_profile_id": profile_id,
         "selected_count": len(chosen),
@@ -345,7 +334,6 @@ def render(
                             wav=old["wav"],
                             timings=old.get("timings", []),
                             timing_source=old.get("timing_source", "absent"),
-                            audio_boundary=old.get("audio_boundary"),
                         )
                         reused += 1
                     else:
@@ -358,7 +346,6 @@ def render(
                                 wav=sidecar["wav"],
                                 timings=sidecar.get("timings", []),
                                 timing_source=sidecar.get("timing_source", "absent"),
-                                audio_boundary=sidecar.get("audio_boundary"),
                             )
                             reused += 1
                         else:
@@ -424,30 +411,21 @@ def render(
                                 engine=binding.engine,
                                 target_id=binding.target_id,
                             )
-                            normalized_audio, boundary = trim_renderer_trailing_silence(
-                                validated_result.audio,
-                                sample_rate=validated_result.sample_rate,
-                            )
-                            boundary_info = asdict(boundary)
-                            timings_with_types = clamp_word_timings_to_audio(
-                                validated_result.word_timings, boundary.output_frames
-                            )
                             timings_with_types = validate_word_timings(
                                 text=seg.text,
-                                frame_count=boundary.output_frames,
-                                timings=timings_with_types,
+                                frame_count=len(validated_result.audio),
+                                timings=validated_result.word_timings,
                             )
                             timings = [asdict(item) for item in timings_with_types]
                             info = atomic_wav(
                                 cache / f"{key}.wav",
-                                normalized_audio,
+                                validated_result.audio,
                                 validated_result.sample_rate,
                             )
                             sidecar = {
                                 "schema": _CACHE_SCHEMA,
                                 "key": key,
-                                "audio_boundary_policy": BOUNDARY_POLICY_ID,
-                                "audio_boundary": boundary_info,
+                                "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
                                 "wav": info,
                                 "timings": timings,
                                 "timing_source": "provided" if timings else "absent",
@@ -459,7 +437,6 @@ def render(
                                 wav=info,
                                 timings=timings,
                                 timing_source=sidecar["timing_source"],
-                                audio_boundary=boundary_info,
                             )
                             rendered += 1
                 except RenderEventCallbackError:

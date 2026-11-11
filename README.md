@@ -215,11 +215,11 @@ voicerender profile show printer-cast.renderprofile.toml
 voicerender profile validate printer-cast.renderprofile.toml
 ```
 
-The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes normalized speech artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes raw synthesis artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
 
 ### Speech artifacts and pause policy
 
-VoiceRender applies engine-neutral, trailing-only silence normalization before it writes a speech WAV or caches it. Leading samples are preserved and all-silent audio remains unchanged. This keeps the speech artifact tight; it does not insert the profile's policy pauses. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for downstream composition after normalized speech. With `mode = "none"`, no policy pause is inserted. `profile show` reports the mode, manual durations, and this composition boundary. Boundary policy is included in artifact identity, so output produced under a missing or different policy is treated as stale rather than silently reused; re-render with `--force` or reset with `--reset-stale`.
+VoiceRender persists the complete validated waveform returned by the selected synthesis engine. It does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, insert silence, or normalize pause boundaries. Speech-boundary conditioning and explicit pause realization belong to downstream AudioCompose. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for AudioCompose to realize; with `mode = "none"`, no policy pause is inserted. `profile show` reports the pause policy separately from VoiceRender's raw synthesis artifacts. Artifacts created under the former trailing-silence policy are stale and require a one-time re-render with `--force` or `--reset-stale`; removed samples cannot be recovered. Future silence-detector changes do not require synthesis again.
 
 ## ONNX Runtime provider policy
 
@@ -604,7 +604,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **No implicit model downloads:** install SDKs and assets through each engine's supported process.
 - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
 - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
-- **Speech artifact boundaries:** VoiceRender trims trailing silence before caching and writing each speech WAV; leading samples and all-silent input are preserved, and profile pauses remain a separate composition policy.
+- **Raw speech artifacts:** VoiceRender persists the complete validated synthesis waveform without boundary detection, silence removal, or pause realization; AudioCompose owns downstream speech-boundary conditioning and explicit pauses.
 - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
 
 ## Tests

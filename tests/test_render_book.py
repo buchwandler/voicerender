@@ -42,7 +42,7 @@ from voicerender import (
     BookRenderResult,
     ChapterRenderOutcome,
 )
-from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
 from voicerender.book import render_book
 from voicerender.book_contract import load_renderplan_set
 from voicerender.bundle_render_inspect import inspect_bundle_render
@@ -388,7 +388,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         diagnostics = {
             "schema": "voicerender.render-diagnostics.v1",
             "render_plan_id": plan.plan_id or plan.computed_id(),
-            "audio_boundary_policy": BOUNDARY_POLICY_ID,
+            "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
         }
         if pending_composition:
             diagnostics.update(
@@ -496,7 +496,7 @@ def test_bundle_render_inspection_selects_book_chapter_and_speech(
     ).with_identity()
     save_manifest(manifest, output / RENDER_MANIFEST_FILENAME)
     (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
-        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
+        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}), encoding="utf-8"
     )
 
     one_speech = inspect_bundle_render(

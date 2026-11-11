@@ -22,7 +22,7 @@ from renderplan import (
 )
 
 from voicerender import cli
-from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
 from voicerender.bundle_contract import BundleContractError
 from voicerender.bundle_inspect import inspect_bundle
 from voicerender.bundle_render_inspect import inspect_bundle_render
@@ -464,7 +464,7 @@ def test_bundle_render_inspection_is_selection_aware_and_read_only(
     ).with_identity()
     save_manifest(manifest, output / "render-manifest.toml")
     (output / "render-diagnostics.json").write_text(
-        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
+        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}), encoding="utf-8"
     )
     before = {
         path.relative_to(tmp_path): path.read_bytes()

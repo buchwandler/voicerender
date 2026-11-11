@@ -193,7 +193,7 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
     from renderplan import Producer, RenderManifest, SpeechArtifact, save_manifest
 
     import voicerender.document as document_module
-    from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
+    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
     from voicerender.storage import atomic_wav
 
     root = _workspace(tmp_path / "story.ssmd-bundle")
@@ -235,7 +235,7 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
         json.dumps(
             {
                 "schema": "voicerender.render-diagnostics.v1",
-                "audio_boundary_policy": BOUNDARY_POLICY_ID,
+                "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
             }
         ),
         encoding="utf-8",

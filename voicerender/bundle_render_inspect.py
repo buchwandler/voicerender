@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from renderplan import RenderPlan, SpeechArtifact, SpeechItem, load_manifest
 
-from .audio_boundaries import BOUNDARY_POLICY_ID
+from .audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
 from .book import (
     RECHECK_PREFLIGHT_FILENAME,
     BookRenderError,
@@ -322,14 +322,14 @@ def _inspect_plan_output(
             _reset_safety_detail(output_dir),
         )
 
-    if not _current_audio_policy(output_dir):
+    if not _current_audio_artifact_policy(output_dir):
         return (
             _uniform_occurrences(
                 chapter_id,
                 selected_items,
                 output_dir,
                 "stale",
-                "render output uses a different or unknown audio-boundary policy",
+                "render output predates raw VoiceRender audio artifacts",
             ),
             True,
             _reset_safety_detail(output_dir),
@@ -422,7 +422,7 @@ def _uniform_occurrences(
     )
 
 
-def _current_audio_policy(output_dir: Path) -> bool:
+def _current_audio_artifact_policy(output_dir: Path) -> bool:
     path = output_dir / RENDER_DIAGNOSTICS_FILENAME
     if path.is_symlink() or not path.is_file():
         return False
@@ -432,7 +432,7 @@ def _current_audio_policy(output_dir: Path) -> bool:
         return False
     return (
         isinstance(data, dict)
-        and data.get("audio_boundary_policy") == BOUNDARY_POLICY_ID
+        and data.get("audio_artifact_policy") == AUDIO_ARTIFACT_POLICY_ID
     )
 
 
