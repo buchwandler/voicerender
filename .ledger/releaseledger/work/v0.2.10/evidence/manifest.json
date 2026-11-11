@@ -1,0 +1,23 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 50,
+      "deletions": 3,
+      "patch_file": "4828dad.patch",
+      "patch_sha256": "bb488349b5aa8bb1b65fd0f0c917103bcd636ae9b77608ecb527c1f6313d92e3",
+      "paths": ["tests/test_voice_descriptors.py", "voicerender/voices_api.py"],
+      "sha": "4828dadb8361678818718635c4765d64eb185a27",
+      "short_sha": "4828dad",
+      "source_ref": "git:4828dadb8361678818718635c4765d64eb185a27"
+    }
+  ],
+  "git_base_ref": "e9d4d179d03c7cdb048a80682c1acb82b9282b1b",
+  "git_base_sha": "e9d4d179d03c7cdb048a80682c1acb82b9282b1b",
+  "git_head_ref": "4828dadb8361678818718635c4765d64eb185a27",
+  "git_head_sha": "4828dadb8361678818718635c4765d64eb185a27",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.2.10",
+  "schema_version": 1
+}

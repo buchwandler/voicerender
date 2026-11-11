@@ -1,0 +1,25 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.2.10
+git_base_ref: e9d4d179d03c7cdb048a80682c1acb82b9282b1b
+git_base_sha: e9d4d179d03c7cdb048a80682c1acb82b9282b1b
+git_head_ref: 4828dadb8361678818718635c4765d64eb185a27
+git_head_sha: 4828dadb8361678818718635c4765d64eb185a27
+include_merges: nontrivial
+entries:
+  - kind: fixed
+    summary: "Fixed regional voice discovery to include voices with compatible base-language metadata"
+    status: accepted
+    source_refs:
+      - git:4828dadb8361678818718635c4765d64eb185a27
+    paths:
+      - tests/test_voice_descriptors.py
+      - voicerender/voices_api.py
+    sources:
+      - git:4828dadb8361678818718635c4765d64eb185a27
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

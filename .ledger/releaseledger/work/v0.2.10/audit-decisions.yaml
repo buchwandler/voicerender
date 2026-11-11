@@ -1,0 +1,13 @@
+rows:
+  - sha: 4828dadb8361678818718635c4765d64eb185a27
+    inspected: true
+    inspected_paths:
+      - tests/test_voice_descriptors.py
+      - voicerender/voices_api.py
+    observed_behavior: "Voice discovery now matches regional requests to compatible base-language voice metadata while retaining language scoping."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

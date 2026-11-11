@@ -131,9 +131,7 @@ def _descriptor(
 def _language_matches(descriptor: VoiceDescriptor, language: str | None) -> bool:
     if language is None:
         return True
-    return any(
-        language_tags_match(language, item) for item in descriptor.languages
-    )
+    return any(language_tags_match(language, item) for item in descriptor.languages)
 
 
 def _target_descriptors(target: Any) -> list[VoiceDescriptor]:

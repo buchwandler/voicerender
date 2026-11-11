@@ -1,0 +1,36 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.2.10
+git_base_ref: v0.2.9
+git_base_sha: e9d4d179d03c7cdb048a80682c1acb82b9282b1b
+git_head_ref: HEAD
+git_head_sha: 4828dadb8361678818718635c4765d64eb185a27
+git_range: e9d4d179d03c7cdb048a80682c1acb82b9282b1b..4828dadb8361678818718635c4765d64eb185a27
+commit_count: 1
+rows:
+  - sha: 4828dadb8361678818718635c4765d64eb185a27
+    source_ref: git:4828dadb8361678818718635c4765d64eb185a27
+    short_sha: 4828dad
+    changed_paths:
+      - tests/test_voice_descriptors.py
+      - voicerender/voices_api.py
+    stats:
+      files_changed: 2
+      insertions: 50
+      deletions: 3
+    inspected: true
+    inspected_paths:
+      - tests/test_voice_descriptors.py
+      - voicerender/voices_api.py
+    observed_behavior:
+      Voice discovery now matches regional requests to compatible base-language
+      voice metadata while retaining language scoping.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: Fix regional voice language filtering
+    target_entry_id: entry-0001
+    notes: ""
