@@ -1,0 +1,1176 @@
+ README.md                            |   6 +-
+ docs/renderprofile.md                |   8 +--
+ pyproject.toml                       |   1 -
+ tests/test_audio_artifact_imports.py |  37 ++++++++++++
+ tests/test_audio_boundaries.py       | 107 -----------------------------------
+ tests/test_bundle_inspect.py         |   4 +-
+ tests/test_document_contract.py      |   4 +-
+ tests/test_profile_roles_cli.py      |   6 +-
+ tests/test_render_book.py            |   6 +-
+ tests/test_renderer.py               |  70 ++++++++++++++++-------
+ tests/test_renderplan_render.py      |  62 ++++++++++----------
+ voicerender/audio_artifacts.py       |   1 +
+ voicerender/audio_boundaries.py      |  93 ------------------------------
+ voicerender/bundle_render_inspect.py |  10 ++--
+ voicerender/cli.py                   |   7 +--
+ voicerender/render.py                |  45 ++++-----------
+ voicerender/renderplan_render.py     |  91 +++++++++++------------------
+ 17 files changed, 186 insertions(+), 372 deletions(-)
+
+diff --git a/README.md b/README.md
+index 7489916..96a69ae 100644
+--- a/README.md
++++ b/README.md
+@@ -215,11 +215,11 @@ voicerender profile show printer-cast.renderprofile.toml
+ voicerender profile validate printer-cast.renderprofile.toml
+ ```
+
+-The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes normalized speech artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
++The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes raw synthesis artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+
+ ### Speech artifacts and pause policy
+
+-VoiceRender applies engine-neutral, trailing-only silence normalization before it writes a speech WAV or caches it. Leading samples are preserved and all-silent audio remains unchanged. This keeps the speech artifact tight; it does not insert the profile's policy pauses. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for downstream composition after normalized speech. With `mode = "none"`, no policy pause is inserted. `profile show` reports the mode, manual durations, and this composition boundary. Boundary policy is included in artifact identity, so output produced under a missing or different policy is treated as stale rather than silently reused; re-render with `--force` or reset with `--reset-stale`.
++VoiceRender persists the complete validated waveform returned by the selected synthesis engine. It does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, insert silence, or normalize pause boundaries. Speech-boundary conditioning and explicit pause realization belong to downstream AudioCompose. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for AudioCompose to realize; with `mode = "none"`, no policy pause is inserted. `profile show` reports the pause policy separately from VoiceRender's raw synthesis artifacts. Artifacts created under the former trailing-silence policy are stale and require a one-time re-render with `--force` or `--reset-stale`; removed samples cannot be recovered. Future silence-detector changes do not require synthesis again.
+
+ ## ONNX Runtime provider policy
+
+@@ -604,7 +604,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
+ - **No implicit model downloads:** install SDKs and assets through each engine's supported process.
+ - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
+ - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
+-- **Speech artifact boundaries:** VoiceRender trims trailing silence before caching and writing each speech WAV; leading samples and all-silent input are preserved, and profile pauses remain a separate composition policy.
++- **Raw speech artifacts:** VoiceRender persists the complete validated synthesis waveform without boundary detection, silence removal, or pause realization; AudioCompose owns downstream speech-boundary conditioning and explicit pauses.
+ - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
+
+ ## Tests
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 66ade14..4e62d49 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -144,13 +144,13 @@ voicerender profile bind printer-cast.renderprofile.toml guest \
+
+ Kitten remains on its historical eSpeak-only path when no lexicon sources are configured. Request-local IPA spans, local files, named sources, contextual heteronym rules, and eSpeak fallback are reported in effective precedence by `profile show`/`inspect` and preflight. Local source identity uses content and logical SHA-256 values rather than filesystem paths; the ordered named asset IDs, versions, and digests are also part of the synthesis identity. Moving an unchanged local file does not change that source identity, while changing its content does. Offline profiles require their selected named lexicons to be installed.
+
+-## Speech artifact boundaries and pause policy
++## Speech artifacts and pause policy
+
+-VoiceRender applies engine-neutral, trailing-only silence normalization before persisting synthesized speech WAVs or cache entries. Leading samples are preserved, and an all-silent waveform remains unchanged. This produces speech-tight artifacts; normalization does not trim leading samples and does not insert profile pauses.
++VoiceRender persists the complete validated waveform returned by the selected synthesis engine. It does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, insert silence, or normalize pause boundaries. Speech-boundary conditioning and explicit pause realization belong to downstream AudioCompose.
+
+-`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for downstream composition after speech-tail normalization. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports the mode and manual durations, then states that policy pauses are composed after normalized speech or not inserted.
++`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for AudioCompose to realize after synthesis. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports pause durations separately from the raw synthesis artifacts.
+
+-The boundary policy is part of cache and render identity. Existing output with a missing or different policy is stale and is not silently reused; RenderPlan rendering reports `output.stale_audio_policy` unless the caller re-renders with `--force` or resets it with `--reset-stale`.
++VoiceRender artifacts produced under the former trailing-silence policy are stale under the raw audio artifact generation and must be rendered again once. Removed samples cannot be recovered, so old output is never upgraded by changing metadata. RenderPlan rendering reports `output.stale_audio_artifact` unless the caller re-renders with `--force` or resets the stale output with `--reset-stale`. Future silence-detector changes do not require re-synthesis.
+
+ ## UtterPlan bundle projection
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 74812e4..dec9424 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -13,7 +13,6 @@ authors = [{name = "buchwandler"}]
+ keywords = ["text-to-speech", "tts", "speech", "voice-cloning", "audio"]
+ dependencies = [
+   "numpy>=1.23",
+-  "audiosig>=0.1.8,<0.2",
+   "soundfile>=0.12",
+   "tomlkit>=0.13",
+   "tomli>=2; python_version < '3.11'",
+diff --git a/tests/test_audio_artifact_imports.py b/tests/test_audio_artifact_imports.py
+new file mode 100644
+index 0000000..c0df518
+--- /dev/null
++++ b/tests/test_audio_artifact_imports.py
+@@ -0,0 +1,37 @@
++from __future__ import annotations
++
++import subprocess
++import sys
++from pathlib import Path
++
++
++def test_voice_render_imports_without_audiosig() -> None:
++    package = Path(__file__).parents[1] / "voicerender"
++    assert not (package / "audio_boundaries.py").exists()
++    assert all(
++        "trim_trail" not in source.read_text(encoding="utf-8")
++        for source in package.rglob("*.py")
++    )
++
++    script = """
++import builtins
++
++original_import = builtins.__import__
++def reject_audiosig(name, globals=None, locals=None, fromlist=(), level=0):
++    if name == "audiosig" or name.startswith("audiosig."):
++        raise ModuleNotFoundError("audiosig is unavailable")
++    return original_import(name, globals, locals, fromlist, level)
++
++builtins.__import__ = reject_audiosig
++import voicerender
++import voicerender.bundle_render_inspect
++import voicerender.render
++import voicerender.renderplan_render
++"""
++    subprocess.run(
++        [sys.executable, "-c", script],
++        cwd=package.parent,
++        check=True,
++        capture_output=True,
++        text=True,
++    )
+diff --git a/tests/test_audio_boundaries.py b/tests/test_audio_boundaries.py
+deleted file mode 100644
+index f25f895..0000000
+--- a/tests/test_audio_boundaries.py
++++ /dev/null
+@@ -1,107 +0,0 @@
+-from __future__ import annotations
+-
+-import numpy as np
+-import pytest
+-
+-from voicerender.audio_boundaries import (
+-    BOUNDARY_POLICY_ID,
+-    BoundaryNormalization,
+-    clamp_word_timings_to_audio,
+-    trim_renderer_trailing_silence,
+-)
+-from voicerender.engines.base import SpeechWordTiming
+-
+-_SAMPLE_RATE = 1000
+-
+-
+-def _speech(frames: int) -> np.ndarray:
+-    samples = np.arange(frames, dtype=np.float32)
+-    return (0.2 * np.sin(2.0 * np.pi * 120.0 * samples / _SAMPLE_RATE)).astype(
+-        np.float32
+-    )
+-
+-
+-def test_trailing_zeros_are_removed_with_policy_statistics() -> None:
+-    active = _speech(1000)
+-    source = np.concatenate((active, np.zeros(500, dtype=np.float32)))
+-
+-    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
+-
+-    assert np.array_equal(normalized, active)
+-    assert stats == BoundaryNormalization(
+-        policy=BOUNDARY_POLICY_ID,
+-        input_frames=1500,
+-        output_frames=1000,
+-        removed_frames=500,
+-        removed_seconds=0.5,
+-    )
+-
+-
+-def test_audio_without_trailing_silence_is_unchanged() -> None:
+-    source = _speech(1000)
+-
+-    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
+-
+-    assert np.array_equal(normalized, source)
+-    assert stats.removed_frames == 0
+-    assert stats.output_frames == source.size
+-
+-
+-def test_leading_silence_is_preserved_while_tail_is_removed() -> None:
+-    leading = np.zeros(200, dtype=np.float32)
+-    active = _speech(1000)
+-    source = np.concatenate((leading, active, np.zeros(500, dtype=np.float32)))
+-
+-    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
+-
+-    assert normalized.size == leading.size + active.size
+-    assert np.array_equal(normalized[: leading.size], leading)
+-    assert np.array_equal(normalized[leading.size :], active)
+-    assert stats.removed_frames == 500
+-
+-
+-def test_all_silent_input_is_preserved_without_fabricating_audio() -> None:
+-    source = np.zeros(400, dtype=np.float32)
+-
+-    normalized, stats = trim_renderer_trailing_silence(source, sample_rate=_SAMPLE_RATE)
+-
+-    assert normalized.size == source.size
+-    assert np.array_equal(normalized, source)
+-    assert stats.removed_frames == 0
+-
+-
+-def test_result_is_mono_float32_and_repeated_calls_are_deterministic() -> None:
+-    source = np.concatenate((_speech(1000), np.zeros(500, dtype=np.float64)))
+-
+-    first, first_stats = trim_renderer_trailing_silence(
+-        source, sample_rate=_SAMPLE_RATE
+-    )
+-    second, second_stats = trim_renderer_trailing_silence(
+-        source, sample_rate=_SAMPLE_RATE
+-    )
+-
+-    assert first.dtype == np.float32
+-    assert first.ndim == 1
+-    assert np.array_equal(first, second)
+-    assert first_stats == second_stats
+-
+-
+-def test_clamp_word_timing_ends_without_shifting_starts_and_rejects_invalid_start() -> (
+-    None
+-):
+-    timing = SpeechWordTiming(
+-        text="word",
+-        char_start=0,
+-        char_end=4,
+-        start_sample=80,
+-        end_sample=110,
+-    )
+-
+-    clamped = clamp_word_timings_to_audio((timing,), frame_count=100)
+-
+-    assert clamped[0].start_sample == 80
+-    assert clamped[0].end_sample == 100
+-    with pytest.raises(ValueError, match="starts beyond"):
+-        clamp_word_timings_to_audio(
+-            (SpeechWordTiming("word", 0, 4, 100, 110),), frame_count=100
+-        )
+diff --git a/tests/test_bundle_inspect.py b/tests/test_bundle_inspect.py
+index 1d7ed76..01b417b 100644
+--- a/tests/test_bundle_inspect.py
++++ b/tests/test_bundle_inspect.py
+@@ -22,7 +22,7 @@ from renderplan import (
+ )
+
+ from voicerender import cli
+-from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
++from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+ from voicerender.bundle_contract import BundleContractError
+ from voicerender.bundle_inspect import inspect_bundle
+ from voicerender.bundle_render_inspect import inspect_bundle_render
+@@ -464,7 +464,7 @@ def test_bundle_render_inspection_is_selection_aware_and_read_only(
+     ).with_identity()
+     save_manifest(manifest, output / "render-manifest.toml")
+     (output / "render-diagnostics.json").write_text(
+-        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
++        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}), encoding="utf-8"
+     )
+     before = {
+         path.relative_to(tmp_path): path.read_bytes()
+diff --git a/tests/test_document_contract.py b/tests/test_document_contract.py
+index a69c2d0..b8e6b66 100644
+--- a/tests/test_document_contract.py
++++ b/tests/test_document_contract.py
+@@ -193,7 +193,7 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
+     from renderplan import Producer, RenderManifest, SpeechArtifact, save_manifest
+
+     import voicerender.document as document_module
+-    from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
++    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+     from voicerender.storage import atomic_wav
+
+     root = _workspace(tmp_path / "story.ssmd-bundle")
+@@ -235,7 +235,7 @@ def test_document_preflight_failure_reports_verified_partial_manifest_artifacts(
+         json.dumps(
+             {
+                 "schema": "voicerender.render-diagnostics.v1",
+-                "audio_boundary_policy": BOUNDARY_POLICY_ID,
++                "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+             }
+         ),
+         encoding="utf-8",
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 154a4ed..485c126 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -530,7 +530,7 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+     assert "RenderProfile " in show_output
+     assert "Planning:" in show_output
+     assert "Pauses\n  mode: none" in show_output
+-    assert "speech artifact tails: trimmed" in show_output
++    assert "speech artifact audio: complete raw synthesis waveform" in show_output
+     assert "no policy pause is inserted" in show_output
+     assert "short sentence: off (implicit)" in show_output
+     assert "short sentence: off (explicit)" in show_output
+@@ -646,5 +646,5 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
+     assert "  sentence: 500" in output
+     assert "  paragraph: 800" in output
+     assert "  parenthetical: 180" in output
+-    assert "speech artifact tails: trimmed" in output
+-    assert "configured pause is inserted after normalized speech" in output
++    assert "speech artifact audio: complete raw synthesis waveform" in output
++    assert "AudioCompose realizes pauses after raw speech" in output
+diff --git a/tests/test_render_book.py b/tests/test_render_book.py
+index d67ee37..1115228 100644
+--- a/tests/test_render_book.py
++++ b/tests/test_render_book.py
+@@ -42,7 +42,7 @@ from voicerender import (
+     BookRenderResult,
+     ChapterRenderOutcome,
+ )
+-from voicerender.audio_boundaries import BOUNDARY_POLICY_ID
++from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+ from voicerender.book import render_book
+ from voicerender.book_contract import load_renderplan_set
+ from voicerender.bundle_render_inspect import inspect_bundle_render
+@@ -388,7 +388,7 @@ def _install_fake_execution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+         diagnostics = {
+             "schema": "voicerender.render-diagnostics.v1",
+             "render_plan_id": plan.plan_id or plan.computed_id(),
+-            "audio_boundary_policy": BOUNDARY_POLICY_ID,
++            "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+         }
+         if pending_composition:
+             diagnostics.update(
+@@ -496,7 +496,7 @@ def test_bundle_render_inspection_selects_book_chapter_and_speech(
+     ).with_identity()
+     save_manifest(manifest, output / RENDER_MANIFEST_FILENAME)
+     (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
+-        json.dumps({"audio_boundary_policy": BOUNDARY_POLICY_ID}), encoding="utf-8"
++        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}), encoding="utf-8"
+     )
+
+     one_speech = inspect_bundle_render(
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+index c6e51f6..1410c2f 100644
+--- a/tests/test_renderer.py
++++ b/tests/test_renderer.py
+@@ -35,6 +35,7 @@ class FakeEngine:
+         self.fail_once_for = None
+
+         self.audio = np.full(160, 0.1, dtype=np.float32)
++        self.sample_rate = 16000
+         self.word_timings = ()
+
+     def version(self):
+@@ -56,7 +57,7 @@ class FakeEngine:
+                     raise RuntimeError("injected interruption")
+                 return SynthesisOutput(
+                     audio=owner.audio,
+-                    sample_rate=16000,
++                    sample_rate=owner.sample_rate,
+                     word_timings=owner.word_timings,
+                 )
+
+@@ -159,13 +160,16 @@ def test_corrupt_cache_is_not_reused(tmp_path, mock_engine):
+     assert second.rendered_count == 1 and second.reused_count == 0
+
+
+-def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
++def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
+     tmp_path, mock_engine
+ ):
+-    from voicerender.render import _identity
++    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
++    from voicerender.errors import EngineBackendError
++    from voicerender.render import _CACHE_SCHEMA, RENDER_ALGORITHM, _identity
+
++    mock_engine.sample_rate = 24_000
+     mock_engine.audio = np.concatenate(
+-        (np.full(16_000, 0.1, dtype=np.float32), np.zeros(6_400, dtype=np.float32))
++        (np.full(24_000, 0.1, dtype=np.float32), np.zeros(9_600, dtype=np.float32))
+     )
+     mock_engine.word_timings = (
+         {
+@@ -173,11 +177,11 @@ def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
+             "char_start": 0,
+             "char_end": 6,
+             "start_sample": 100,
+-            "end_sample": 17_000,
++            "end_sample": 30_000,
+         },
+     )
+     cache = tmp_path / "legacy-cache"
+-    output = tmp_path / "legacy-boundary"
++    output = tmp_path / "legacy-raw"
+     speech = segments()[:1]
+     legacy_profile = profile()
+
+@@ -188,19 +192,25 @@ def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
+         cache_dir=cache,
+     )
+     assert result.rendered_count == 1
+-    entry = read_manifest(output)["segments"][0]
+-    assert entry["wav"]["frames"] == 16_000
+-    assert entry["audio_boundary"]["removed_frames"] == 6_400
++    manifest = read_manifest(output)
++    entry = manifest["segments"][0]
++    assert manifest["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
++    assert entry["wav"]["frames"] == 33_600
++    assert "audio_boundary" not in entry
+     assert entry["timings"][0]["start_sample"] == 100
+-    assert entry["timings"][0]["end_sample"] == 16_000
++    assert entry["timings"][0]["end_sample"] == 30_000
++    with sf.SoundFile(output / entry["path"]) as file:
++        assert file.frames == 33_600
+
+     identity = _identity(legacy_profile.roles["narrator"], engine_version="1.0")
+-    assert identity["algorithm"] == "voicerender.batch.v2"
+-    assert identity["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    assert RENDER_ALGORITHM == "voicerender.batch.v3"
++    assert identity["algorithm"] == RENDER_ALGORITHM
++    assert identity["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+     cache_meta = next(cache.glob("*.json"))
+     cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
+-    assert cache_data["schema"] == "voicerender.batch-cache.v2"
+-    assert cache_data["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    assert cache_data["schema"] == _CACHE_SCHEMA == "voicerender.batch-cache.v3"
++    assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
++    assert "audio_boundary" not in cache_data
+
+     reused = render(
+         speech,
+@@ -209,15 +219,13 @@ def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
+         cache_dir=cache,
+     )
+     assert reused.reused_count == 1
+-    assert (
+-        read_manifest(tmp_path / "legacy-cache-reuse")["segments"][0]["audio_boundary"][
+-            "output_frames"
+-        ]
+-        == 16_000
+-    )
++    reused_entry = read_manifest(tmp_path / "legacy-cache-reuse")["segments"][0]
++    assert reused_entry["wav"]["frames"] == 33_600
+     assert len(mock_engine.calls) == 1
+
+-    cache_data["schema"] = "voicerender.batch-cache.v1"
++    cache_data["schema"] = "voicerender.batch-cache.v2"
++    cache_data.pop("audio_artifact_policy")
++    cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
+     cache_meta.write_text(json.dumps(cache_data), encoding="utf-8")
+     regenerated = render(
+         speech,
+@@ -226,8 +234,28 @@ def test_legacy_render_trims_tail_clamps_timings_and_invalidates_old_cache(
+         cache_dir=cache,
+     )
+     assert regenerated.rendered_count == 1
++    assert read_manifest(tmp_path / "legacy-old-cache")["segments"][0]["wav"]["frames"] == 33_600
+     assert len(mock_engine.calls) == 2
+
++    mock_engine.word_timings = (
++        {
++            "text": "First.",
++            "char_start": 0,
++            "char_end": 6,
++            "start_sample": 100,
++            "end_sample": 33_601,
++        },
++    )
++    with pytest.raises(EngineBackendError, match="outside the rendered audio"):
++        render(
++            speech,
++            profile=legacy_profile,
++            output_dir=tmp_path / "invalid-timing",
++            cache_dir=cache,
++            force=True,
++        )
++
++
+
+ def test_force_disables_cache(tmp_path, mock_engine):
+     out = tmp_path / "o"
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 707de7a..9a2325c 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -571,84 +571,84 @@ def test_verified_cache_reuse_materializes_numbered_wav_and_corruption_regenerat
+     assert wav_info(tmp_path / "third" / "000001.wav")["frames"] > 0
+
+
+-def test_renderplan_normalizes_audio_before_cache_and_output_and_rejects_old_cache(
++def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
++    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
++
+     adapter = _install(monkeypatch)
+     adapter.metadata = {"short_sentence_mode": "wrap"}
+     adapter.audio = [0.2] * 24_000 + [0.0] * 9_600
+     plan = _plan("speech with renderer tail")
+     report = _report(adapter, plan, tmp_path)
+-    cache = tmp_path / "boundary-cache"
++    cache = tmp_path / "raw-cache"
+
+     first = render_renderplan(
+         plan,
+         preflight=report,
+-        output_dir=tmp_path / "boundary-first",
++        output_dir=tmp_path / "raw-first",
+         cache_dir=cache,
+     )
+     assert not first.failed
+     assert first.rendered_count == 1
+-    assert first.manifest.speech[0].frames == 24_000
+-    assert wav_info(tmp_path / "boundary-first" / "000001.wav")["frames"] == 24_000
+-    assert wav_info(next(cache.glob("*.wav")))["frames"] == 24_000
++    assert first.manifest.speech[0].frames == 33_600
++    assert wav_info(tmp_path / "raw-first" / "000001.wav")["frames"] == 33_600
++    assert wav_info(next(cache.glob("*.wav")))["frames"] == 33_600
+     fingerprint = first.execution_fingerprint[0]
+-    assert fingerprint["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
+-    assert fingerprint["audio_boundary"]["input_frames"] == 33_600
+-    assert fingerprint["audio_boundary"]["removed_frames"] == 9_600
++    assert fingerprint["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
++    assert "audio_boundary" not in fingerprint
+     assert fingerprint["render_result"] == {"short_sentence_mode": "wrap"}
+     diagnostics = json.loads(
+-        (tmp_path / "boundary-first" / RENDER_DIAGNOSTICS_FILENAME).read_text(
++        (tmp_path / "raw-first" / RENDER_DIAGNOSTICS_FILENAME).read_text(
+             encoding="utf-8"
+         )
+     )
+-    assert diagnostics["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
+-    assert (
+-        diagnostics["audio_boundary"][first.manifest.speech[0].segment_id][
+-            "output_frames"
+-        ]
+-        == 24_000
+-    )
++    assert diagnostics["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
++    assert "audio_boundary" not in diagnostics
+     assert diagnostics["render_results"][first.manifest.speech[0].segment_id] == {
+         "short_sentence_mode": "wrap"
+     }
+
+     cache_sidecar = next(cache.glob("*.json"))
+     cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
+-    assert cache_data["audio_boundary_policy"] == "voicerender.trailing-silence.v1"
++    assert cache_data["schema"] == "voicerender.renderplan-cache.v3"
++    assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
++    assert "audio_boundary" not in cache_data
+     assert cache_data["render_result"] == {"short_sentence_mode": "wrap"}
+-    assert cache_data["audio_boundary"]["output_frames"] == 24_000
+     reused = render_renderplan(
+         plan,
+         preflight=report,
+-        output_dir=tmp_path / "boundary-reused",
++        output_dir=tmp_path / "raw-reused",
+         cache_dir=cache,
+     )
+     assert reused.reused_count == 1
+-    assert reused.execution_fingerprint[0]["audio_boundary"]["removed_frames"] == 9_600
++    assert "audio_boundary" not in reused.execution_fingerprint[0]
+     assert reused.execution_fingerprint[0]["render_result"] == {
+         "short_sentence_mode": "wrap"
+     }
+-    assert wav_info(tmp_path / "boundary-reused" / "000001.wav")["frames"] == 24_000
++    assert wav_info(tmp_path / "raw-reused" / "000001.wav")["frames"] == 33_600
+
+-    cache_data["schema"] = "voicerender.renderplan-cache.v1"
++    cache_data["schema"] = "voicerender.renderplan-cache.v2"
++    cache_data.pop("audio_artifact_policy")
++    cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
+     cache_sidecar.write_text(json.dumps(cache_data), encoding="utf-8")
+     old_cache = render_renderplan(
+         plan,
+         preflight=report,
+-        output_dir=tmp_path / "boundary-old-cache",
++        output_dir=tmp_path / "raw-old-cache",
+         cache_dir=cache,
+     )
+     assert old_cache.rendered_count == 1
++    assert wav_info(tmp_path / "raw-old-cache" / "000001.wav")["frames"] == 33_600
+     assert adapter.synthesized_texts == [
+         "speech with renderer tail",
+         "speech with renderer tail",
+     ]
+
+
+-@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v0"])
++@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v1"])
+ @pytest.mark.parametrize("use_reset", [False, True])
+-def test_stale_audio_boundary_policy_requires_explicit_reset(
++def test_stale_audio_artifact_requires_explicit_reset(
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+     old_policy: str | None,
+@@ -667,9 +667,9 @@ def test_stale_audio_boundary_policy_requires_explicit_reset(
+     diagnostics_path = output / RENDER_DIAGNOSTICS_FILENAME
+     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+     if old_policy is None:
+-        diagnostics.pop("audio_boundary_policy")
++        diagnostics.pop("audio_artifact_policy")
+     else:
+-        diagnostics["audio_boundary_policy"] = old_policy
++        diagnostics["audio_artifact_policy"] = old_policy
+     diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+
+     if not use_reset:
+@@ -677,7 +677,7 @@ def test_stale_audio_boundary_policy_requires_explicit_reset(
+             render_renderplan(
+                 plan, preflight=report, output_dir=output, cache_dir=cache
+             )
+-        assert stale.value.code == "output.stale_audio_policy"
++        assert stale.value.code == "output.stale_audio_artifact"
+         assert "--force" in str(stale.value)
+
+     kwargs = {"reset_stale_output": True} if use_reset else {"force": True}
+@@ -690,8 +690,8 @@ def test_stale_audio_boundary_policy_requires_explicit_reset(
+     )
+     assert not refreshed.failed
+     updated_diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+-    assert updated_diagnostics["audio_boundary_policy"] == (
+-        "voicerender.trailing-silence.v1"
++    assert updated_diagnostics["audio_artifact_policy"] == (
++        "voicerender.raw-synthesis.v1"
+     )
+
+
+diff --git a/voicerender/audio_artifacts.py b/voicerender/audio_artifacts.py
+new file mode 100644
+index 0000000..b122424
+--- /dev/null
++++ b/voicerender/audio_artifacts.py
+@@ -0,0 +1 @@
++AUDIO_ARTIFACT_POLICY_ID = "voicerender.raw-synthesis.v1"
+diff --git a/voicerender/audio_boundaries.py b/voicerender/audio_boundaries.py
+deleted file mode 100644
+index e5680e9..0000000
+--- a/voicerender/audio_boundaries.py
++++ /dev/null
+@@ -1,93 +0,0 @@
+-"""VoiceRender-owned normalization of renderer-added audio boundaries."""
+-
+-from __future__ import annotations
+-
+-from collections.abc import Callable
+-from dataclasses import dataclass, replace
+-from importlib import import_module
+-from typing import Any, cast
+-
+-import numpy as np
+-
+-from .engines.base import SpeechWordTiming
+-
+-trim_trail = cast(
+-    Callable[..., np.ndarray],
+-    vars(import_module("audiosig.boundaries"))["trim_trail"],
+-)
+-
+-BOUNDARY_POLICY_ID = "voicerender.trailing-silence.v1"
+-
+-
+-@dataclass(frozen=True, slots=True)
+-class BoundaryNormalization:
+-    """Facts about trailing-silence normalization for one speech artifact."""
+-
+-    policy: str
+-    input_frames: int
+-    output_frames: int
+-    removed_frames: int
+-    removed_seconds: float
+-
+-
+-def trim_renderer_trailing_silence(
+-    audio: Any,
+-    *,
+-    sample_rate: int,
+-) -> tuple[np.ndarray, BoundaryNormalization]:
+-    """Remove detected renderer tail silence without changing the leading boundary.
+-
+-    The caller must pass audio that has already passed its engine adapter's
+-    rendered-speech validation. The returned array is mono float32.
+-    """
+-    if (
+-        isinstance(sample_rate, bool)
+-        or not isinstance(sample_rate, int)
+-        or sample_rate <= 0
+-    ):
+-        raise ValueError("sample_rate must be a positive integer")
+-
+-    source = np.asarray(audio, dtype=np.float32).reshape(-1)
+-    trimmed = np.asarray(
+-        trim_trail(source, sample_rate=sample_rate, trail_seconds=0.0),
+-        dtype=np.float32,
+-    ).reshape(-1)
+-    if trimmed.size > source.size:
+-        raise ValueError("trailing-silence normalization must not add audio frames")
+-
+-    removed = int(source.size - trimmed.size)
+-    return trimmed, BoundaryNormalization(
+-        policy=BOUNDARY_POLICY_ID,
+-        input_frames=int(source.size),
+-        output_frames=int(trimmed.size),
+-        removed_frames=removed,
+-        removed_seconds=removed / float(sample_rate),
+-    )
+-
+-
+-def clamp_word_timings_to_audio(
+-    timings: tuple[SpeechWordTiming, ...],
+-    frame_count: int,
+-) -> tuple[SpeechWordTiming, ...]:
+-    """Keep legacy word coordinates valid after trailing-only audio trimming.
+-
+-    Timing starts are never moved. A start outside the new audio boundary is
+-    an invariant failure; an end extending only into the removed tail is
+-    clamped to the final frame boundary.
+-    """
+-    if (
+-        isinstance(frame_count, bool)
+-        or not isinstance(frame_count, int)
+-        or frame_count <= 0
+-    ):
+-        raise ValueError("frame_count must be a positive integer")
+-
+-    normalized: list[SpeechWordTiming] = []
+-    for timing in timings:
+-        if timing.start_sample >= frame_count:
+-            raise ValueError("word timing starts beyond the trimmed audio boundary")
+-        if timing.end_sample > frame_count:
+-            normalized.append(replace(timing, end_sample=frame_count))
+-        else:
+-            normalized.append(timing)
+-    return tuple(normalized)
+diff --git a/voicerender/bundle_render_inspect.py b/voicerender/bundle_render_inspect.py
+index ddbb14c..58a1434 100644
+--- a/voicerender/bundle_render_inspect.py
++++ b/voicerender/bundle_render_inspect.py
+@@ -10,7 +10,7 @@ from typing import Any, Literal
+
+ from renderplan import RenderPlan, SpeechArtifact, SpeechItem, load_manifest
+
+-from .audio_boundaries import BOUNDARY_POLICY_ID
++from .audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+ from .book import (
+     RECHECK_PREFLIGHT_FILENAME,
+     BookRenderError,
+@@ -322,14 +322,14 @@ def _inspect_plan_output(
+             _reset_safety_detail(output_dir),
+         )
+
+-    if not _current_audio_policy(output_dir):
++    if not _current_audio_artifact_policy(output_dir):
+         return (
+             _uniform_occurrences(
+                 chapter_id,
+                 selected_items,
+                 output_dir,
+                 "stale",
+-                "render output uses a different or unknown audio-boundary policy",
++                "render output predates raw VoiceRender audio artifacts",
+             ),
+             True,
+             _reset_safety_detail(output_dir),
+@@ -422,7 +422,7 @@ def _uniform_occurrences(
+     )
+
+
+-def _current_audio_policy(output_dir: Path) -> bool:
++def _current_audio_artifact_policy(output_dir: Path) -> bool:
+     path = output_dir / RENDER_DIAGNOSTICS_FILENAME
+     if path.is_symlink() or not path.is_file():
+         return False
+@@ -432,7 +432,7 @@ def _current_audio_policy(output_dir: Path) -> bool:
+         return False
+     return (
+         isinstance(data, dict)
+-        and data.get("audio_boundary_policy") == BOUNDARY_POLICY_ID
++        and data.get("audio_artifact_policy") == AUDIO_ARTIFACT_POLICY_ID
+     )
+
+
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index dd44fed..b148eae 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -3014,13 +3014,12 @@ def main(argv: list[str] | None = None) -> int:
+                         ):
+                             if boundary in pauses:
+                                 print(f"  {boundary}: {pauses[boundary]}")
+-                        print("  speech artifact tails: trimmed")
++                        print("  speech artifact audio: complete raw synthesis waveform")
+                         print(
+-                            "  composition semantics: configured pause is inserted "
+-                            "after normalized speech"
++                            "  composition semantics: AudioCompose realizes pauses after raw speech"
+                         )
+                     else:
+-                        print("  speech artifact tails: trimmed")
++                        print("  speech artifact audio: complete raw synthesis waveform")
+                         print("  composition semantics: no policy pause is inserted")
+             elif args.profile_command == "reidentify":
+                 print(
+diff --git a/voicerender/render.py b/voicerender/render.py
+index 16c9cad..15aaabc 100644
+--- a/voicerender/render.py
++++ b/voicerender/render.py
+@@ -12,11 +12,7 @@ from pathlib import Path
+ from time import monotonic
+ from typing import Any
+
+-from .audio_boundaries import (
+-    BOUNDARY_POLICY_ID,
+-    clamp_word_timings_to_audio,
+-    trim_renderer_trailing_silence,
+-)
++from .audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+ from .engines import get_engine
+ from .engines.base import (
+     RenderedSpeech,
+@@ -39,9 +35,9 @@ from .progress import ProgressTracker
+ from .render_lock import exclusive_render_lock as _exclusive_run
+ from .storage import atomic_json, atomic_wav, digest, file_hash, verified_wav
+
+-RENDER_ALGORITHM = "voicerender.batch.v2"
++RENDER_ALGORITHM = "voicerender.batch.v3"
+
+-_CACHE_SCHEMA = "voicerender.batch-cache.v2"
++_CACHE_SCHEMA = "voicerender.batch-cache.v3"
+
+
+ def _identity(
+@@ -72,7 +68,7 @@ def _identity(
+             key: value for key, value in binding.options.items() if key != "offline"
+         },
+         "algorithm": algorithm,
+-        "audio_boundary_policy": BOUNDARY_POLICY_ID,
++        "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+     }
+
+
+@@ -126,18 +122,11 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
+         not isinstance(data, dict)
+         or data.get("key") != key
+         or data.get("schema") != _CACHE_SCHEMA
+-        or data.get("audio_boundary_policy") != BOUNDARY_POLICY_ID
++        or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
+     ):
+         return None
+     info = data.get("wav")
+-    boundary = data.get("audio_boundary")
+-    if (
+-        not isinstance(info, dict)
+-        or not verified_wav(wav, info)
+-        or not isinstance(boundary, dict)
+-        or boundary.get("policy") != BOUNDARY_POLICY_ID
+-        or boundary.get("output_frames") != info.get("frames")
+-    ):
++    if not isinstance(info, dict) or not verified_wav(wav, info):
+         return None
+     return wav, data
+
+@@ -232,13 +221,13 @@ def render(
+                 "wav": None,
+                 "timings": [],
+                 "timing_source": "absent",
+-                "audio_boundary": None,
+                 "error": None,
+             }
+         )
+     document: dict[str, Any] = {
+         "schema": SCHEMA_MANIFEST,
+         "source_plan_id": source_plan_id,
++        "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+         "profile_name": profile.name,
+         "effective_profile_id": profile_id,
+         "selected_count": len(chosen),
+@@ -345,7 +334,6 @@ def render(
+                             wav=old["wav"],
+                             timings=old.get("timings", []),
+                             timing_source=old.get("timing_source", "absent"),
+-                            audio_boundary=old.get("audio_boundary"),
+                         )
+                         reused += 1
+                     else:
+@@ -358,7 +346,6 @@ def render(
+                                 wav=sidecar["wav"],
+                                 timings=sidecar.get("timings", []),
+                                 timing_source=sidecar.get("timing_source", "absent"),
+-                                audio_boundary=sidecar.get("audio_boundary"),
+                             )
+                             reused += 1
+                         else:
+@@ -424,30 +411,21 @@ def render(
+                                 engine=binding.engine,
+                                 target_id=binding.target_id,
+                             )
+-                            normalized_audio, boundary = trim_renderer_trailing_silence(
+-                                validated_result.audio,
+-                                sample_rate=validated_result.sample_rate,
+-                            )
+-                            boundary_info = asdict(boundary)
+-                            timings_with_types = clamp_word_timings_to_audio(
+-                                validated_result.word_timings, boundary.output_frames
+-                            )
+                             timings_with_types = validate_word_timings(
+                                 text=seg.text,
+-                                frame_count=boundary.output_frames,
+-                                timings=timings_with_types,
++                                frame_count=len(validated_result.audio),
++                                timings=validated_result.word_timings,
+                             )
+                             timings = [asdict(item) for item in timings_with_types]
+                             info = atomic_wav(
+                                 cache / f"{key}.wav",
+-                                normalized_audio,
++                                validated_result.audio,
+                                 validated_result.sample_rate,
+                             )
+                             sidecar = {
+                                 "schema": _CACHE_SCHEMA,
+                                 "key": key,
+-                                "audio_boundary_policy": BOUNDARY_POLICY_ID,
+-                                "audio_boundary": boundary_info,
++                                "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+                                 "wav": info,
+                                 "timings": timings,
+                                 "timing_source": "provided" if timings else "absent",
+@@ -459,7 +437,6 @@ def render(
+                                 wav=info,
+                                 timings=timings,
+                                 timing_source=sidecar["timing_source"],
+-                                audio_boundary=boundary_info,
+                             )
+                             rendered += 1
+                 except RenderEventCallbackError:
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 2c9f8c8..9293586 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -8,7 +8,7 @@ import re
+ import shutil
+ import tempfile
+ from collections.abc import Callable, Collection, Mapping
+-from dataclasses import asdict, dataclass, replace
++from dataclasses import dataclass
+ from pathlib import Path
+ from time import monotonic, sleep
+ from typing import Any, Literal
+@@ -30,7 +30,7 @@ from renderplan import (
+     save_preflight,
+ )
+
+-from .audio_boundaries import BOUNDARY_POLICY_ID, trim_renderer_trailing_silence
++from .audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+ from .engines.base import EngineSelection, RenderedSpeech, SpeechRequest
+ from .engines.registry import get_adapter
+ from .error_diagnostics import (
+@@ -68,7 +68,7 @@ from .storage import atomic_json, atomic_wav, digest, verified_wav, wav_info
+
+ RENDER_MANIFEST_FILENAME = "render-manifest.toml"
+ RENDER_DIAGNOSTICS_FILENAME = "render-diagnostics.json"
+-_CACHE_SCHEMA = "voicerender.renderplan-cache.v2"
++_CACHE_SCHEMA = "voicerender.renderplan-cache.v3"
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -179,18 +179,16 @@ class _ExecutionContext:
+
+
+ @dataclass(frozen=True, slots=True)
+-class _NormalizedSynthesis:
++class _SynthesisResult:
+     speech: RenderedSpeech
+-    boundary_info: dict[str, Any]
+     render_result: dict[str, Any]
+     synthesis_seconds: float
+
+-
+ @dataclass(frozen=True, slots=True)
+ class _SpeechExecution:
+     session: Any | None
+     outcome: MeasurementOutcome | None
+-    synthesis: _NormalizedSynthesis | None
++    synthesis: _SynthesisResult | None
+     failure: _RenderFailure | None
+
+
+@@ -296,7 +294,7 @@ def _measure_prepared_speech(
+
+ def _synthesize_prepared_speech(
+     current: _PreparedSpeech, session: Any
+-) -> _NormalizedSynthesis:
++) -> _SynthesisResult:
+     synthesis_started = monotonic()
+     rendered_speech = session.synthesize(current.request)
+     synthesis_seconds = max(0.0, monotonic() - synthesis_started)
+@@ -304,17 +302,12 @@ def _synthesize_prepared_speech(
+         raise ArtifactError(
+             "Renderer returned an artifact for a different speech request"
+         )
+-    normalized_audio, boundary = trim_renderer_trailing_silence(
+-        rendered_speech.audio, sample_rate=rendered_speech.sample_rate
+-    )
+-    boundary_info = asdict(boundary)
+     render_result: dict[str, Any] = {}
+     resolved_mode = rendered_speech.metadata.get("short_sentence_mode")
+     if isinstance(resolved_mode, str):
+         render_result["short_sentence_mode"] = resolved_mode
+-    return _NormalizedSynthesis(
+-        replace(rendered_speech, audio=normalized_audio),
+-        boundary_info,
++    return _SynthesisResult(
++        rendered_speech,
+         render_result,
+         synthesis_seconds,
+     )
+@@ -461,8 +454,7 @@ def render_renderplan(
+     deferred_controls = list(context.deferred_controls)
+     diagnostics: dict[str, Any] = {
+         "schema": "voicerender.render-diagnostics.v1",
+-        "audio_boundary_policy": BOUNDARY_POLICY_ID,
+-        "audio_boundary": {},
++        "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+         "render_results": {},
+         "render_plan_id": parsed_plan.plan_id or parsed_plan.computed_id(),
+         "emphasis_policy": policy.value,
+@@ -524,17 +516,13 @@ def render_renderplan(
+                 previous_diagnostics = None
+             if (
+                 isinstance(previous_diagnostics, dict)
+-                and previous_diagnostics.get("audio_boundary_policy")
+-                == BOUNDARY_POLICY_ID
++                and previous_diagnostics.get("audio_artifact_policy")
++                == AUDIO_ARTIFACT_POLICY_ID
++                and isinstance(previous_diagnostics.get("render_results"), dict)
+             ):
+-                if isinstance(previous_diagnostics.get("audio_boundary"), dict):
+-                    diagnostics["audio_boundary"].update(
+-                        previous_diagnostics["audio_boundary"]
+-                    )
+-                if isinstance(previous_diagnostics.get("render_results"), dict):
+-                    diagnostics["render_results"].update(
+-                        previous_diagnostics["render_results"]
+-                    )
++                diagnostics["render_results"].update(
++                    previous_diagnostics["render_results"]
++                )
+         if stale_output_reset and reset_stale_output and had_preflight:
+             save_preflight(report, out / "preflight.toml")
+         atomic_json(out / RENDER_DIAGNOSTICS_FILENAME, diagnostics)
+@@ -646,15 +634,11 @@ def render_renderplan(
+                 try:
+                     cached = None if force else _read_cache(cache, current.cache_key)
+                     if cached is not None:
+-                        source, info, boundary_info, render_result = cached
++                        source, info, render_result = cached
+                         _copy_verified(source, target, info)
+                         reused += 1
+                         terminal_outcome = "reused"
+                         fingerprint["execution_status"] = "cache_reused"
+-                        fingerprint["audio_boundary"] = boundary_info
+-                        diagnostics["audio_boundary"][current.segment_id] = (
+-                            boundary_info
+-                        )
+                         if render_result:
+                             fingerprint["render_result"] = render_result
+                             diagnostics["render_results"][current.segment_id] = (
+@@ -702,20 +686,14 @@ def render_renderplan(
+                                 ),
+                             )
+                             break
+-                        normalized_synthesis = execution.synthesis
+-                        if normalized_synthesis is None:
++                        synthesis_result = execution.synthesis
++                        if synthesis_result is None:
+                             raise RuntimeError(
+                                 "speech execution completed without a synthesis result"
+                             )
+-                        synthesis_seconds = normalized_synthesis.synthesis_seconds
+-                        rendered_speech = normalized_synthesis.speech
+-                        normalized_audio = rendered_speech.audio
+-                        boundary_info = normalized_synthesis.boundary_info
+-                        fingerprint["audio_boundary"] = boundary_info
+-                        diagnostics["audio_boundary"][current.segment_id] = (
+-                            boundary_info
+-                        )
+-                        render_result = normalized_synthesis.render_result
++                        synthesis_seconds = synthesis_result.synthesis_seconds
++                        rendered_speech = synthesis_result.speech
++                        render_result = synthesis_result.render_result
+                         if render_result:
+                             fingerprint["render_result"] = render_result
+                             diagnostics["render_results"][current.segment_id] = (
+@@ -723,17 +701,16 @@ def render_renderplan(
+                             )
+                         info = atomic_wav(
+                             cache / f"{current.cache_key}.wav",
+-                            normalized_audio,
++                            rendered_speech.audio,
+                             rendered_speech.sample_rate,
+                         )
+                         atomic_json(
+                             cache / f"{current.cache_key}.json",
+                             {
+                                 "schema": _CACHE_SCHEMA,
+-                                "audio_boundary_policy": BOUNDARY_POLICY_ID,
++                                "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+                                 "key": current.cache_key,
+                                 "wav": info,
+-                                "audio_boundary": boundary_info,
+                                 "render_result": render_result,
+                             },
+                         )
+@@ -1204,15 +1181,15 @@ def _load_existing_artifacts(
+                 diagnostics_data = None
+             current_audio_policy = (
+                 isinstance(diagnostics_data, dict)
+-                and diagnostics_data.get("audio_boundary_policy") == BOUNDARY_POLICY_ID
++                and diagnostics_data.get("audio_artifact_policy") == AUDIO_ARTIFACT_POLICY_ID
+             )
+         if not current_audio_policy:
+             if not (force or reset_stale_output):
+                 raise ArtifactError(
+-                    "Existing render output uses an older audio-boundary policy. "
+-                    f"Current policy: {BOUNDARY_POLICY_ID}. "
++                    "Existing render output predates raw VoiceRender audio artifacts. "
++                    f"Current artifact policy: {AUDIO_ARTIFACT_POLICY_ID}. "
+                     "Re-render with --force or reset the stale output.",
+-                    code="output.stale_audio_policy",
++                    code="output.stale_audio_artifact",
+                 )
+             _reset_owned_artifacts(output_dir)
+             return {}, True
+@@ -1317,7 +1294,7 @@ def _prepare_speech(
+         synthesis_identity = dict(adapter.canonical_synthesis_identity(selection))
+         identity = {
+             "schema": _CACHE_SCHEMA,
+-            "audio_boundary_policy": BOUNDARY_POLICY_ID,
++            "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+             "segment_id": item.segment_id or item.computed_id(),
+             "engine": adapter.id,
+             "engine_version": adapter_version,
+@@ -1331,7 +1308,7 @@ def _prepare_speech(
+         }
+         execution_fingerprint = {
+             "voicerender_version": _voicerender_version(),
+-            "audio_boundary_policy": BOUNDARY_POLICY_ID,
++            "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+             "adapter_id": adapter.id,
+             "adapter_version": adapter_version,
+             "api_probe_signature": digest(api_probe),
+@@ -1382,7 +1359,7 @@ def _finalize_execution_fingerprint(fingerprint: dict[str, Any]) -> dict[str, An
+
+ def _read_cache(
+     cache_dir: Path, key: str
+-) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any]] | None:
++) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+     wav = cache_dir / f"{key}.wav"
+     sidecar = cache_dir / f"{key}.json"
+     try:
+@@ -1393,22 +1370,18 @@ def _read_cache(
+         not isinstance(data, dict)
+         or data.get("schema") != _CACHE_SCHEMA
+         or data.get("key") != key
+-        or data.get("audio_boundary_policy") != BOUNDARY_POLICY_ID
++        or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
+     ):
+         return None
+     info = data.get("wav")
+-    boundary = data.get("audio_boundary")
+     render_result = data.get("render_result", {})
+     if (
+         not isinstance(info, dict)
+         or not verified_wav(wav, info)
+-        or not isinstance(boundary, dict)
+-        or boundary.get("policy") != BOUNDARY_POLICY_ID
+-        or boundary.get("output_frames") != info.get("frames")
+         or not isinstance(render_result, dict)
+     ):
+         return None
+-    return wav, info, boundary, render_result
++    return wav, info, render_result
+
+
+ def _replace_file(source: Path, target: Path) -> None:

@@ -1,0 +1,28 @@
+rows:
+  - sha: 805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_audio_artifact_imports.py
+      - tests/test_audio_boundaries.py
+      - tests/test_bundle_inspect.py
+      - tests/test_document_contract.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_render.py
+      - voicerender/audio_artifacts.py
+      - voicerender/audio_boundaries.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/cli.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+    observed_behavior: "Renderer and RenderPlan now persist the complete validated synthesis waveform without trimming trailing silence. Cache identity uses a raw-synthesis artifact policy, invalidating output from the former boundary-trimming policy. Documentation assigns speech-boundary conditioning and explicit pause realization to AudioCompose; tests verify raw waveform persistence and cache invalidation."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

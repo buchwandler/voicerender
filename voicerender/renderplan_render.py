@@ -184,6 +184,7 @@ class _SynthesisResult:
     render_result: dict[str, Any]
     synthesis_seconds: float
 
+
 @dataclass(frozen=True, slots=True)
 class _SpeechExecution:
     session: Any | None
@@ -1181,7 +1182,8 @@ def _load_existing_artifacts(
                 diagnostics_data = None
             current_audio_policy = (
                 isinstance(diagnostics_data, dict)
-                and diagnostics_data.get("audio_artifact_policy") == AUDIO_ARTIFACT_POLICY_ID
+                and diagnostics_data.get("audio_artifact_policy")
+                == AUDIO_ARTIFACT_POLICY_ID
             )
         if not current_audio_policy:
             if not (force or reset_stale_output):

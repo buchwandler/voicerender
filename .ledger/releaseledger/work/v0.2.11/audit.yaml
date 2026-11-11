@@ -1,0 +1,45 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.2.11
+git_base_ref: v0.2.10
+git_base_sha: bfbcf0cd7f0e6e1d514ed87bf5745fa7a2ef9b48
+git_head_ref: HEAD
+git_head_sha: 805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+git_range: bfbcf0cd7f0e6e1d514ed87bf5745fa7a2ef9b48..805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+commit_count: 1
+rows:
+  - sha: 805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+    source_ref: git:805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+    short_sha: 805445a
+    changed_paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_audio_artifact_imports.py
+      - tests/test_audio_boundaries.py
+      - tests/test_bundle_inspect.py
+      - tests/test_document_contract.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_render_book.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_render.py
+      - voicerender/audio_artifacts.py
+      - voicerender/audio_boundaries.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/cli.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 17
+      insertions: 186
+      deletions: 372
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: remove audio boundaries modification"

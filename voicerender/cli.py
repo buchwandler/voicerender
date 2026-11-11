@@ -3014,12 +3014,16 @@ def main(argv: list[str] | None = None) -> int:
                         ):
                             if boundary in pauses:
                                 print(f"  {boundary}: {pauses[boundary]}")
-                        print("  speech artifact audio: complete raw synthesis waveform")
+                        print(
+                            "  speech artifact audio: complete raw synthesis waveform"
+                        )
                         print(
                             "  composition semantics: AudioCompose realizes pauses after raw speech"
                         )
                     else:
-                        print("  speech artifact audio: complete raw synthesis waveform")
+                        print(
+                            "  speech artifact audio: complete raw synthesis waveform"
+                        )
                         print("  composition semantics: no policy pause is inserted")
             elif args.profile_command == "reidentify":
                 print(

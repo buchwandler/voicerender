@@ -496,7 +496,8 @@ def test_bundle_render_inspection_selects_book_chapter_and_speech(
     ).with_identity()
     save_manifest(manifest, output / RENDER_MANIFEST_FILENAME)
     (output / RENDER_DIAGNOSTICS_FILENAME).write_text(
-        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}), encoding="utf-8"
+        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}),
+        encoding="utf-8",
     )
 
     one_speech = inspect_bundle_render(

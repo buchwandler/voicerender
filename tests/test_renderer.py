@@ -234,7 +234,10 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
         cache_dir=cache,
     )
     assert regenerated.rendered_count == 1
-    assert read_manifest(tmp_path / "legacy-old-cache")["segments"][0]["wav"]["frames"] == 33_600
+    assert (
+        read_manifest(tmp_path / "legacy-old-cache")["segments"][0]["wav"]["frames"]
+        == 33_600
+    )
     assert len(mock_engine.calls) == 2
 
     mock_engine.word_timings = (
@@ -254,7 +257,6 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
             cache_dir=cache,
             force=True,
         )
-
 
 
 def test_force_disables_cache(tmp_path, mock_engine):

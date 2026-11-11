@@ -464,7 +464,8 @@ def test_bundle_render_inspection_is_selection_aware_and_read_only(
     ).with_identity()
     save_manifest(manifest, output / "render-manifest.toml")
     (output / "render-diagnostics.json").write_text(
-        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}), encoding="utf-8"
+        json.dumps({"audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID}),
+        encoding="utf-8",
     )
     before = {
         path.relative_to(tmp_path): path.read_bytes()

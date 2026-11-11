@@ -1,0 +1,32 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.2.11
+git_base_ref: bfbcf0cd7f0e6e1d514ed87bf5745fa7a2ef9b48
+git_base_sha: bfbcf0cd7f0e6e1d514ed87bf5745fa7a2ef9b48
+git_head_ref: 805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+git_head_sha: 805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+include_merges: nontrivial
+entries:
+  - kind: changed
+    summary: "Changed VoiceRender to preserve full synthesis waveforms and delegate boundary conditioning and pauses to AudioCompose"
+    status: accepted
+    source_refs:
+      - git:805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+    paths:
+      - README.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - voicerender/audio_artifacts.py
+      - voicerender/audio_boundaries.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/cli.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+    sources:
+      - git:805445a6d246ce5d06a43eb2b2d099d13fed0ac9
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
