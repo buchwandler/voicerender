@@ -34,3 +34,23 @@ def test_atomic_wav_remains_strict_for_out_of_range_audio(tmp_path) -> None:
         atomic_wav(path, np.array([0.0, 1.01], dtype=np.float32), 24000)
 
     assert not path.exists()
+
+
+def test_atomic_wav_deletes_artifact_when_persisted_frame_count_changes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voicerender import storage
+
+    path = tmp_path / "short-write.wav"
+    original_write = storage.sf.write
+
+    def write_short(filename, audio, sample_rate, **kwargs):
+        original_write(filename, audio[:-1], sample_rate, **kwargs)
+
+    monkeypatch.setattr(storage.sf, "write", write_short)
+    with pytest.raises(ArtifactError) as caught:
+        atomic_wav(path, np.ones(10, dtype=np.float32), 24000)
+
+    assert caught.value.code == "audio.persisted_frame_count_mismatch"
+    assert not path.exists()
+    assert not list(tmp_path.glob(".tmp-*.wav"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import logging
 import math
@@ -15,6 +16,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from ..audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
 from ..errors import (
     EmptySpeechTextError,
     EngineBackendError,
@@ -50,7 +54,6 @@ from .base import (
     SpeechRequest,
     SpeechToken,
     SpeechWordTiming,
-    adapt_pcm_full_scale,
     distribution_version,
     validate_rendered_speech,
     voice_level_metadata,
@@ -63,7 +66,7 @@ from .registry import normalize_engine_id
 logger = logging.getLogger(__name__)
 
 
-_PYKOKORO_MINIMUM_VERSION = "0.10.11"
+_PYKOKORO_MINIMUM_VERSION = "0.10.13"
 PYKOKORO_REQUIRED = f">={_PYKOKORO_MINIMUM_VERSION},<0.11"
 PYKOKORO_REQUEST_API_VERSION = 2
 _DISCOVERY_PREFERENCES = {"auto", "github", "huggingface", "upstream"}
@@ -107,6 +110,34 @@ def _pykokoro_module() -> tuple[Any, str, str | None]:
         ) from exc
     module_version = str(getattr(pykokoro, "__version__", "unknown"))
     return pykokoro, module_version, _package_metadata()
+
+
+def _supports_raw_audio_output_policy(module: Any) -> bool:
+    policy_type = getattr(module, "AudioOutputPolicy", None)
+    raw_policy = getattr(policy_type, "RAW", None)
+    config_type = getattr(module, "SynthesisConfig", None)
+    if getattr(raw_policy, "value", None) != "raw" or config_type is None:
+        return False
+    parameters: Mapping[str, Any] = {}
+    try:
+        parameters = inspect.signature(config_type).parameters
+    except (TypeError, ValueError):
+        pass
+    return "audio_output_policy" in parameters or "audio_output_policy" in getattr(
+        config_type, "__annotations__", {}
+    )
+
+
+def _require_raw_audio_output_policy(module: Any, selection: EngineSelection) -> Any:
+    if not _supports_raw_audio_output_policy(module):
+        raise EngineBackendError(
+            "PyKokoro raw acoustic output policy is required by VoiceRender but is not "
+            "supported by the installed PyKokoro version.",
+            code="pykokoro.raw_output_policy_unsupported",
+            engine="kokoro",
+            target_id=selection.target_id,
+        )
+    return module.AudioOutputPolicy.RAW
 
 
 def _pykokoro_discovery() -> Any:
@@ -857,6 +888,15 @@ class PyKokoroEngineSession:
             maximum=measured_maximum,
             unit="model_tokens",
             source="pykokoro.measure_request",
+            details={
+                "preflight_detail": (
+                    f"audio policy: {AUDIO_ARTIFACT_POLICY_ID}; renderer output "
+                    "policy: raw; raw output capability: supported; "
+                    "effective short sentence mode: off; "
+                    "effective narration context: disabled by raw policy; "
+                    "generic trim: disabled; voice-level processing: disabled by raw policy"
+                )
+            },
         )
 
     def _reference_voice(
@@ -939,6 +979,8 @@ class PyKokoroEngineSession:
             raise
         except Exception as exc:
             raise _translate_pykokoro_error(exc, self._selection, request) from exc
+        source_audio = np.asarray(result.audio)
+        source_frames = int(source_audio.size)
 
         timings = tuple(
             SpeechWordTiming(
@@ -950,7 +992,6 @@ class PyKokoroEngineSession:
             )
             for item in result.word_timings
         )
-        adaptation = adapt_pcm_full_scale(result.audio, engine_label="PyKokoro")
         applications = tuple(getattr(result, "voice_level_applications", ()) or ())
         metadata: dict[str, Any] = {
             "language": result.language,
@@ -962,11 +1003,8 @@ class PyKokoroEngineSession:
                 if result.short_sentence_mode is not None
                 else "off"
             ),
-            "pcm_range": {
-                "policy": PCM_RANGE_POLICY,
-                "peak_before_clip": adaptation.peak_before_clip,
-                "clipped_samples": adaptation.clipped_samples,
-            },
+            "renderer_output_policy": "raw",
+            "pykokoro_returned_frames": source_frames,
             "voice_level": voice_level_metadata(
                 applications[0] if applications else None,
                 _normalize_voice_level(self._selection.options.get("voice_level"))[
@@ -983,20 +1021,48 @@ class PyKokoroEngineSession:
             metadata["trace"] = result.trace
         rendered = RenderedSpeech(
             id=result.id,
-            audio=adaptation.audio,
+            audio=source_audio,
             sample_rate=result.sample_rate,
-            warnings=tuple(result.diagnostics)
-            + ((adaptation.warning,) if adaptation.warning else ()),
+            warnings=tuple(result.diagnostics),
             word_timings=timings,
             metadata=metadata,
         )
-        return validate_rendered_speech(
+        validated = validate_rendered_speech(
             request,
             rendered,
             engine="kokoro",
             engine_version=distribution_version("pykokoro"),
             target_id=self._selection.target_id,
         )
+        adapted_frames = int(np.asarray(validated.audio).size)
+        if source_frames != adapted_frames:
+            raise EngineBackendError(
+                "VoiceRender adapter changed the PyKokoro frame count",
+                code="audio.frame_count_changed",
+                engine="kokoro",
+                target_id=self._selection.target_id,
+                request_id=request.id,
+                details={
+                    "source_frames": source_frames,
+                    "adapted_frames": adapted_frames,
+                    "stage": "engine_adapter",
+                },
+            )
+        peak = float(np.max(np.abs(validated.audio)))
+        if peak > 1.0:
+            raise EngineBackendError(
+                f"PyKokoro returned audio outside PCM16 full-scale range [-1, 1] (peak={peak:.6f})",
+                code="audio.sample_out_of_range",
+                engine="kokoro",
+                target_id=self._selection.target_id,
+                request_id=request.id,
+                details={"peak": peak, "stage": "engine_adapter"},
+            )
+        validated.metadata = {
+            **validated.metadata,
+            "voicerender_adapter_frames": adapted_frames,
+        }
+        return validated
 
 
 def _pykokoro_override(item: PronunciationSpan, module: Any) -> Any:
@@ -1086,6 +1152,7 @@ class PyKokoroEngineAdapter:
                 "supports_reference_voice": True,
                 "supports_voice_enrollment": True,
                 "supports_say_as": True,
+                "supports_audio_output_policy": True,
             }
             actual = {
                 name: (
@@ -1095,6 +1162,9 @@ class PyKokoroEngineAdapter:
                 )
                 for name in required
             }
+            actual["supports_audio_output_policy"] = _supports_raw_audio_output_policy(
+                pykokoro
+            )
             mismatches = {
                 name: {"expected": expected, "actual": actual[name]}
                 for name, expected in required.items()
@@ -1123,6 +1193,9 @@ class PyKokoroEngineAdapter:
                 error_type=type(exc).__name__,
                 error_message=str(exc),
             )
+        raw_output_unsupported = (
+            mismatches.get("supports_audio_output_policy", {}).get("actual") is False
+        )
         if mismatches:
             return replace(
                 probe,
@@ -1130,6 +1203,12 @@ class PyKokoroEngineAdapter:
                 status="api_incompatible",
                 failed_stage="request_capabilities",
                 failed_symbol="request_api_contract",
+                error_message=(
+                    "PyKokoro raw acoustic output policy is required by VoiceRender "
+                    "but is unsupported"
+                    if raw_output_unsupported
+                    else None
+                ),
                 details={**dict(probe.details), "capability_mismatches": mismatches},
             )
         return probe
@@ -2160,6 +2239,7 @@ class PyKokoroEngineAdapter:
     ) -> AbstractContextManager[PyKokoroEngineSession]:
         import pykokoro
 
+        audio_output_policy = _require_raw_audio_output_policy(pykokoro, selection)
         options = _normalize_kokoro_options(selection.options)
         try:
             generation = pykokoro.GenerationConfig(
@@ -2189,6 +2269,7 @@ class PyKokoroEngineAdapter:
                 model_variant=selection.target_id,
                 tokenizer_config=tokenizer,
                 short_sentence_config=short_sentence_config,
+                audio_output_policy=audio_output_policy,
                 waveform_validation=options.get("waveform_validation", "off"),
                 return_trace=bool(options.get("trace", False)),
                 allow_experimental_frontend=bool(

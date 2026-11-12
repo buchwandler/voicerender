@@ -402,6 +402,11 @@ def _measurement_check(
     else:
         status = "error"
     detail = outcome.error
+    preflight_detail = (
+        measurement.details.get("preflight_detail") if measurement is not None else None
+    )
+    if isinstance(preflight_detail, str) and preflight_detail.strip():
+        detail = f"{detail}; {preflight_detail}" if detail else preflight_detail
     if deferred_capability is not None and deferred_control_count:
         deferred_detail = (
             f"Deferred {deferred_control_count} emphasis control(s) to "

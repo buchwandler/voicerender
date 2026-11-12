@@ -210,6 +210,7 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
     cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
     assert cache_data["schema"] == _CACHE_SCHEMA == "voicerender.batch-cache.v3"
     assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+    assert cache_data["renderer_output_policy"] == "raw"
     assert "audio_boundary" not in cache_data
 
     reused = render(
@@ -223,6 +224,17 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
     assert reused_entry["wav"]["frames"] == 33_600
     assert len(mock_engine.calls) == 1
 
+    cache_data["renderer_output_policy"] = "processed"
+    cache_meta.write_text(json.dumps(cache_data), encoding="utf-8")
+    rejected_policy = render(
+        speech,
+        profile=legacy_profile,
+        output_dir=tmp_path / "legacy-processed-cache",
+        cache_dir=cache,
+    )
+    assert rejected_policy.rendered_count == 1
+    assert len(mock_engine.calls) == 2
+    cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
     cache_data["schema"] = "voicerender.batch-cache.v2"
     cache_data.pop("audio_artifact_policy")
     cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
@@ -238,7 +250,7 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
         read_manifest(tmp_path / "legacy-old-cache")["segments"][0]["wav"]["frames"]
         == 33_600
     )
-    assert len(mock_engine.calls) == 2
+    assert len(mock_engine.calls) == 3
 
     mock_engine.word_timings = (
         {

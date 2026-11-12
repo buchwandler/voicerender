@@ -151,7 +151,7 @@ On a render-time exception, `render-diagnostics.json` keeps the existing `voicer
 
 The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
 
-Kokoro uses PyKokoro's public `error_diagnostic` helper when the installed version exposes it. The Kokoro extra requires PyKokoro 0.10.8+, which owns wrapper-aware character frontend projection. VoiceRender forwards canonical `say_as` text and source offsets unchanged—including wrapper punctuation inside an authored span—and does not trim or rewrite them.
+Kokoro uses PyKokoro's public `error_diagnostic` helper when available. The Kokoro extra requires PyKokoro `>=0.10.13,<0.11` for its raw audio-output policy. VoiceRender requests `AudioOutputPolicy.RAW` for every synthesis request and rejects installations without that capability during preflight/session initialization. The policy keeps PyKokoro's effective short-sentence mode off and disables narration context, silence trimming, and voice-level audio processing. VoiceRender forwards canonical `say_as` text and source offsets unchanged, including wrapper punctuation inside an authored span.
 The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
 
 Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
@@ -219,7 +219,7 @@ The human `profile show` view displays every role's engine, target, language, an
 
 ### Speech artifacts and pause policy
 
-VoiceRender persists the complete validated waveform returned by the selected synthesis engine. It does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, insert silence, or normalize pause boundaries. Speech-boundary conditioning and explicit pause realization belong to downstream AudioCompose. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for AudioCompose to realize; with `mode = "none"`, no policy pause is inserted. `profile show` reports the pause policy separately from VoiceRender's raw synthesis artifacts. Artifacts created under the former trailing-silence policy are stale and require a one-time re-render with `--force` or `--reset-stale`; removed samples cannot be recovered. Future silence-detector changes do not require synthesis again.
+VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, VoiceRender requires PyKokoro's raw output policy and verifies frame counts at the adapter and WAV persistence boundaries. PCM16 storage quantization is the only representation change; samples outside the PCM16 full-scale range are rejected rather than clipped. Per-segment diagnostics and cache metadata record raw policy, source/adapter/persisted frame counts, and available PyKokoro duration trace data. VoiceRender does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, shape boundaries, insert silence, or normalize pauses. AudioCompose owns pause and silence removal, boundary shaping, pause insertion, and crossfades. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for AudioCompose; with `mode = "none"`, no policy pause is inserted. Artifacts from the former trailing-silence policy are stale and require a one-time re-render with `--force` or `--reset-stale`; removed samples cannot be recovered.
 
 ## ONNX Runtime provider policy
 
@@ -309,9 +309,9 @@ Preflight validates local content pins and managed catalog metadata, and measure
 
 ### Kokoro quality and voice-level options
 
-Inspect Kokoro's accepted settings and their structured field descriptions with `voicerender engines options kokoro --json`. Existing string shorthand remains supported: `short_sentence` accepts `off`, `wrap`, `phrase`, or `randomized-phrase`; `voice_level` accepts `off` or `calibrated`. The structured forms expose the PyKokoro controls without adding VoiceRender-side audio processing:
+Kokoro option descriptors still list `short_sentence` (`off`, `wrap`, `phrase`, or `randomized-phrase`) and `voice_level` (`off` or `calibrated`) so profiles can retain their configured values. The fixed raw output policy takes precedence at synthesis: the effective short-sentence mode is always off, and voice-level processing does not modify the audio. No VoiceRender option can re-enable PyKokoro audio processing.
 
-For profile creation and binding, `--short-sentence {off,wrap,phrase,randomized-phrase}` is a convenience for setting the Kokoro `short_sentence` option. It is opt-in: omitting it leaves PyKokoro's short-sentence behavior unset, while `--short-sentence off` records an explicit disable. The flag is available on both `profile create` and `profile bind`; do not combine it with `--option short_sentence=...`. Use the generic option for structured settings:
+`--short-sentence` and the generic `short_sentence` table remain profile-authoring conveniences, not runtime switches for raw audio processing. VoiceRender preserves their configured values for profile identity and inspection, but PyKokoro raw mode forces the effective short-sentence mode off. The same applies to `voice_level`; render diagnostics report effective raw-mode behavior.
 
 ```bash
 voicerender profile create \
@@ -336,7 +336,7 @@ voicerender profile bind kokoro.renderprofile.toml narrator \
   --option 'voice_level={"mode":"off","gain_db":-1.5}' --in-place
 ```
 
-`short_sentence` tables accept `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length` (default 30), `phoneme_pretext` (default `—`), and `phrase_fallback_tries` (default 1). Omitting the option leaves this PyKokoro quality fix unset; the `off` shorthand disables it. `voice_level` tables accept `mode` (`off` or `calibrated`) and finite numeric `gain_db`; an explicit gain takes precedence over the static calibration catalog. Automatic calibration is catalog-based for known model/quality/voice combinations and is unavailable for custom Inno/AkinVox enrolled voices, where an explicit gain may be used instead. These settings are PyKokoro's deterministic voice-level controls, not VoiceRender loudness normalization or mastering. VoiceRender separately adapts finite PCM overshoots at its artifact boundary; calibration does not guarantee a waveform will never need that adaptation.
+`short_sentence` tables retain their documented field shape, but PyKokoro raw mode always bypasses their audio-processing behavior. `voice_level` settings likewise do not alter raw output, even though they remain visible in profile bindings. VoiceRender performs no loudness DSP and does not clip finite overshoots; out-of-range samples are rejected before persistence.
 
 ### Kokoro pronunciation lexicons
 

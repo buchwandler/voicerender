@@ -137,7 +137,10 @@ def engine_selection_from_binding(
                 details=details,
             )
         raise EngineApiIncompatibleError(
-            f"Engine {adapter.id!r} public synthesis API is incompatible",
+            (
+                probe.error_message
+                or f"Engine {adapter.id!r} public synthesis API is incompatible"
+            ),
             engine=adapter.id,
             engine_version=probe.distribution_version,
             native_error_type=probe.error_type,

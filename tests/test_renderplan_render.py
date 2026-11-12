@@ -574,10 +574,35 @@ def test_verified_cache_reuse_materializes_numbered_wav_and_corruption_regenerat
 def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    import numpy as np
+    import soundfile as sf
+
     from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
 
     adapter = _install(monkeypatch)
-    adapter.metadata = {"short_sentence_mode": "wrap"}
+    adapter.metadata = {
+        "short_sentence_mode": "wrap",
+        "renderer_output_policy": "raw",
+        "pykokoro_returned_frames": 33_600,
+        "voicerender_adapter_frames": 33_600,
+        "trace": {
+            "model": {
+                "inference_samples": 33_600,
+                "duration_count": 280,
+                "duration_frames": 1_400,
+                "samples_per_frame": 24,
+                "expected_audio_samples": 33_600,
+                "actual_audio_samples": 33_600,
+                "narration_context_applied": False,
+                "short_sentence_mode": "off",
+                "short_sentence_cut_applied": False,
+                "silence_trim_applied": False,
+                "voice_level_applied": False,
+                "sample_count_preserved": True,
+                "sample_values_preserved": True,
+            }
+        },
+    }
     adapter.audio = [0.2] * 24_000 + [0.0] * 9_600
     plan = _plan("speech with renderer tail")
     report = _report(adapter, plan, tmp_path)
@@ -594,10 +619,22 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
     assert first.manifest.speech[0].frames == 33_600
     assert wav_info(tmp_path / "raw-first" / "000001.wav")["frames"] == 33_600
     assert wav_info(next(cache.glob("*.wav")))["frames"] == 33_600
+    first_audio, first_rate = sf.read(
+        tmp_path / "raw-first" / "000001.wav", dtype="float32"
+    )
+    assert first_rate == 24_000
+    assert np.count_nonzero(first_audio[-9_600:]) == 0
     fingerprint = first.execution_fingerprint[0]
     assert fingerprint["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
     assert "audio_boundary" not in fingerprint
-    assert fingerprint["render_result"] == {"short_sentence_mode": "wrap"}
+    assert fingerprint["render_result"]["short_sentence_mode"] == "wrap"
+    assert (
+        fingerprint["render_result"]["audio_artifact_policy"]
+        == AUDIO_ARTIFACT_POLICY_ID
+    )
+    assert fingerprint["render_result"]["pykokoro_inference_frames"] == 33_600
+    assert fingerprint["render_result"]["pykokoro_duration_frames"] == 1_400
+    assert fingerprint["render_result"]["frame_count_preserved"] is True
     diagnostics = json.loads(
         (tmp_path / "raw-first" / RENDER_DIAGNOSTICS_FILENAME).read_text(
             encoding="utf-8"
@@ -605,16 +642,25 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
     )
     assert diagnostics["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
     assert "audio_boundary" not in diagnostics
-    assert diagnostics["render_results"][first.manifest.speech[0].segment_id] == {
-        "short_sentence_mode": "wrap"
-    }
+    render_diagnostics = diagnostics["render_results"][
+        first.manifest.speech[0].segment_id
+    ]
+    assert render_diagnostics["renderer_output_policy"] == "raw"
+    assert render_diagnostics["pykokoro_returned_frames"] == 33_600
+    assert render_diagnostics["pykokoro_duration_frames"] == 1_400
+    assert render_diagnostics["persisted_frames"] == 33_600
+    assert render_diagnostics["frame_count_preserved"] is True
 
     cache_sidecar = next(cache.glob("*.json"))
     cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
     assert cache_data["schema"] == "voicerender.renderplan-cache.v3"
     assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+    assert cache_data["renderer_output_policy"] == "raw"
     assert "audio_boundary" not in cache_data
-    assert cache_data["render_result"] == {"short_sentence_mode": "wrap"}
+    assert cache_data["render_result"]["renderer_output_policy"] == "raw"
+    assert cache_data["render_result"]["pykokoro_duration_frames"] == 1_400
+    assert cache_data["render_result"]["persisted_frames"] == 33_600
+    assert cache_data["render_result"]["frame_count_preserved"] is True
     reused = render_renderplan(
         plan,
         preflight=report,
@@ -623,10 +669,32 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
     )
     assert reused.reused_count == 1
     assert "audio_boundary" not in reused.execution_fingerprint[0]
-    assert reused.execution_fingerprint[0]["render_result"] == {
-        "short_sentence_mode": "wrap"
-    }
+    reused_render_result = reused.execution_fingerprint[0]["render_result"]
+    assert reused_render_result["renderer_output_policy"] == "raw"
+    assert reused_render_result["pykokoro_inference_frames"] == 33_600
+    assert reused_render_result["pykokoro_duration_frames"] == 1_400
+    assert reused_render_result["persisted_frames"] == 33_600
+    assert reused_render_result["frame_count_preserved"] is True
     assert wav_info(tmp_path / "raw-reused" / "000001.wav")["frames"] == 33_600
+    reused_audio, reused_rate = sf.read(
+        tmp_path / "raw-reused" / "000001.wav", dtype="float32"
+    )
+    assert reused_rate == 24_000
+    np.testing.assert_array_equal(reused_audio, first_audio)
+
+    assert (tmp_path / "raw-first" / "000001.wav").read_bytes() == (
+        tmp_path / "raw-reused" / "000001.wav"
+    ).read_bytes()
+    cache_data["renderer_output_policy"] = "processed"
+    cache_sidecar.write_text(json.dumps(cache_data), encoding="utf-8")
+    policy_miss = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "raw-processed-cache",
+        cache_dir=cache,
+    )
+    assert policy_miss.rendered_count == 1
+    cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
 
     cache_data["schema"] = "voicerender.renderplan-cache.v2"
     cache_data.pop("audio_artifact_policy")
@@ -643,7 +711,53 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
     assert adapter.synthesized_texts == [
         "speech with renderer tail",
         "speech with renderer tail",
+        "speech with renderer tail",
     ]
+
+
+def test_renderplan_preserves_pcm16_final_samples_through_cache_reuse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import numpy as np
+    import soundfile as sf
+
+    adapter = _install(monkeypatch)
+    source = np.array(
+        [0.03125, -0.0625, 0.125, -0.25, 0.375, -0.5, 0.75], dtype=np.float32
+    )
+    adapter.audio = source
+    plan = _plan("distinctive ending")
+    report = _report(adapter, plan, tmp_path)
+    cache = tmp_path / "distinctive-cache"
+
+    first = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "distinctive-first",
+        cache_dir=cache,
+    )
+    reused = render_renderplan(
+        plan,
+        preflight=report,
+        output_dir=tmp_path / "distinctive-reused",
+        cache_dir=cache,
+    )
+
+    assert first.rendered_count == 1
+    assert reused.reused_count == 1
+    first_audio, first_rate = sf.read(
+        tmp_path / "distinctive-first" / "000001.wav", dtype="float32"
+    )
+    reused_audio, reused_rate = sf.read(
+        tmp_path / "distinctive-reused" / "000001.wav", dtype="float32"
+    )
+    assert first_rate == reused_rate == 24_000
+    np.testing.assert_array_equal(first_audio, source)
+    np.testing.assert_array_equal(first_audio[-5:], source[-5:])
+    np.testing.assert_array_equal(reused_audio, source)
+    assert (tmp_path / "distinctive-first" / "000001.wav").read_bytes() == (
+        tmp_path / "distinctive-reused" / "000001.wav"
+    ).read_bytes()
 
 
 @pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v1"])
@@ -691,7 +805,7 @@ def test_stale_audio_artifact_requires_explicit_reset(
     assert not refreshed.failed
     updated_diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     assert updated_diagnostics["audio_artifact_policy"] == (
-        "voicerender.raw-synthesis.v1"
+        "voicerender.raw-synthesis.v2"
     )
 
 

@@ -307,6 +307,55 @@ def _synthesize_prepared_speech(
     resolved_mode = rendered_speech.metadata.get("short_sentence_mode")
     if isinstance(resolved_mode, str):
         render_result["short_sentence_mode"] = resolved_mode
+    metadata = rendered_speech.metadata
+    if metadata.get("renderer_output_policy") == "raw":
+        render_result.update(
+            {
+                "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+                "renderer_output_policy": "raw",
+                "pykokoro_returned_frames": metadata.get("pykokoro_returned_frames"),
+                "voicerender_adapter_frames": metadata.get(
+                    "voicerender_adapter_frames"
+                ),
+            }
+        )
+        trace = metadata.get("trace")
+        trace_model = (
+            trace.get("model")
+            if isinstance(trace, Mapping)
+            else getattr(trace, "model", None)
+        )
+        if isinstance(trace_model, Mapping):
+            trace_fields = {
+                "inference_samples": "pykokoro_inference_frames",
+                "duration_count": "pykokoro_duration_count",
+                "duration_frames": "pykokoro_duration_frames",
+                "samples_per_frame": "pykokoro_samples_per_frame",
+                "expected_audio_samples": "pykokoro_expected_duration_samples",
+                "actual_audio_samples": "pykokoro_actual_duration_samples",
+                "narration_context_applied": "pykokoro_narration_context_applied",
+                "short_sentence_mode": "pykokoro_short_sentence_mode",
+                "short_sentence_cut_applied": "pykokoro_short_sentence_cut_applied",
+                "silence_trim_applied": "pykokoro_silence_trim_applied",
+                "voice_level_applied": "pykokoro_voice_level_applied",
+                "sample_count_preserved": "pykokoro_sample_count_preserved",
+                "sample_values_preserved": "pykokoro_sample_values_preserved",
+            }
+            for source, target in trace_fields.items():
+                value = trace_model.get(source)
+                if isinstance(value, (str, int, bool)) and not (
+                    isinstance(value, bool)
+                    and source
+                    not in {
+                        "narration_context_applied",
+                        "short_sentence_cut_applied",
+                        "silence_trim_applied",
+                        "voice_level_applied",
+                        "sample_count_preserved",
+                        "sample_values_preserved",
+                    }
+                ):
+                    render_result[target] = value
     return _SynthesisResult(
         rendered_speech,
         render_result,
@@ -705,11 +754,32 @@ def render_renderplan(
                             rendered_speech.audio,
                             rendered_speech.sample_rate,
                         )
+                        if render_result.get("renderer_output_policy") == "raw":
+                            render_result["persisted_frames"] = int(info["frames"])
+                            frame_counts = [
+                                render_result.get(name)
+                                for name in (
+                                    "pykokoro_inference_frames",
+                                    "pykokoro_returned_frames",
+                                    "voicerender_adapter_frames",
+                                    "persisted_frames",
+                                )
+                            ]
+                            frame_counts = [
+                                value
+                                for value in frame_counts
+                                if isinstance(value, int)
+                                and not isinstance(value, bool)
+                            ]
+                            render_result["frame_count_preserved"] = (
+                                len(frame_counts) >= 2 and len(set(frame_counts)) == 1
+                            )
                         atomic_json(
                             cache / f"{current.cache_key}.json",
                             {
                                 "schema": _CACHE_SCHEMA,
                                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+                                "renderer_output_policy": "raw",
                                 "key": current.cache_key,
                                 "wav": info,
                                 "render_result": render_result,
@@ -1373,6 +1443,7 @@ def _read_cache(
         or data.get("schema") != _CACHE_SCHEMA
         or data.get("key") != key
         or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
+        or data.get("renderer_output_policy") != "raw"
     ):
         return None
     info = data.get("wav")

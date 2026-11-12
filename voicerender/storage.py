@@ -114,12 +114,28 @@ def atomic_wav(path: Path, audio: Any, sample_rate: int) -> dict[str, Any]:
     peak = float(np.max(np.abs(signal)))
     if peak > float(np.float32(1.00001)):
         raise ArtifactError(f"Engine returned audio outside [-1, 1] (peak={peak:.6f})")
+    expected_frames = int(signal.size)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".tmp-", suffix=".wav", dir=path.parent)
     os.close(fd)
     try:
         sf.write(name, signal, sample_rate, format="WAV", subtype="PCM_16")
         _replace_file(name, path)
+        try:
+            persisted_frames = int(sf.info(path).frames)
+        except (RuntimeError, OSError) as exc:
+            path.unlink(missing_ok=True)
+            raise ArtifactError(
+                f"Could not verify persisted WAV frame count for {path}",
+                code="audio.persisted_frame_count_mismatch",
+            ) from exc
+        if persisted_frames != expected_frames:
+            path.unlink(missing_ok=True)
+            raise ArtifactError(
+                f"Persisted WAV frame count mismatch for {path}: expected {expected_frames}, "
+                f"got {persisted_frames}",
+                code="audio.persisted_frame_count_mismatch",
+            )
     finally:
         Path(name).unlink(missing_ok=True)
     return wav_info(path)

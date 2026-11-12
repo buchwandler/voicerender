@@ -16,7 +16,6 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
 from voicerender.engines.base import (
-    PCM_RANGE_POLICY,
     EngineSelection,
     RenderedSpeech,
     SayAsSpan,
@@ -47,10 +46,11 @@ from voicerender.models import ModelDiscoveryError, ModelInfo
 from voicerender.voice_sources import local_reference_source
 
 
-def test_pykokoro_minimum_version_is_01011() -> None:
+def test_pykokoro_minimum_version_is_01013() -> None:
     assert not _version_supported("0.10.10")
-    assert _version_supported("0.10.11")
-    assert _version_supported("0.10.12")
+    assert not _version_supported("0.10.12")
+    assert _version_supported("0.10.13")
+    assert _version_supported("0.10.14")
     assert not _version_supported("0.11.0")
 
 
@@ -215,7 +215,7 @@ def _install(
         "closed": 0,
     }
     module = ModuleType("pykokoro")
-    module.__version__ = "0.10.11"
+    module.__version__ = "0.10.13"
     module.__file__ = "/fake/pykokoro/__init__.py"
 
     class FakeSynthesisRequest:
@@ -229,6 +229,10 @@ def _install(
     class FakeConfig:
         def __init__(self, **values: Any) -> None:
             self.__dict__.update(values)
+
+    class FakeSynthesisConfig(FakeConfig):
+        def __init__(self, *, audio_output_policy: Any, **values: Any) -> None:
+            super().__init__(audio_output_policy=audio_output_policy, **values)
 
     class FakeInnoOptions:
         def __init__(self, *, fmax: float | None = None) -> None:
@@ -298,7 +302,8 @@ def _install(
     module.GenerationConfig = FakeConfig
     module.TokenizerConfig = FakeConfig
     module.ShortSentenceConfig = FakeConfig
-    module.SynthesisConfig = FakeConfig
+    module.SynthesisConfig = FakeSynthesisConfig
+    module.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
     module.VoiceLevelConfig = FakeConfig
     module.InnoEnrollmentOptions = FakeInnoOptions
     module.KokoroSynthesizer = FakeSynthesizer
@@ -310,7 +315,7 @@ def _api_probe_module(
     *, api_version: int = 2, supports_say_as: bool = True
 ) -> ModuleType:
     module = ModuleType("pykokoro")
-    module.__version__ = "0.10.11"
+    module.__version__ = "0.10.13"
     module.__file__ = "/fake/pykokoro/__init__.py"
 
     class FakeSynthesizer:
@@ -334,6 +339,8 @@ def _api_probe_module(
         "SayAsSpan",
     ):
         setattr(module, name, type(name, (), {}))
+    module.SynthesisConfig.__annotations__ = {"audio_output_policy": object}
+    module.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
     module.REQUEST_API_VERSION = api_version
     module.request_api_contract = lambda: SimpleNamespace(
         supports_request_measurement=True,
@@ -363,6 +370,61 @@ def test_kokoro_probe_requires_request_api_v2_and_say_as_capability(
         missing_capability.details["capability_mismatches"]["supports_say_as"]["actual"]
         is False
     )
+
+
+def test_pykokoro_raw_output_policy_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _api_probe_module()
+    module.AudioOutputPolicy = SimpleNamespace(
+        PROCESSED=SimpleNamespace(value="processed")
+    )
+    monkeypatch.setitem(sys.modules, "pykokoro", module)
+
+    adapter = PyKokoroEngineAdapter()
+    probe = adapter.probe_api()
+    assert not probe.compatible
+    assert (
+        probe.details["capability_mismatches"]["supports_audio_output_policy"]["actual"]
+        is False
+    )
+
+    selection = EngineSelection(
+        engine="kokoro", target_id="kokoro-test", language="en-US", voice="af_heart"
+    )
+    with pytest.raises(
+        EngineBackendError, match="raw acoustic output policy is required"
+    ) as caught:
+        adapter.open(selection)
+    assert caught.value.code == "pykokoro.raw_output_policy_unsupported"
+
+    assert probe.error_message == (
+        "PyKokoro raw acoustic output policy is required by VoiceRender but is unsupported"
+    )
+
+
+def test_kokoro_measurement_reports_effective_raw_output_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model()
+    adapter, _ = _install(monkeypatch, model)
+    selection = EngineSelection(
+        engine="kokoro", target_id=model.id, language="en-US", voice="af_heart"
+    )
+
+    with adapter.open(selection) as session:
+        measured = session.measure(
+            SpeechRequest(
+                id="raw-measurement", text="measure raw policy", language="en-US"
+            )
+        )
+
+    detail = measured.details["preflight_detail"]
+    assert "raw output capability: supported" in detail
+    assert "effective short sentence mode: off" in detail
+    assert "effective narration context: disabled by raw policy" in detail
+    assert "generic trim: disabled" in detail
+    assert "voice-level processing: disabled by raw policy" in detail
 
 
 def test_pykokoro_request_forwards_say_as_without_changing_text(
@@ -906,58 +968,90 @@ def _synthesize_pcm_audio(
         )
 
 
-def test_kokoro_pcm_range_preserves_in_range_audio_and_tolerance(
+def test_kokoro_raw_audio_preserves_float32_samples_and_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    exact = _synthesize_pcm_audio(monkeypatch, np.array([0.25, 1.0], dtype=np.float32))
-    np.testing.assert_array_equal(exact.audio, np.array([0.25, 1.0], dtype=np.float32))
-    assert exact.warnings == ()
-    assert exact.metadata["pcm_range"] == {
-        "policy": PCM_RANGE_POLICY,
-        "peak_before_clip": 1.0,
-        "clipped_samples": 0,
+    source = np.random.default_rng(1).uniform(-1, 1, 61_800).astype(np.float32)
+    rendered = _synthesize_pcm_audio(monkeypatch, source)
+
+    np.testing.assert_array_equal(rendered.audio, source)
+    assert rendered.warnings == ()
+    assert rendered.metadata["pykokoro_returned_frames"] == 61_800
+    assert rendered.metadata["voicerender_adapter_frames"] == 61_800
+    assert rendered.metadata["renderer_output_policy"] == "raw"
+    assert "pcm_range" not in rendered.metadata
+
+
+def test_kokoro_raw_adapter_preserves_exact_zero_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = np.concatenate(
+        (np.full(24_000, 0.25, dtype=np.float32), np.zeros(9_600, dtype=np.float32))
+    )
+    rendered = _synthesize_pcm_audio(monkeypatch, source)
+
+    np.testing.assert_array_equal(rendered.audio, source)
+    assert rendered.metadata["voicerender_adapter_frames"] == 33_600
+    assert np.count_nonzero(rendered.audio[-9_600:]) == 0
+
+
+def test_kokoro_raw_adapter_preserves_distinctive_final_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = np.array([0.2, -0.31, 0.47, -0.82, 0.93], dtype=np.float32)
+    rendered = _synthesize_pcm_audio(monkeypatch, source)
+
+    np.testing.assert_array_equal(rendered.audio[-5:], source[-5:])
+
+
+@pytest.mark.parametrize("bad_sample", [1.000005, -1.000005])
+def test_kokoro_raw_audio_rejects_overshoots_instead_of_clamping(
+    monkeypatch: pytest.MonkeyPatch, bad_sample: float
+) -> None:
+    with pytest.raises(EngineBackendError) as caught:
+        _synthesize_pcm_audio(
+            monkeypatch, np.array([0.0, bad_sample], dtype=np.float32)
+        )
+
+    assert caught.value.code == "audio.sample_out_of_range"
+
+
+def test_kokoro_adapter_rejects_frame_count_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from voicerender.engines import kokoro
+
+    adapter, _ = _install(monkeypatch, _model())
+    original_validate = kokoro.validate_rendered_speech
+
+    def drop_frame(*args: Any, **kwargs: Any) -> RenderedSpeech:
+        validated = original_validate(*args, **kwargs)
+        validated.audio = validated.audio[:-1]
+        return validated
+
+    monkeypatch.setattr(kokoro, "validate_rendered_speech", drop_frame)
+    selection = EngineSelection(
+        engine="kokoro", target_id="kokoro-test", language="en-US", voice="af_heart"
+    )
+    request = SpeechRequest(
+        id="frame-mutation", text="Frame mutation", language="en-US"
+    )
+
+    with (
+        adapter.open(selection) as session,
+        pytest.raises(EngineBackendError) as caught,
+    ):
+        session.synthesize(request)
+
+    assert caught.value.code == "audio.frame_count_changed"
+    assert caught.value.details == {
+        "source_frames": 24,
+        "adapted_frames": 23,
+        "stage": "engine_adapter",
+        "engine": "kokoro",
+        "target_id": "kokoro-test",
+        "request_id": "frame-mutation",
     }
-
-    tolerant = _synthesize_pcm_audio(
-        monkeypatch, np.array([0.25, 1.000005], dtype=np.float32)
-    )
-    assert float(np.max(np.abs(tolerant.audio))) == 1.0
-    assert tolerant.metadata["pcm_range"]["peak_before_clip"] == pytest.approx(1.000005)
-    assert "clamped 1 sample(s)" in tolerant.warnings[0]
-
-
-def test_kokoro_observed_pcm_overshoot_is_clamped_with_diagnostics_and_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    audio = np.asarray([0.0, -0.4, 1.008497], dtype=np.float32)
-    rendered = _synthesize_pcm_audio(
-        monkeypatch, audio, diagnostics=("PyKokoro diagnostic",)
-    )
-
-    assert float(np.max(np.abs(rendered.audio))) == 1.0
-    assert rendered.audio[-1] == 1.0
-    assert rendered.metadata["pcm_range"] == {
-        "policy": PCM_RANGE_POLICY,
-        "peak_before_clip": pytest.approx(1.008497),
-        "clipped_samples": 1,
-    }
-    assert rendered.warnings[0] == "PyKokoro diagnostic"
-    assert "PyKokoro returned audio above full scale" in rendered.warnings[1]
-    assert "clamped 1 sample(s)" in rendered.warnings[1]
-    assert "1.008497" in rendered.warnings[1]
-
-
-def test_kokoro_pcm_clamps_negative_and_multiple_overshoots(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rendered = _synthesize_pcm_audio(
-        monkeypatch, np.array([-1.2, 0.0, 1.008497, -1.1], dtype=np.float32)
-    )
-    np.testing.assert_array_equal(
-        rendered.audio, np.array([-1.0, 0.0, 1.0, -1.0], dtype=np.float32)
-    )
-    assert rendered.metadata["pcm_range"]["clipped_samples"] == 3
-    assert "clamped 3 sample(s)" in rendered.warnings[0]
 
 
 @pytest.mark.parametrize("bad_sample", [np.nan, np.inf])
@@ -1156,6 +1250,7 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
             SpeechRequest(id="structured", text="Configured speech", language="en-US")
         )
     assert config.short_sentence_config.enabled is True
+    assert config.audio_output_policy.value == "raw"
     assert config.short_sentence_config.resolve_mode == "randomized-phrase"
     assert config.short_sentence_config.min_phoneme_length == 45
     assert config.short_sentence_config.phoneme_pretext == "—"
