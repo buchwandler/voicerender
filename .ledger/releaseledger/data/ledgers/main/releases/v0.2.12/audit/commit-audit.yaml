@@ -1,0 +1,94 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.2.12
+git_base_ref: v0.2.11
+git_base_sha: 43eba20d9fc1e55f59a6b3eaafb60d3b4095e12d
+git_head_ref: HEAD
+git_head_sha: 85dc12681cd4a8078366583b0eee6ec1fd39681e
+git_range: 43eba20d9fc1e55f59a6b3eaafb60d3b4095e12d..85dc12681cd4a8078366583b0eee6ec1fd39681e
+commit_count: 2
+rows:
+  - sha: 26893868a062e7eafb48bcc0497efa95c7447b57
+    source_ref: git:26893868a062e7eafb48bcc0497efa95c7447b57
+    short_sha: "2689386"
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - tests/test_engine_registry.py
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_render.py
+      - tests/test_storage.py
+      - voicerender/audio_artifacts.py
+      - voicerender/engines/kokoro.py
+      - voicerender/preflight.py
+      - voicerender/render.py
+      - voicerender/renderplan_input.py
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+    stats:
+      files_changed: 17
+      insertions: 566
+      deletions: 77
+    inspected: true
+    inspected_paths:
+      - voicerender/audio_artifacts.py
+      - voicerender/engines/kokoro.py
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+      - tests/test_kokoro_reference.py
+    observed_behavior:
+      Introduced PyKokoro raw output and audio frame validation, recording
+      output metadata and rejecting out-of-range samples rather than clipping
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: raw syntesis artefact"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 85dc12681cd4a8078366583b0eee6ec1fd39681e
+    source_ref: git:85dc12681cd4a8078366583b0eee6ec1fd39681e
+    short_sha: 85dc126
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_bundle_inspect.py
+      - tests/test_engine_registry.py
+      - tests/test_kokoro_reference.py
+      - tests/test_preflight.py
+      - tests/test_profile_roles_cli.py
+      - tests/test_renderer.py
+      - tests/test_renderplan_render.py
+      - voicerender/audio_artifacts.py
+      - voicerender/bundle_render_inspect.py
+      - voicerender/cli.py
+      - voicerender/engines/kokoro.py
+      - voicerender/render.py
+      - voicerender/renderplan_render.py
+    stats:
+      files_changed: 16
+      insertions: 289
+      deletions: 146
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kokoro.py
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_kokoro_reference.py
+    observed_behavior:
+      Switched Kokoro to PyKokoro preserve-silence output, retaining
+      configured short-sentence, narration-context, and voice-level processing while
+      disabling generic silence trimming
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: adapt to new pykokoro changes"
+    target_entry_id: entry-0001
+    notes: ""

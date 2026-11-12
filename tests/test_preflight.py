@@ -1608,10 +1608,13 @@ def test_kokoro_preflight_reports_preserve_silence_policy_details(
         binding={"renderer": "kokoro", "target_id": _TARGET_ID, "voice": "voice-a"},
     )
 
-    report = preflight_render_plan(plan, tmp_path / "kokoro-preserve-silence-policy.toml")
+    report = preflight_render_plan(
+        plan, tmp_path / "kokoro-preserve-silence-policy.toml"
+    )
 
     assert report.status == "ok"
     assert report.checks[0].detail == detail
+
 
 def test_kokoro_preflight_rejects_missing_preserve_silence_output_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1633,7 +1636,10 @@ def test_kokoro_preflight_rejects_missing_preserve_silence_output_policy(
         error_message=message,
         details={
             "capability_mismatches": {
-                "supports_preserve_silence_output_policy": {"expected": True, "actual": False}
+                "supports_preserve_silence_output_policy": {
+                    "expected": True,
+                    "actual": False,
+                }
             }
         },
     )
@@ -1643,7 +1649,9 @@ def test_kokoro_preflight_rejects_missing_preserve_silence_output_policy(
         binding={"renderer": "kokoro", "target_id": _TARGET_ID, "voice": "voice-a"},
     )
 
-    report = preflight_render_plan(plan, tmp_path / "kokoro-no-preserve-silence-policy.toml")
+    report = preflight_render_plan(
+        plan, tmp_path / "kokoro-no-preserve-silence-policy.toml"
+    )
 
     assert report.status == "reject"
     assert report.checks[0].detail == message

@@ -1,0 +1,30 @@
+rows:
+  - sha: 26893868a062e7eafb48bcc0497efa95c7447b57
+    inspected: true
+    inspected_paths:
+      - voicerender/audio_artifacts.py
+      - voicerender/engines/kokoro.py
+      - voicerender/renderplan_render.py
+      - voicerender/storage.py
+      - tests/test_kokoro_reference.py
+    observed_behavior: Introduced PyKokoro raw output and audio frame validation, recording output metadata and rejecting out-of-range samples rather than clipping
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 85dc12681cd4a8078366583b0eee6ec1fd39681e
+    inspected: true
+    inspected_paths:
+      - voicerender/engines/kokoro.py
+      - docs/index.md
+      - docs/renderprofile.md
+      - tests/test_kokoro_reference.py
+    observed_behavior: Switched Kokoro to PyKokoro preserve-silence output, retaining configured short-sentence, narration-context, and voice-level processing while disabling generic silence trimming
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

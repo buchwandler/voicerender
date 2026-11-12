@@ -762,7 +762,10 @@ def test_renderplan_preserves_pcm16_final_samples_through_cache_reuse(
     ).read_bytes()
 
 
-@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v1", "voicerender.raw-synthesis.v2"])
+@pytest.mark.parametrize(
+    "old_policy",
+    [None, "voicerender.trailing-silence.v1", "voicerender.raw-synthesis.v2"],
+)
 @pytest.mark.parametrize("use_reset", [False, True])
 def test_stale_audio_artifact_requires_explicit_reset(
     monkeypatch: pytest.MonkeyPatch,

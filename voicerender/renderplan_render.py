@@ -752,7 +752,10 @@ def render_renderplan(
                             rendered_speech.audio,
                             rendered_speech.sample_rate,
                         )
-                        if render_result.get("renderer_output_policy") == "preserve_silence":
+                        if (
+                            render_result.get("renderer_output_policy")
+                            == "preserve_silence"
+                        ):
                             render_result["persisted_frames"] = int(info["frames"])
                             frame_counts = [
                                 render_result.get(name)

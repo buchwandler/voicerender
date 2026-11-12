@@ -428,6 +428,7 @@ def test_pykokoro_preserve_silence_output_policy_is_required(
     )
     assert probe.error_message == expected_message
 
+
 def test_kokoro_measurement_reports_preserve_silence_policy_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -453,6 +454,7 @@ def test_kokoro_measurement_reports_preserve_silence_policy_details(
     assert "short-sentence processing: allowed/configured" in detail
     assert "narration-context processing: allowed" in detail
     assert "voice-level processing: allowed/configured" in detail
+
 
 def test_pykokoro_request_forwards_say_as_without_changing_text(
     monkeypatch: pytest.MonkeyPatch,
@@ -1011,9 +1013,9 @@ def test_kokoro_adapter_preserves_pykokoro_returned_samples_and_frames(
     assert "pcm_range" not in rendered.metadata
 
 
-
-
-def test_kokoro_accepts_semantic_crop_before_final_waveform(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_kokoro_accepts_semantic_crop_before_final_waveform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = np.concatenate(
         (np.full(52_200, 0.25, dtype=np.float32), np.zeros(9_600, dtype=np.float32))
     )
@@ -1032,6 +1034,7 @@ def test_kokoro_accepts_semantic_crop_before_final_waveform(monkeypatch: pytest.
     assert rendered.metadata["trace"]["model"]["inference_samples"] == 100_000
     assert rendered.metadata["pykokoro_returned_frames"] == 61_800
     assert rendered.metadata["voicerender_adapter_frames"] == 61_800
+
 
 def test_kokoro_adapter_preserves_exact_zero_tail(
     monkeypatch: pytest.MonkeyPatch,
@@ -1313,7 +1316,6 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
     assert rendered.metadata["short_sentence_mode"] == "randomized-phrase"
 
 
-
 def test_kokoro_preserves_voice_level_application_under_preserve_silence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1354,6 +1356,7 @@ def test_kokoro_preserves_voice_level_application_under_preserve_silence(
         "calibration_revision": "fixture-r1",
     }
 
+
 def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1387,8 +1390,6 @@ def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
     with adapter.open(explicit_off):
         assert state["config"].short_sentence_config.enabled is False
 
-
-
     state["short_sentence_mode"] = None
     configured = EngineSelection(
         engine="kokoro",
@@ -1400,6 +1401,7 @@ def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
         fallback_rendered = session.synthesize(request)
     assert state["config"].short_sentence_config.enabled is True
     assert fallback_rendered.metadata["short_sentence_mode"] == "randomized-phrase"
+
 
 def test_kokoro_forwards_persisted_g2lex_tables_as_public_file_refs(
     monkeypatch: pytest.MonkeyPatch,

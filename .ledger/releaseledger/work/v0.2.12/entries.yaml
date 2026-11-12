@@ -1,0 +1,42 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.2.12
+git_base_ref: 43eba20d9fc1e55f59a6b3eaafb60d3b4095e12d
+git_base_sha: 43eba20d9fc1e55f59a6b3eaafb60d3b4095e12d
+git_head_ref: 85dc12681cd4a8078366583b0eee6ec1fd39681e
+git_head_sha: 85dc12681cd4a8078366583b0eee6ec1fd39681e
+include_merges: nontrivial
+entries:
+  - kind: changed
+    summary: Changed Kokoro output handling to preserve silence while retaining configured PyKokoro processing
+    status: accepted
+    source_refs:
+      - git:26893868a062e7eafb48bcc0497efa95c7447b57
+      - git:85dc12681cd4a8078366583b0eee6ec1fd39681e
+    paths:
+      - README.md
+      - docs/index.md
+      - docs/renderprofile.md
+      - pyproject.toml
+      - voicerender/engines/kokoro.py
+      - tests/test_kokoro_reference.py
+    sources: []
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: fixed
+    summary: Fixed WAV persistence to reject artifacts with mismatched frame counts
+    status: accepted
+    source_refs: []
+    paths:
+      - voicerender/storage.py
+      - tests/test_storage.py
+    sources:
+      - git:26893868a062e7eafb48bcc0497efa95c7447b57
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

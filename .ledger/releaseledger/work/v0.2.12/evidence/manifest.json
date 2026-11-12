@@ -1,0 +1,68 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 566,
+      "deletions": 77,
+      "patch_file": "2689386.patch",
+      "patch_sha256": "f8abb36260ca975d763c4ed1a4f5061fc09aee5eae8995fec3e04fe2a4682331",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "docs/renderprofile.md",
+        "pyproject.toml",
+        "tests/test_engine_registry.py",
+        "tests/test_kokoro_reference.py",
+        "tests/test_preflight.py",
+        "tests/test_renderer.py",
+        "tests/test_renderplan_render.py",
+        "tests/test_storage.py",
+        "voicerender/audio_artifacts.py",
+        "voicerender/engines/kokoro.py",
+        "voicerender/preflight.py",
+        "voicerender/render.py",
+        "voicerender/renderplan_input.py",
+        "voicerender/renderplan_render.py",
+        "voicerender/storage.py"
+      ],
+      "sha": "26893868a062e7eafb48bcc0497efa95c7447b57",
+      "short_sha": "2689386",
+      "source_ref": "git:26893868a062e7eafb48bcc0497efa95c7447b57"
+    },
+    {
+      "additions": 289,
+      "deletions": 146,
+      "patch_file": "85dc126.patch",
+      "patch_sha256": "056df322a155b5cf2e95cb21cad1c277e3c6a8ca5e661dd3089d222398c197c4",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "docs/renderprofile.md",
+        "tests/test_bundle_inspect.py",
+        "tests/test_engine_registry.py",
+        "tests/test_kokoro_reference.py",
+        "tests/test_preflight.py",
+        "tests/test_profile_roles_cli.py",
+        "tests/test_renderer.py",
+        "tests/test_renderplan_render.py",
+        "voicerender/audio_artifacts.py",
+        "voicerender/bundle_render_inspect.py",
+        "voicerender/cli.py",
+        "voicerender/engines/kokoro.py",
+        "voicerender/render.py",
+        "voicerender/renderplan_render.py"
+      ],
+      "sha": "85dc12681cd4a8078366583b0eee6ec1fd39681e",
+      "short_sha": "85dc126",
+      "source_ref": "git:85dc12681cd4a8078366583b0eee6ec1fd39681e"
+    }
+  ],
+  "git_base_ref": "43eba20d9fc1e55f59a6b3eaafb60d3b4095e12d",
+  "git_base_sha": "43eba20d9fc1e55f59a6b3eaafb60d3b4095e12d",
+  "git_head_ref": "85dc12681cd4a8078366583b0eee6ec1fd39681e",
+  "git_head_sha": "85dc12681cd4a8078366583b0eee6ec1fd39681e",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.2.12",
+  "schema_version": 1
+}

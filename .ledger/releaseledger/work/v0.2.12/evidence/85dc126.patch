@@ -1,0 +1,1085 @@
+ README.md                            |  14 +--
+ docs/index.md                        |   2 +-
+ docs/renderprofile.md                |   8 +-
+ tests/test_bundle_inspect.py         |  13 ++-
+ tests/test_engine_registry.py        |   7 +-
+ tests/test_kokoro_reference.py       | 165 +++++++++++++++++++++++++++++------
+ tests/test_preflight.py              |  36 +++++---
+ tests/test_profile_roles_cli.py      |   6 +-
+ tests/test_renderer.py               |   6 +-
+ tests/test_renderplan_render.py      |  70 +++++++--------
+ voicerender/audio_artifacts.py       |   2 +-
+ voicerender/bundle_render_inspect.py |   2 +-
+ voicerender/cli.py                   |   6 +-
+ voicerender/engines/kokoro.py        |  77 +++++++++-------
+ voicerender/render.py                |   4 +-
+ voicerender/renderplan_render.py     |  17 ++--
+ 16 files changed, 289 insertions(+), 146 deletions(-)
+
+diff --git a/README.md b/README.md
+index 6891e62..3a2b3a6 100644
+--- a/README.md
++++ b/README.md
+@@ -151,7 +151,7 @@ On a render-time exception, `render-diagnostics.json` keeps the existing `voicer
+
+ The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
+
+-Kokoro uses PyKokoro's public `error_diagnostic` helper when available. The Kokoro extra requires PyKokoro `>=0.10.13,<0.11` for its raw audio-output policy. VoiceRender requests `AudioOutputPolicy.RAW` for every synthesis request and rejects installations without that capability during preflight/session initialization. The policy keeps PyKokoro's effective short-sentence mode off and disables narration context, silence trimming, and voice-level audio processing. VoiceRender forwards canonical `say_as` text and source offsets unchanged, including wrapper punctuation inside an authored span.
++Kokoro uses PyKokoro's public `error_diagnostic` helper when available. The Kokoro extra requires PyKokoro `>=0.10.13,<0.11`, the first release with `AudioOutputPolicy.PRESERVE_SILENCE`. VoiceRender requires that exact policy on every synthesis and rejects installations without it during preflight/session initialization. `PRESERVE_SILENCE` disables generic silence trimming while allowing configured short-sentence processing and target crops, AkinVox narration-context processing and target crops, and voice-level calibration. VoiceRender does not request raw inference output. It forwards canonical `say_as` text and source offsets unchanged, including wrapper punctuation inside an authored span.
+ The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
+
+ Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
+@@ -215,11 +215,11 @@ voicerender profile show printer-cast.renderprofile.toml
+ voicerender profile validate printer-cast.renderprofile.toml
+ ```
+
+-The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes raw synthesis artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
++The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it reports configured short-sentence processing and its mode/threshold. The pause summary distinguishes renderer-returned speech artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+
+ ### Speech artifacts and pause policy
+
+-VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, VoiceRender requires PyKokoro's raw output policy and verifies frame counts at the adapter and WAV persistence boundaries. PCM16 storage quantization is the only representation change; samples outside the PCM16 full-scale range are rejected rather than clipped. Per-segment diagnostics and cache metadata record raw policy, source/adapter/persisted frame counts, and available PyKokoro duration trace data. VoiceRender does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, shape boundaries, insert silence, or normalize pauses. AudioCompose owns pause and silence removal, boundary shaping, pause insertion, and crossfades. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for AudioCompose; with `mode = "none"`, no policy pause is inserted. Artifacts from the former trailing-silence policy are stale and require a one-time re-render with `--force` or `--reset-stale`; removed samples cannot be recovered.
++VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, `AudioOutputPolicy.PRESERVE_SILENCE` forbids generic silence trimming while retaining normal semantic processing, including short-sentence and AkinVox narration-context crops and voice-level calibration. VoiceRender verifies that PyKokoro's final returned frame count matches the adapter and persisted WAV; pre-crop inference length may differ. PCM16 storage quantization is the only VoiceRender representation change; samples outside the PCM16 full-scale range are rejected rather than clipped. Per-segment diagnostics and cache metadata record `renderer_output_policy = preserve_silence`, returned/adapter/persisted frame counts, and available PyKokoro trace data and voice-level application metadata. VoiceRender itself does not trim renderer-leading or renderer-trailing silence, detect or shape boundaries, insert silence, or normalize pauses. AudioCompose owns downstream pause and silence removal, boundary shaping, pause insertion, and crossfades. Manual pause durations describe composition policy and are not baked into individual speech WAVs. Artifacts with policy ID `voicerender.raw-synthesis.v2` are stale under `voicerender.preserve-silence.v3` and require a one-time re-render; removed samples cannot be recovered.
+
+ ## ONNX Runtime provider policy
+
+@@ -309,9 +309,9 @@ Preflight validates local content pins and managed catalog metadata, and measure
+
+ ### Kokoro quality and voice-level options
+
+-Kokoro option descriptors still list `short_sentence` (`off`, `wrap`, `phrase`, or `randomized-phrase`) and `voice_level` (`off` or `calibrated`) so profiles can retain their configured values. The fixed raw output policy takes precedence at synthesis: the effective short-sentence mode is always off, and voice-level processing does not modify the audio. No VoiceRender option can re-enable PyKokoro audio processing.
++Kokoro option descriptors list `short_sentence` (`off`, `wrap`, `phrase`, or `randomized-phrase`) and `voice_level` (`off` or `calibrated`) so profiles can retain their configured values. Under `PRESERVE_SILENCE`, those configured options remain effective: short-sentence target crops and voice-level processing are allowed, and PyKokoro reports the resulting mode/application. The policy itself does not force either feature off; it disables only generic silence trimming.
+
+-`--short-sentence` and the generic `short_sentence` table remain profile-authoring conveniences, not runtime switches for raw audio processing. VoiceRender preserves their configured values for profile identity and inspection, but PyKokoro raw mode forces the effective short-sentence mode off. The same applies to `voice_level`; render diagnostics report effective raw-mode behavior.
++`--short-sentence` and the generic `short_sentence` table are profile-authoring conveniences, not policy toggles. VoiceRender preserves their values for profile identity and inspection; PyKokoro follows the configured mode under `PRESERVE_SILENCE`, and diagnostics report the resulting mode. Narration-context processing is also allowed. No VoiceRender-side logic controls those PyKokoro features.
+
+ ```bash
+ voicerender profile create \
+@@ -336,7 +336,7 @@ voicerender profile bind kokoro.renderprofile.toml narrator \
+   --option 'voice_level={"mode":"off","gain_db":-1.5}' --in-place
+ ```
+
+-`short_sentence` tables retain their documented field shape, but PyKokoro raw mode always bypasses their audio-processing behavior. `voice_level` settings likewise do not alter raw output, even though they remain visible in profile bindings. VoiceRender performs no loudness DSP and does not clip finite overshoots; out-of-range samples are rejected before persistence.
++`short_sentence` tables retain their documented field shape, and PyKokoro may perform their configured processing under `PRESERVE_SILENCE`. `voice_level` settings likewise remain active and their application metadata is preserved. VoiceRender performs no loudness DSP and does not clip finite overshoots; out-of-range samples are rejected before persistence.
+
+ ### Kokoro pronunciation lexicons
+
+@@ -604,7 +604,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
+ - **No implicit model downloads:** install SDKs and assets through each engine's supported process.
+ - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
+ - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
+-- **Raw speech artifacts:** VoiceRender persists the complete validated synthesis waveform without boundary detection, silence removal, or pause realization; AudioCompose owns downstream speech-boundary conditioning and explicit pauses.
++- **Renderer-returned speech artifacts:** VoiceRender persists the complete validated waveform returned by the renderer without adding boundary detection, silence removal, or pause realization; AudioCompose owns downstream speech-boundary conditioning and explicit pauses.
+ - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
+
+ ## Tests
+diff --git a/docs/index.md b/docs/index.md
+index 37c1a86..5fb5bff 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -67,7 +67,7 @@ Engine adapters implement the request-level protocol in `voicerender.engines.bas
+
+ RenderPlan `say_as` controls lower to typed request-local `SayAsSpan` values. Kokoro forwards those spans and the unchanged canonical text to PyKokoro, which owns character-spelling realization. A canonical `(A R T)` span therefore remains parenthesized at the VoiceRender boundary; PyKokoro owns the frontend projection, and VoiceRender does not trim wrapper punctuation. Adapters that do not advertise the requested interpretation reject it during preflight.
+
+-VoiceRender's Kokoro boundary requires PyKokoro `>=0.10.13,<0.11` and requests `AudioOutputPolicy.RAW` on every synthesis. Preflight rejects a missing capability. Raw mode disables PyKokoro short-sentence processing, narration context, silence trimming, and voice-level audio changes. VoiceRender stores the returned frame sequence as PCM16, rejects out-of-range samples instead of clipping, and verifies frame counts through adaptation and WAV persistence. Per-segment diagnostics and cache metadata retain raw-policy, frame-count, and available duration provenance. AudioCompose owns silence removal, boundary shaping, pauses, crossfades, and composition.
++VoiceRender's Kokoro boundary requires PyKokoro `>=0.10.13,<0.11` and `AudioOutputPolicy.PRESERVE_SILENCE` on every synthesis. VoiceRender does not ask PyKokoro for raw inference output. This policy disables generic silence trimming while allowing configured short-sentence processing and target crops, AkinVox narration-context processing and target crops, and voice-level calibration. VoiceRender preserves PyKokoro's final returned waveform, verifies frame counts from that waveform through adapter and WAV persistence, and rejects out-of-range samples instead of clipping. Metadata records `renderer_output_policy = preserve_silence` and returned/adapter/persisted frame provenance, not equality with pre-crop model inference. AudioCompose owns downstream silence removal, boundary shaping, pauses, crossfades, and composition.
+
+ Pinned local and Voicefolio-managed reference sources are supported for PocketSynth, SoproSynth, and Kokoro enrollment. Local path bindings are machine-specific; managed references are portable. Preflight validates source metadata and measures requests without fetching managed audio or enrolling voices. Composition, external-media resolution, mastering, and export belong to downstream tools.
+
+diff --git a/docs/renderprofile.md b/docs/renderprofile.md
+index 631bd80..0008d6e 100644
+--- a/docs/renderprofile.md
++++ b/docs/renderprofile.md
+@@ -146,11 +146,11 @@ Kitten remains on its historical eSpeak-only path when no lexicon sources are co
+
+ ## Speech artifacts and pause policy
+
+-VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, PyKokoro `>=0.10.13,<0.11` is required and every synthesis request uses its raw output policy. VoiceRender verifies frame counts through adaptation and WAV persistence; PCM16 quantization is the only representation change, and out-of-range samples are rejected instead of clipped. Diagnostics and cache metadata record raw policy, frame provenance, and available PyKokoro duration data. VoiceRender never removes silence, detects or shapes boundaries, inserts pauses, or crossfades. AudioCompose owns those operations. Manual pause durations describe composition policy and are not baked into individual VoiceRender WAVs.
++VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, PyKokoro `>=0.10.13,<0.11` is required and every synthesis request uses `AudioOutputPolicy.PRESERVE_SILENCE`. This disables generic silence trimming while allowing configured short-sentence processing and target crops, AkinVox narration-context processing and target crops, and voice-level calibration. VoiceRender verifies frame counts from PyKokoro's final returned waveform through adaptation and WAV persistence; it does not require equality with pre-crop inference length. PCM16 quantization is the storage representation change, and out-of-range samples are rejected instead of clipped. Diagnostics and cache metadata record preserve-silence policy, returned/adapter/persisted frame counts, and available PyKokoro duration data and voice-level application metadata. VoiceRender itself never trims silence, detects or shapes boundaries, inserts pauses, or crossfades. AudioCompose owns those operations. Manual pause durations describe composition policy and are not baked into individual VoiceRender WAVs.
+
+-`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for AudioCompose to realize after synthesis. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports pause durations separately from the raw synthesis artifacts.
++`PausePolicy(mode = "manual")` records clause, sentence, paragraph, and optionally parenthetical durations for AudioCompose to realize after synthesis. Newly created profiles for every engine default to `parenthetical = "180ms"`; omitting that entry preserves joined parenthetical text, while `0ms` still splits the request without adding silence. Existing profiles are not rewritten. `mode = "none"` means no policy pause is inserted. These pauses are not baked into VoiceRender's individual speech WAVs. The human `profile show` view reports pause durations separately from renderer-returned speech artifacts.
+
+-VoiceRender artifacts produced under the former trailing-silence policy are stale under the raw audio artifact generation and must be rendered again once. Removed samples cannot be recovered, so old output is never upgraded by changing metadata. RenderPlan rendering reports `output.stale_audio_artifact` unless the caller re-renders with `--force` or resets the stale output with `--reset-stale`. Future silence-detector changes do not require re-synthesis.
++Artifacts with policy ID `voicerender.raw-synthesis.v2` are stale under `voicerender.preserve-silence.v3` and must be rendered again once. The policy-ID mismatch is sufficient to reject old caches; removed samples cannot be recovered, so old output is never upgraded by changing metadata. RenderPlan rendering reports `output.stale_audio_artifact` unless the caller re-renders with `--force` or resets the stale output with `--reset-stale`.
+
+ ## UtterPlan bundle projection
+
+@@ -322,7 +322,7 @@ mode = "calibrated"
+ # gain_db = -1.5
+ ```
+
+-`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; these values remain profile metadata, but required PyKokoro raw mode forces the effective short-sentence mode off. `profile show` reports the configured state, while render diagnostics report effective runtime behavior and raw frame provenance. The same fixed raw policy prevents `voice_level` processing from changing audio. VoiceRender does not add loudness DSP or clip finite full-scale overshoots; out-of-range values are rejected before persistence.
++`short_sentence` supports `enabled`, `resolve_mode` (`wrap`, `phrase`, or `randomized-phrase`), `min_phoneme_length`, `phoneme_pretext`, and `phrase_fallback_tries`; these values remain profile configuration and configured processing is allowed under `PRESERVE_SILENCE`. `profile show` reports configured state, while render diagnostics report PyKokoro's resulting mode and returned/adapter/persisted frame provenance. AkinVox narration-context processing and voice-level calibration are also allowed. The policy disables generic silence trimming, not semantic synthesis processing. VoiceRender does not add loudness DSP or clip finite full-scale overshoots; out-of-range samples are rejected before persistence.
+
+ Kokoro enrollment modes have different semantics. **Inno** uses reference audio to tune a voice, requires no transcript, and may accept `fmax`. **AkinVox** performs transcript-conditioned cloning: it requires the exact non-empty reference transcript, currently supports English only, and requires synthesis speed `1.0`. The generic `voicerender voice clone --engine kokoro ... --transcript ...` path binds that transcript into AkinVox's enrollment options. Conflicting transcript sources are rejected, and Inno does not accept a transcript. Reference resolution and enrollment remain lazy until rendering; preflight only checks pins/metadata and measures the text request.
+
+diff --git a/tests/test_bundle_inspect.py b/tests/test_bundle_inspect.py
+index 89e2dc3..7b57d44 100644
+--- a/tests/test_bundle_inspect.py
++++ b/tests/test_bundle_inspect.py
+@@ -508,17 +508,28 @@ def test_bundle_render_inspection_reports_stale_and_unsafe_reset(
+     output = output_root / variant / "document-0001"
+     output.mkdir(parents=True)
+     (output / "000001.wav").mkdir()
++    plan = load_plan(
++        root / "renderplan" / variant / "document.renderplan.toml"
++    )
+     stale_manifest = RenderManifest(
+-        render_plan_id="sha256:" + "0" * 64,
++        render_plan_id=plan.plan_id or plan.computed_id(),
+         speech=(),
+         complete=False,
+     ).with_identity()
+     save_manifest(stale_manifest, output / "render-manifest.toml")
++    (output / "render-diagnostics.json").write_text(
++        json.dumps({"audio_artifact_policy": "voicerender.raw-synthesis.v2"}),
++        encoding="utf-8",
++    )
+
+     inspected = inspect_bundle_render(root, variant=variant, output_root=output_root)
+
+     assert inspected.state == "stale"
+     assert inspected.stale_occurrences
++    assert (
++        inspected.stale_occurrences[0].detail
++        == "render output predates the current VoiceRender audio artifact policy"
++    )
+     assert inspected.force_required
+     assert not inspected.reset_safe
+     assert not inspected.replacement_safe
+diff --git a/tests/test_engine_registry.py b/tests/test_engine_registry.py
+index 44e85ec..cd21e6c 100644
+--- a/tests/test_engine_registry.py
++++ b/tests/test_engine_registry.py
+@@ -370,14 +370,17 @@ def test_all_engine_probes_use_public_api_without_loading_models(
+     elif engine == "kokoro":
+         fake.REQUEST_API_VERSION = 2
+         fake.SynthesisConfig.__annotations__ = {"audio_output_policy": object}
+-        fake.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
++        fake.AudioOutputPolicy = SimpleNamespace(
++            PRESERVE_SILENCE=SimpleNamespace(value="preserve_silence"),
++            RAW=SimpleNamespace(value="raw"),
++        )
+         fake.request_api_contract = lambda: SimpleNamespace(
+             version=2,
+             supports_request_measurement=True,
+             supports_reference_voice=True,
+             supports_voice_enrollment=True,
+             supports_say_as=True,
+-            supports_audio_output_policy=True,
++            supports_preserve_silence_output_policy=True,
+             say_as_interpretations=("characters",),
+         )
+     original = importlib.import_module
+diff --git a/tests/test_kokoro_reference.py b/tests/test_kokoro_reference.py
+index 2052d28..0ad444e 100644
+--- a/tests/test_kokoro_reference.py
++++ b/tests/test_kokoro_reference.py
+@@ -207,6 +207,8 @@ def _install(
+         "config": None,
+         "audio": np.ones(24, dtype=np.float32),
+         "diagnostics": (),
++        "trace": None,
++        "voice_level_applications": (),
+         "short_sentence_mode": None,
+         "measurements": [],
+         "measure_error": None,
+@@ -289,9 +291,9 @@ def _install(
+                 voice=request.voice,
+                 phonemes="t e s t",
+                 token_ids=(1, 2),
+-                trace=None,
++                trace=state["trace"],
+                 short_sentence_mode=state["short_sentence_mode"],
+-                voice_level_applications=(),
++                voice_level_applications=state["voice_level_applications"],
+             )
+
+         def close(self) -> None:
+@@ -303,7 +305,10 @@ def _install(
+     module.TokenizerConfig = FakeConfig
+     module.ShortSentenceConfig = FakeConfig
+     module.SynthesisConfig = FakeSynthesisConfig
+-    module.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
++    module.AudioOutputPolicy = SimpleNamespace(
++        PRESERVE_SILENCE=SimpleNamespace(value="preserve_silence"),
++        RAW=SimpleNamespace(value="raw"),
++    )
+     module.VoiceLevelConfig = FakeConfig
+     module.InnoEnrollmentOptions = FakeInnoOptions
+     module.KokoroSynthesizer = FakeSynthesizer
+@@ -340,7 +345,10 @@ def _api_probe_module(
+     ):
+         setattr(module, name, type(name, (), {}))
+     module.SynthesisConfig.__annotations__ = {"audio_output_policy": object}
+-    module.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
++    module.AudioOutputPolicy = SimpleNamespace(
++        PRESERVE_SILENCE=SimpleNamespace(value="preserve_silence"),
++        RAW=SimpleNamespace(value="raw"),
++    )
+     module.REQUEST_API_VERSION = api_version
+     module.request_api_contract = lambda: SimpleNamespace(
+         supports_request_measurement=True,
+@@ -372,20 +380,35 @@ def test_kokoro_probe_requires_request_api_v2_and_say_as_capability(
+     )
+
+
+-def test_pykokoro_raw_output_policy_is_required(
+-    monkeypatch: pytest.MonkeyPatch,
++@pytest.mark.parametrize(
++    "output_policy",
++    [
++        SimpleNamespace(RAW=SimpleNamespace(value="raw")),
++        SimpleNamespace(
++            RAW=SimpleNamespace(value="raw"),
++            PROCESSED=SimpleNamespace(value="processed"),
++        ),
++        SimpleNamespace(
++            PRESERVE_SILENCE=SimpleNamespace(value="raw"),
++            RAW=SimpleNamespace(value="raw"),
++        ),
++    ],
++    ids=("raw-only", "raw-and-processed", "wrong-preserve-value"),
++)
++def test_pykokoro_preserve_silence_output_policy_is_required(
++    monkeypatch: pytest.MonkeyPatch, output_policy: SimpleNamespace
+ ) -> None:
+     module = _api_probe_module()
+-    module.AudioOutputPolicy = SimpleNamespace(
+-        PROCESSED=SimpleNamespace(value="processed")
+-    )
++    module.AudioOutputPolicy = output_policy
+     monkeypatch.setitem(sys.modules, "pykokoro", module)
+
+     adapter = PyKokoroEngineAdapter()
+     probe = adapter.probe_api()
+     assert not probe.compatible
+     assert (
+-        probe.details["capability_mismatches"]["supports_audio_output_policy"]["actual"]
++        probe.details["capability_mismatches"][
++            "supports_preserve_silence_output_policy"
++        ]["actual"]
+         is False
+     )
+
+@@ -393,17 +416,19 @@ def test_pykokoro_raw_output_policy_is_required(
+         engine="kokoro", target_id="kokoro-test", language="en-US", voice="af_heart"
+     )
+     with pytest.raises(
+-        EngineBackendError, match="raw acoustic output policy is required"
++        EngineBackendError,
++        match="preserve-silence audio output policy is required",
+     ) as caught:
+         adapter.open(selection)
+-    assert caught.value.code == "pykokoro.raw_output_policy_unsupported"
++    assert caught.value.code == "pykokoro.preserve_silence_output_policy_unsupported"
+
+-    assert probe.error_message == (
+-        "PyKokoro raw acoustic output policy is required by VoiceRender but is unsupported"
++    expected_message = (
++        "PyKokoro preserve-silence audio output policy is required by VoiceRender but is "
++        "not supported by the installed PyKokoro version."
+     )
++    assert probe.error_message == expected_message
+
+-
+-def test_kokoro_measurement_reports_effective_raw_output_policy(
++def test_kokoro_measurement_reports_preserve_silence_policy_details(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     model = _model()
+@@ -415,17 +440,19 @@ def test_kokoro_measurement_reports_effective_raw_output_policy(
+     with adapter.open(selection) as session:
+         measured = session.measure(
+             SpeechRequest(
+-                id="raw-measurement", text="measure raw policy", language="en-US"
++                id="preserve-silence-measurement",
++                text="measure preserve-silence policy",
++                language="en-US",
+             )
+         )
+
+     detail = measured.details["preflight_detail"]
+-    assert "raw output capability: supported" in detail
+-    assert "effective short sentence mode: off" in detail
+-    assert "effective narration context: disabled by raw policy" in detail
+-    assert "generic trim: disabled" in detail
+-    assert "voice-level processing: disabled by raw policy" in detail
+-
++    assert "renderer output policy: preserve_silence" in detail
++    assert "preserve-silence capability: supported" in detail
++    assert "generic silence trim: disabled" in detail
++    assert "short-sentence processing: allowed/configured" in detail
++    assert "narration-context processing: allowed" in detail
++    assert "voice-level processing: allowed/configured" in detail
+
+ def test_pykokoro_request_forwards_say_as_without_changing_text(
+     monkeypatch: pytest.MonkeyPatch,
+@@ -952,10 +979,12 @@ def _synthesize_pcm_audio(
+     audio: Any,
+     *,
+     diagnostics: tuple[str, ...] = (),
++    trace: Any = None,
+ ) -> Any:
+     adapter, state = _install(monkeypatch, _model())
+     state["audio"] = audio
+     state["diagnostics"] = diagnostics
++    state["trace"] = trace
+     selection = EngineSelection(
+         engine="kokoro",
+         target_id="kokoro-test",
+@@ -968,7 +997,7 @@ def _synthesize_pcm_audio(
+         )
+
+
+-def test_kokoro_raw_audio_preserves_float32_samples_and_frames(
++def test_kokoro_adapter_preserves_pykokoro_returned_samples_and_frames(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     source = np.random.default_rng(1).uniform(-1, 1, 61_800).astype(np.float32)
+@@ -978,11 +1007,33 @@ def test_kokoro_raw_audio_preserves_float32_samples_and_frames(
+     assert rendered.warnings == ()
+     assert rendered.metadata["pykokoro_returned_frames"] == 61_800
+     assert rendered.metadata["voicerender_adapter_frames"] == 61_800
+-    assert rendered.metadata["renderer_output_policy"] == "raw"
++    assert rendered.metadata["renderer_output_policy"] == "preserve_silence"
+     assert "pcm_range" not in rendered.metadata
+
+
+-def test_kokoro_raw_adapter_preserves_exact_zero_tail(
++
++
++def test_kokoro_accepts_semantic_crop_before_final_waveform(monkeypatch: pytest.MonkeyPatch) -> None:
++    source = np.concatenate(
++        (np.full(52_200, 0.25, dtype=np.float32), np.zeros(9_600, dtype=np.float32))
++    )
++    trace = {
++        "model": {
++            "inference_samples": 100_000,
++            "narration_context_applied": True,
++            "short_sentence_mode": "randomized-phrase",
++            "short_sentence_cut_applied": True,
++        }
++    }
++
++    rendered = _synthesize_pcm_audio(monkeypatch, source, trace=trace)
++
++    np.testing.assert_array_equal(rendered.audio, source)
++    assert rendered.metadata["trace"]["model"]["inference_samples"] == 100_000
++    assert rendered.metadata["pykokoro_returned_frames"] == 61_800
++    assert rendered.metadata["voicerender_adapter_frames"] == 61_800
++
++def test_kokoro_adapter_preserves_exact_zero_tail(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     source = np.concatenate(
+@@ -995,7 +1046,7 @@ def test_kokoro_raw_adapter_preserves_exact_zero_tail(
+     assert np.count_nonzero(rendered.audio[-9_600:]) == 0
+
+
+-def test_kokoro_raw_adapter_preserves_distinctive_final_samples(
++def test_kokoro_adapter_preserves_distinctive_final_samples(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     source = np.array([0.2, -0.31, 0.47, -0.82, 0.93], dtype=np.float32)
+@@ -1005,7 +1056,7 @@ def test_kokoro_raw_adapter_preserves_distinctive_final_samples(
+
+
+ @pytest.mark.parametrize("bad_sample", [1.000005, -1.000005])
+-def test_kokoro_raw_audio_rejects_overshoots_instead_of_clamping(
++def test_kokoro_adapter_rejects_overshoots_instead_of_clamping(
+     monkeypatch: pytest.MonkeyPatch, bad_sample: float
+ ) -> None:
+     with pytest.raises(EngineBackendError) as caught:
+@@ -1244,13 +1295,14 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
+             "voice_level": {"mode": "off", "gain_db": -1.5},
+         },
+     )
++    state["short_sentence_mode"] = "randomized-phrase"
+     with adapter.open(selection) as session:
+         config = state["config"]
+         rendered = session.synthesize(
+             SpeechRequest(id="structured", text="Configured speech", language="en-US")
+         )
+     assert config.short_sentence_config.enabled is True
+-    assert config.audio_output_policy.value == "raw"
++    assert config.audio_output_policy.value == "preserve_silence"
+     assert config.short_sentence_config.resolve_mode == "randomized-phrase"
+     assert config.short_sentence_config.min_phoneme_length == 45
+     assert config.short_sentence_config.phoneme_pretext == "—"
+@@ -1258,8 +1310,50 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
+     assert config.voice_level.mode == "off"
+     assert config.voice_level.gain_db == -1.5
+     assert rendered.metadata["voice_level"]["mode"] == "off"
++    assert rendered.metadata["short_sentence_mode"] == "randomized-phrase"
++
+
+
++def test_kokoro_preserves_voice_level_application_under_preserve_silence(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    adapter, state = _install(monkeypatch, _model())
++    state["voice_level_applications"] = (
++        {
++            "mode": "calibrated",
++            "applied": True,
++            "gain_db": -2.5,
++            "source": "static_catalog",
++            "key": "fixture-calibration",
++            "corpus": "fixture-r1",
++        },
++    )
++    selection = EngineSelection(
++        engine="kokoro",
++        target_id="kokoro-test",
++        language="en-US",
++        voice="af_heart",
++        options={"voice_level": {"mode": "calibrated"}},
++    )
++
++    with adapter.open(selection) as session:
++        config = state["config"]
++        rendered = session.synthesize(
++            SpeechRequest(id="voice-level", text="Calibrated voice", language="en-US")
++        )
++
++    assert config.audio_output_policy.value == "preserve_silence"
++    assert config.voice_level.mode == "calibrated"
++    assert rendered.metadata["voice_level"] == {
++        "mode": "calibrated",
++        "applied": True,
++        "gain_db": -2.5,
++        "source": "static_catalog",
++        "reason": None,
++        "calibration_identity": "fixture-calibration",
++        "calibration_revision": "fixture-r1",
++    }
++
+ def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+@@ -1294,6 +1388,19 @@ def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
+         assert state["config"].short_sentence_config.enabled is False
+
+
++
++    state["short_sentence_mode"] = None
++    configured = EngineSelection(
++        engine="kokoro",
++        target_id="kokoro-test",
++        language="en-US",
++        options={"short_sentence": "randomized-phrase"},
++    )
++    with adapter.open(configured) as session:
++        fallback_rendered = session.synthesize(request)
++    assert state["config"].short_sentence_config.enabled is True
++    assert fallback_rendered.metadata["short_sentence_mode"] == "randomized-phrase"
++
+ def test_kokoro_forwards_persisted_g2lex_tables_as_public_file_refs(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+index 6224c4b..0f3d22f 100644
+--- a/tests/test_preflight.py
++++ b/tests/test_preflight.py
+@@ -1577,18 +1577,24 @@ def test_preflight_events_count_required_items_including_terminal_errors(
+     assert adapter.synthesized_texts == []
+
+
+-def test_kokoro_preflight_reports_raw_output_policy_details(
++def test_kokoro_preflight_reports_preserve_silence_policy_details(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
++    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
++
+     adapter = _Adapter()
+     adapter.id = "kokoro"
+     adapter.package_name = "pykokoro"
+     detail = (
+-        "audio policy: voicerender.raw-synthesis.v2; renderer output policy: raw; "
+-        "raw output capability: supported; effective short sentence mode: off; "
+-        "effective narration context: disabled by raw policy; generic trim: disabled; voice-level processing: disabled by raw policy"
+-    )
+-    adapter.measurements["Kokoro raw policy"] = RequestMeasure(
++        f"audio policy: {AUDIO_ARTIFACT_POLICY_ID}; "
++        "renderer output policy: preserve_silence; "
++        "preserve-silence capability: supported; "
++        "generic silence trim: disabled; "
++        "short-sentence processing: allowed/configured; "
++        "narration-context processing: allowed; "
++        "voice-level processing: allowed/configured"
++    )
++    adapter.measurements["Kokoro preserve-silence policy"] = RequestMeasure(
+         fits=True,
+         amount=17,
+         maximum=100,
+@@ -1598,23 +1604,25 @@ def test_kokoro_preflight_reports_raw_output_policy_details(
+     )
+     monkeypatch.setitem(_ADAPTERS, "kokoro", adapter)
+     plan = _plan(
+-        ("Kokoro raw policy", True, "sentence"),
++        ("Kokoro preserve-silence policy", True, "sentence"),
+         binding={"renderer": "kokoro", "target_id": _TARGET_ID, "voice": "voice-a"},
+     )
+
+-    report = preflight_render_plan(plan, tmp_path / "kokoro-raw-policy.toml")
++    report = preflight_render_plan(plan, tmp_path / "kokoro-preserve-silence-policy.toml")
+
+     assert report.status == "ok"
+     assert report.checks[0].detail == detail
+
+-
+-def test_kokoro_preflight_rejects_missing_raw_output_policy(
++def test_kokoro_preflight_rejects_missing_preserve_silence_output_policy(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     adapter = _Adapter()
+     adapter.id = "kokoro"
+     adapter.package_name = "pykokoro"
+-    message = "PyKokoro raw acoustic output policy is required by VoiceRender but is unsupported"
++    message = (
++        "PyKokoro preserve-silence audio output policy is required by VoiceRender but "
++        "is not supported by the installed PyKokoro version."
++    )
+     adapter.probe_api = lambda: EngineApiProbe(
+         engine="kokoro",
+         package="pykokoro",
+@@ -1625,17 +1633,17 @@ def test_kokoro_preflight_rejects_missing_raw_output_policy(
+         error_message=message,
+         details={
+             "capability_mismatches": {
+-                "supports_audio_output_policy": {"expected": True, "actual": False}
++                "supports_preserve_silence_output_policy": {"expected": True, "actual": False}
+             }
+         },
+     )
+     monkeypatch.setitem(_ADAPTERS, "kokoro", adapter)
+     plan = _plan(
+-        ("Kokoro raw policy", True, "sentence"),
++        ("Kokoro preserve-silence policy", True, "sentence"),
+         binding={"renderer": "kokoro", "target_id": _TARGET_ID, "voice": "voice-a"},
+     )
+
+-    report = preflight_render_plan(plan, tmp_path / "kokoro-no-raw-policy.toml")
++    report = preflight_render_plan(plan, tmp_path / "kokoro-no-preserve-silence-policy.toml")
+
+     assert report.status == "reject"
+     assert report.checks[0].detail == message
+diff --git a/tests/test_profile_roles_cli.py b/tests/test_profile_roles_cli.py
+index 485c126..0b5e143 100644
+--- a/tests/test_profile_roles_cli.py
++++ b/tests/test_profile_roles_cli.py
+@@ -530,7 +530,7 @@ def test_role_list_and_profile_show_present_the_complete_cast(
+     assert "RenderProfile " in show_output
+     assert "Planning:" in show_output
+     assert "Pauses\n  mode: none" in show_output
+-    assert "speech artifact audio: complete raw synthesis waveform" in show_output
++    assert "speech artifact audio: complete validated renderer waveform" in show_output
+     assert "no policy pause is inserted" in show_output
+     assert "short sentence: off (implicit)" in show_output
+     assert "short sentence: off (explicit)" in show_output
+@@ -646,5 +646,5 @@ def test_profile_show_explains_manual_pauses_follow_normalized_speech(
+     assert "  sentence: 500" in output
+     assert "  paragraph: 800" in output
+     assert "  parenthetical: 180" in output
+-    assert "speech artifact audio: complete raw synthesis waveform" in output
+-    assert "AudioCompose realizes pauses after raw speech" in output
++    assert "speech artifact audio: complete validated renderer waveform" in output
++    assert "AudioCompose realizes pauses after renderer output" in output
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+index 058529c..f2a9647 100644
+--- a/tests/test_renderer.py
++++ b/tests/test_renderer.py
+@@ -210,7 +210,7 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
+     cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
+     assert cache_data["schema"] == _CACHE_SCHEMA == "voicerender.batch-cache.v3"
+     assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+-    assert cache_data["renderer_output_policy"] == "raw"
++    assert cache_data["renderer_output_policy"] == "preserve_silence"
+     assert "audio_boundary" not in cache_data
+
+     reused = render(
+@@ -235,9 +235,7 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
+     assert rejected_policy.rendered_count == 1
+     assert len(mock_engine.calls) == 2
+     cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
+-    cache_data["schema"] = "voicerender.batch-cache.v2"
+-    cache_data.pop("audio_artifact_policy")
+-    cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
++    cache_data["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
+     cache_meta.write_text(json.dumps(cache_data), encoding="utf-8")
+     regenerated = render(
+         speech,
+diff --git a/tests/test_renderplan_render.py b/tests/test_renderplan_render.py
+index 42002e8..5af660f 100644
+--- a/tests/test_renderplan_render.py
++++ b/tests/test_renderplan_render.py
+@@ -571,7 +571,7 @@ def test_verified_cache_reuse_materializes_numbered_wav_and_corruption_regenerat
+     assert wav_info(tmp_path / "third" / "000001.wav")["frames"] > 0
+
+
+-def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
++def test_renderplan_preserves_final_audio_and_rejects_old_cache(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+     import numpy as np
+@@ -581,29 +581,28 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+
+     adapter = _install(monkeypatch)
+     adapter.metadata = {
+-        "short_sentence_mode": "wrap",
+-        "renderer_output_policy": "raw",
+-        "pykokoro_returned_frames": 33_600,
+-        "voicerender_adapter_frames": 33_600,
++        "short_sentence_mode": "randomized-phrase",
++        "renderer_output_policy": "preserve_silence",
++        "pykokoro_returned_frames": 61_800,
++        "voicerender_adapter_frames": 61_800,
+         "trace": {
+             "model": {
+-                "inference_samples": 33_600,
++                "inference_samples": 100_000,
+                 "duration_count": 280,
+                 "duration_frames": 1_400,
+                 "samples_per_frame": 24,
+-                "expected_audio_samples": 33_600,
+-                "actual_audio_samples": 33_600,
+-                "narration_context_applied": False,
+-                "short_sentence_mode": "off",
+-                "short_sentence_cut_applied": False,
++                "expected_audio_samples": 100_000,
++                "actual_audio_samples": 61_800,
++                "narration_context_applied": True,
++                "short_sentence_mode": "randomized-phrase",
++                "short_sentence_cut_applied": True,
+                 "silence_trim_applied": False,
+                 "voice_level_applied": False,
+                 "sample_count_preserved": True,
+-                "sample_values_preserved": True,
+             }
+         },
+     }
+-    adapter.audio = [0.2] * 24_000 + [0.0] * 9_600
++    adapter.audio = [0.2] * 52_200 + [0.0] * 9_600
+     plan = _plan("speech with renderer tail")
+     report = _report(adapter, plan, tmp_path)
+     cache = tmp_path / "raw-cache"
+@@ -616,9 +615,9 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+     )
+     assert not first.failed
+     assert first.rendered_count == 1
+-    assert first.manifest.speech[0].frames == 33_600
+-    assert wav_info(tmp_path / "raw-first" / "000001.wav")["frames"] == 33_600
+-    assert wav_info(next(cache.glob("*.wav")))["frames"] == 33_600
++    assert first.manifest.speech[0].frames == 61_800
++    assert wav_info(tmp_path / "raw-first" / "000001.wav")["frames"] == 61_800
++    assert wav_info(next(cache.glob("*.wav")))["frames"] == 61_800
+     first_audio, first_rate = sf.read(
+         tmp_path / "raw-first" / "000001.wav", dtype="float32"
+     )
+@@ -627,12 +626,14 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+     fingerprint = first.execution_fingerprint[0]
+     assert fingerprint["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+     assert "audio_boundary" not in fingerprint
+-    assert fingerprint["render_result"]["short_sentence_mode"] == "wrap"
++    assert fingerprint["render_result"]["short_sentence_mode"] == "randomized-phrase"
+     assert (
+         fingerprint["render_result"]["audio_artifact_policy"]
+         == AUDIO_ARTIFACT_POLICY_ID
+     )
+-    assert fingerprint["render_result"]["pykokoro_inference_frames"] == 33_600
++    assert fingerprint["render_result"]["pykokoro_inference_frames"] == 100_000
++    assert fingerprint["render_result"]["pykokoro_returned_frames"] == 61_800
++    assert fingerprint["render_result"]["voicerender_adapter_frames"] == 61_800
+     assert fingerprint["render_result"]["pykokoro_duration_frames"] == 1_400
+     assert fingerprint["render_result"]["frame_count_preserved"] is True
+     diagnostics = json.loads(
+@@ -645,21 +646,24 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+     render_diagnostics = diagnostics["render_results"][
+         first.manifest.speech[0].segment_id
+     ]
+-    assert render_diagnostics["renderer_output_policy"] == "raw"
+-    assert render_diagnostics["pykokoro_returned_frames"] == 33_600
++    assert render_diagnostics["renderer_output_policy"] == "preserve_silence"
++    assert render_diagnostics["pykokoro_returned_frames"] == 61_800
++    assert render_diagnostics["pykokoro_inference_frames"] == 100_000
++    assert render_diagnostics["voicerender_adapter_frames"] == 61_800
++    assert "pykokoro_sample_values_preserved" not in render_diagnostics
+     assert render_diagnostics["pykokoro_duration_frames"] == 1_400
+-    assert render_diagnostics["persisted_frames"] == 33_600
++    assert render_diagnostics["persisted_frames"] == 61_800
+     assert render_diagnostics["frame_count_preserved"] is True
+
+     cache_sidecar = next(cache.glob("*.json"))
+     cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
+     assert cache_data["schema"] == "voicerender.renderplan-cache.v3"
+     assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
+-    assert cache_data["renderer_output_policy"] == "raw"
++    assert cache_data["renderer_output_policy"] == "preserve_silence"
+     assert "audio_boundary" not in cache_data
+-    assert cache_data["render_result"]["renderer_output_policy"] == "raw"
++    assert cache_data["render_result"]["renderer_output_policy"] == "preserve_silence"
+     assert cache_data["render_result"]["pykokoro_duration_frames"] == 1_400
+-    assert cache_data["render_result"]["persisted_frames"] == 33_600
++    assert cache_data["render_result"]["persisted_frames"] == 61_800
+     assert cache_data["render_result"]["frame_count_preserved"] is True
+     reused = render_renderplan(
+         plan,
+@@ -670,12 +674,12 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+     assert reused.reused_count == 1
+     assert "audio_boundary" not in reused.execution_fingerprint[0]
+     reused_render_result = reused.execution_fingerprint[0]["render_result"]
+-    assert reused_render_result["renderer_output_policy"] == "raw"
+-    assert reused_render_result["pykokoro_inference_frames"] == 33_600
++    assert reused_render_result["renderer_output_policy"] == "preserve_silence"
++    assert reused_render_result["pykokoro_inference_frames"] == 100_000
+     assert reused_render_result["pykokoro_duration_frames"] == 1_400
+-    assert reused_render_result["persisted_frames"] == 33_600
++    assert reused_render_result["persisted_frames"] == 61_800
+     assert reused_render_result["frame_count_preserved"] is True
+-    assert wav_info(tmp_path / "raw-reused" / "000001.wav")["frames"] == 33_600
++    assert wav_info(tmp_path / "raw-reused" / "000001.wav")["frames"] == 61_800
+     reused_audio, reused_rate = sf.read(
+         tmp_path / "raw-reused" / "000001.wav", dtype="float32"
+     )
+@@ -696,9 +700,7 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+     assert policy_miss.rendered_count == 1
+     cache_data = json.loads(cache_sidecar.read_text(encoding="utf-8"))
+
+-    cache_data["schema"] = "voicerender.renderplan-cache.v2"
+-    cache_data.pop("audio_artifact_policy")
+-    cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
++    cache_data["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
+     cache_sidecar.write_text(json.dumps(cache_data), encoding="utf-8")
+     old_cache = render_renderplan(
+         plan,
+@@ -707,7 +709,7 @@ def test_renderplan_preserves_raw_audio_and_rejects_old_cache(
+         cache_dir=cache,
+     )
+     assert old_cache.rendered_count == 1
+-    assert wav_info(tmp_path / "raw-old-cache" / "000001.wav")["frames"] == 33_600
++    assert wav_info(tmp_path / "raw-old-cache" / "000001.wav")["frames"] == 61_800
+     assert adapter.synthesized_texts == [
+         "speech with renderer tail",
+         "speech with renderer tail",
+@@ -760,7 +762,7 @@ def test_renderplan_preserves_pcm16_final_samples_through_cache_reuse(
+     ).read_bytes()
+
+
+-@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v1"])
++@pytest.mark.parametrize("old_policy", [None, "voicerender.trailing-silence.v1", "voicerender.raw-synthesis.v2"])
+ @pytest.mark.parametrize("use_reset", [False, True])
+ def test_stale_audio_artifact_requires_explicit_reset(
+     monkeypatch: pytest.MonkeyPatch,
+@@ -805,7 +807,7 @@ def test_stale_audio_artifact_requires_explicit_reset(
+     assert not refreshed.failed
+     updated_diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+     assert updated_diagnostics["audio_artifact_policy"] == (
+-        "voicerender.raw-synthesis.v2"
++        "voicerender.preserve-silence.v3"
+     )
+
+
+diff --git a/voicerender/audio_artifacts.py b/voicerender/audio_artifacts.py
+index 8562c89..5ad2cc7 100644
+--- a/voicerender/audio_artifacts.py
++++ b/voicerender/audio_artifacts.py
+@@ -1 +1 @@
+-AUDIO_ARTIFACT_POLICY_ID = "voicerender.raw-synthesis.v2"
++AUDIO_ARTIFACT_POLICY_ID = "voicerender.preserve-silence.v3"
+diff --git a/voicerender/bundle_render_inspect.py b/voicerender/bundle_render_inspect.py
+index 58a1434..a6dd254 100644
+--- a/voicerender/bundle_render_inspect.py
++++ b/voicerender/bundle_render_inspect.py
+@@ -329,7 +329,7 @@ def _inspect_plan_output(
+                 selected_items,
+                 output_dir,
+                 "stale",
+-                "render output predates raw VoiceRender audio artifacts",
++                "render output predates the current VoiceRender audio artifact policy",
+             ),
+             True,
+             _reset_safety_detail(output_dir),
+diff --git a/voicerender/cli.py b/voicerender/cli.py
+index e0b5faa..c4968e3 100644
+--- a/voicerender/cli.py
++++ b/voicerender/cli.py
+@@ -3015,14 +3015,14 @@ def main(argv: list[str] | None = None) -> int:
+                             if boundary in pauses:
+                                 print(f"  {boundary}: {pauses[boundary]}")
+                         print(
+-                            "  speech artifact audio: complete raw synthesis waveform"
++                            "  speech artifact audio: complete validated renderer waveform"
+                         )
+                         print(
+-                            "  composition semantics: AudioCompose realizes pauses after raw speech"
++                            "  composition semantics: AudioCompose realizes pauses after renderer output"
+                         )
+                     else:
+                         print(
+-                            "  speech artifact audio: complete raw synthesis waveform"
++                            "  speech artifact audio: complete validated renderer waveform"
+                         )
+                         print("  composition semantics: no policy pause is inserted")
+             elif args.profile_command == "reidentify":
+diff --git a/voicerender/engines/kokoro.py b/voicerender/engines/kokoro.py
+index bbe3405..65c030e 100644
+--- a/voicerender/engines/kokoro.py
++++ b/voicerender/engines/kokoro.py
+@@ -112,11 +112,20 @@ def _pykokoro_module() -> tuple[Any, str, str | None]:
+     return pykokoro, module_version, _package_metadata()
+
+
+-def _supports_raw_audio_output_policy(module: Any) -> bool:
++_PRESERVE_SILENCE_OUTPUT_POLICY_ERROR = (
++    "PyKokoro preserve-silence audio output policy is required by VoiceRender but is "
++    "not supported by the installed PyKokoro version."
++)
++
++
++def _supports_preserve_silence_audio_output_policy(module: Any) -> bool:
+     policy_type = getattr(module, "AudioOutputPolicy", None)
+-    raw_policy = getattr(policy_type, "RAW", None)
++    preserve_silence_policy = getattr(policy_type, "PRESERVE_SILENCE", None)
+     config_type = getattr(module, "SynthesisConfig", None)
+-    if getattr(raw_policy, "value", None) != "raw" or config_type is None:
++    if (
++        getattr(preserve_silence_policy, "value", None) != "preserve_silence"
++        or config_type is None
++    ):
+         return False
+     parameters: Mapping[str, Any] = {}
+     try:
+@@ -128,17 +137,17 @@ def _supports_raw_audio_output_policy(module: Any) -> bool:
+     )
+
+
+-def _require_raw_audio_output_policy(module: Any, selection: EngineSelection) -> Any:
+-    if not _supports_raw_audio_output_policy(module):
++def _require_preserve_silence_audio_output_policy(
++    module: Any, selection: EngineSelection
++) -> Any:
++    if not _supports_preserve_silence_audio_output_policy(module):
+         raise EngineBackendError(
+-            "PyKokoro raw acoustic output policy is required by VoiceRender but is not "
+-            "supported by the installed PyKokoro version.",
+-            code="pykokoro.raw_output_policy_unsupported",
++            _PRESERVE_SILENCE_OUTPUT_POLICY_ERROR,
++            code="pykokoro.preserve_silence_output_policy_unsupported",
+             engine="kokoro",
+             target_id=selection.target_id,
+         )
+-    return module.AudioOutputPolicy.RAW
+-
++    return module.AudioOutputPolicy.PRESERVE_SILENCE
+
+ def _pykokoro_discovery() -> Any:
+     pykokoro, version, distribution_version = _pykokoro_module()
+@@ -890,11 +899,13 @@ class PyKokoroEngineSession:
+             source="pykokoro.measure_request",
+             details={
+                 "preflight_detail": (
+-                    f"audio policy: {AUDIO_ARTIFACT_POLICY_ID}; renderer output "
+-                    "policy: raw; raw output capability: supported; "
+-                    "effective short sentence mode: off; "
+-                    "effective narration context: disabled by raw policy; "
+-                    "generic trim: disabled; voice-level processing: disabled by raw policy"
++                    f"audio policy: {AUDIO_ARTIFACT_POLICY_ID}; "
++                    "renderer output policy: preserve_silence; "
++                    "preserve-silence capability: supported; "
++                    "generic silence trim: disabled; "
++                    "short-sentence processing: allowed/configured; "
++                    "narration-context processing: allowed; "
++                    "voice-level processing: allowed/configured"
+                 )
+             },
+         )
+@@ -993,17 +1004,23 @@ class PyKokoroEngineSession:
+             for item in result.word_timings
+         )
+         applications = tuple(getattr(result, "voice_level_applications", ()) or ())
++        short_sentence_mode = result.short_sentence_mode
++        if short_sentence_mode is None:
++            configured_short_sentence = _normalize_short_sentence(
++                self._selection.options.get("short_sentence")
++            )
++            short_sentence_mode = (
++                configured_short_sentence["resolve_mode"]
++                if configured_short_sentence and configured_short_sentence["enabled"]
++                else "off"
++            )
+         metadata: dict[str, Any] = {
+             "language": result.language,
+             "voice": result.voice,
+             "phonemes": result.phonemes,
+             "token_ids": tuple(result.token_ids),
+-            "short_sentence_mode": (
+-                result.short_sentence_mode
+-                if result.short_sentence_mode is not None
+-                else "off"
+-            ),
+-            "renderer_output_policy": "raw",
++            "short_sentence_mode": short_sentence_mode,
++            "renderer_output_policy": "preserve_silence",
+             "pykokoro_returned_frames": source_frames,
+             "voice_level": voice_level_metadata(
+                 applications[0] if applications else None,
+@@ -1152,7 +1169,7 @@ class PyKokoroEngineAdapter:
+                 "supports_reference_voice": True,
+                 "supports_voice_enrollment": True,
+                 "supports_say_as": True,
+-                "supports_audio_output_policy": True,
++                "supports_preserve_silence_output_policy": True,
+             }
+             actual = {
+                 name: (
+@@ -1162,8 +1179,8 @@ class PyKokoroEngineAdapter:
+                 )
+                 for name in required
+             }
+-            actual["supports_audio_output_policy"] = _supports_raw_audio_output_policy(
+-                pykokoro
++            actual["supports_preserve_silence_output_policy"] = (
++                _supports_preserve_silence_audio_output_policy(pykokoro)
+             )
+             mismatches = {
+                 name: {"expected": expected, "actual": actual[name]}
+@@ -1193,8 +1210,9 @@ class PyKokoroEngineAdapter:
+                 error_type=type(exc).__name__,
+                 error_message=str(exc),
+             )
+-        raw_output_unsupported = (
+-            mismatches.get("supports_audio_output_policy", {}).get("actual") is False
++        preserve_silence_output_unsupported = (
++            mismatches.get("supports_preserve_silence_output_policy", {}).get("actual")
++            is False
+         )
+         if mismatches:
+             return replace(
+@@ -1204,9 +1222,8 @@ class PyKokoroEngineAdapter:
+                 failed_stage="request_capabilities",
+                 failed_symbol="request_api_contract",
+                 error_message=(
+-                    "PyKokoro raw acoustic output policy is required by VoiceRender "
+-                    "but is unsupported"
+-                    if raw_output_unsupported
++                    _PRESERVE_SILENCE_OUTPUT_POLICY_ERROR
++                    if preserve_silence_output_unsupported
+                     else None
+                 ),
+                 details={**dict(probe.details), "capability_mismatches": mismatches},
+@@ -2239,7 +2256,7 @@ class PyKokoroEngineAdapter:
+     ) -> AbstractContextManager[PyKokoroEngineSession]:
+         import pykokoro
+
+-        audio_output_policy = _require_raw_audio_output_policy(pykokoro, selection)
++        audio_output_policy = _require_preserve_silence_audio_output_policy(pykokoro, selection)
+         options = _normalize_kokoro_options(selection.options)
+         try:
+             generation = pykokoro.GenerationConfig(
+diff --git a/voicerender/render.py b/voicerender/render.py
+index cb5b7ab..0145d9e 100644
+--- a/voicerender/render.py
++++ b/voicerender/render.py
+@@ -123,7 +123,7 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
+         or data.get("key") != key
+         or data.get("schema") != _CACHE_SCHEMA
+         or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
+-        or data.get("renderer_output_policy") != "raw"
++        or data.get("renderer_output_policy") != "preserve_silence"
+     ):
+         return None
+     info = data.get("wav")
+@@ -427,7 +427,7 @@ def render(
+                                 "schema": _CACHE_SCHEMA,
+                                 "key": key,
+                                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+-                                "renderer_output_policy": "raw",
++                                "renderer_output_policy": "preserve_silence",
+                                 "wav": info,
+                                 "timings": timings,
+                                 "timing_source": "provided" if timings else "absent",
+diff --git a/voicerender/renderplan_render.py b/voicerender/renderplan_render.py
+index 1077811..4de84b6 100644
+--- a/voicerender/renderplan_render.py
++++ b/voicerender/renderplan_render.py
+@@ -308,11 +308,11 @@ def _synthesize_prepared_speech(
+     if isinstance(resolved_mode, str):
+         render_result["short_sentence_mode"] = resolved_mode
+     metadata = rendered_speech.metadata
+-    if metadata.get("renderer_output_policy") == "raw":
++    if metadata.get("renderer_output_policy") == "preserve_silence":
+         render_result.update(
+             {
+                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+-                "renderer_output_policy": "raw",
++                "renderer_output_policy": "preserve_silence",
+                 "pykokoro_returned_frames": metadata.get("pykokoro_returned_frames"),
+                 "voicerender_adapter_frames": metadata.get(
+                     "voicerender_adapter_frames"
+@@ -339,7 +339,6 @@ def _synthesize_prepared_speech(
+                 "silence_trim_applied": "pykokoro_silence_trim_applied",
+                 "voice_level_applied": "pykokoro_voice_level_applied",
+                 "sample_count_preserved": "pykokoro_sample_count_preserved",
+-                "sample_values_preserved": "pykokoro_sample_values_preserved",
+             }
+             for source, target in trace_fields.items():
+                 value = trace_model.get(source)
+@@ -352,7 +351,6 @@ def _synthesize_prepared_speech(
+                         "silence_trim_applied",
+                         "voice_level_applied",
+                         "sample_count_preserved",
+-                        "sample_values_preserved",
+                     }
+                 ):
+                     render_result[target] = value
+@@ -754,12 +752,11 @@ def render_renderplan(
+                             rendered_speech.audio,
+                             rendered_speech.sample_rate,
+                         )
+-                        if render_result.get("renderer_output_policy") == "raw":
++                        if render_result.get("renderer_output_policy") == "preserve_silence":
+                             render_result["persisted_frames"] = int(info["frames"])
+                             frame_counts = [
+                                 render_result.get(name)
+                                 for name in (
+-                                    "pykokoro_inference_frames",
+                                     "pykokoro_returned_frames",
+                                     "voicerender_adapter_frames",
+                                     "persisted_frames",
+@@ -772,14 +769,14 @@ def render_renderplan(
+                                 and not isinstance(value, bool)
+                             ]
+                             render_result["frame_count_preserved"] = (
+-                                len(frame_counts) >= 2 and len(set(frame_counts)) == 1
++                                len(frame_counts) == 3 and len(set(frame_counts)) == 1
+                             )
+                         atomic_json(
+                             cache / f"{current.cache_key}.json",
+                             {
+                                 "schema": _CACHE_SCHEMA,
+                                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
+-                                "renderer_output_policy": "raw",
++                                "renderer_output_policy": "preserve_silence",
+                                 "key": current.cache_key,
+                                 "wav": info,
+                                 "render_result": render_result,
+@@ -1258,7 +1255,7 @@ def _load_existing_artifacts(
+         if not current_audio_policy:
+             if not (force or reset_stale_output):
+                 raise ArtifactError(
+-                    "Existing render output predates raw VoiceRender audio artifacts. "
++                    "Existing render output predates the current VoiceRender audio artifact policy. "
+                     f"Current artifact policy: {AUDIO_ARTIFACT_POLICY_ID}. "
+                     "Re-render with --force or reset the stale output.",
+                     code="output.stale_audio_artifact",
+@@ -1443,7 +1440,7 @@ def _read_cache(
+         or data.get("schema") != _CACHE_SCHEMA
+         or data.get("key") != key
+         or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
+-        or data.get("renderer_output_policy") != "raw"
++        or data.get("renderer_output_policy") != "preserve_silence"
+     ):
+         return None
+     info = data.get("wav")

@@ -508,9 +508,7 @@ def test_bundle_render_inspection_reports_stale_and_unsafe_reset(
     output = output_root / variant / "document-0001"
     output.mkdir(parents=True)
     (output / "000001.wav").mkdir()
-    plan = load_plan(
-        root / "renderplan" / variant / "document.renderplan.toml"
-    )
+    plan = load_plan(root / "renderplan" / variant / "document.renderplan.toml")
     stale_manifest = RenderManifest(
         render_plan_id=plan.plan_id or plan.computed_id(),
         speech=(),

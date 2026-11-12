@@ -149,6 +149,7 @@ def _require_preserve_silence_audio_output_policy(
         )
     return module.AudioOutputPolicy.PRESERVE_SILENCE
 
+
 def _pykokoro_discovery() -> Any:
     pykokoro, version, distribution_version = _pykokoro_module()
     module_path = getattr(pykokoro, "__file__", None)
@@ -2256,7 +2257,9 @@ class PyKokoroEngineAdapter:
     ) -> AbstractContextManager[PyKokoroEngineSession]:
         import pykokoro
 
-        audio_output_policy = _require_preserve_silence_audio_output_policy(pykokoro, selection)
+        audio_output_policy = _require_preserve_silence_audio_output_policy(
+            pykokoro, selection
+        )
         options = _normalize_kokoro_options(selection.options)
         try:
             generation = pykokoro.GenerationConfig(
