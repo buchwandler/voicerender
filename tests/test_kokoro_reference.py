@@ -207,6 +207,8 @@ def _install(
         "config": None,
         "audio": np.ones(24, dtype=np.float32),
         "diagnostics": (),
+        "trace": None,
+        "voice_level_applications": (),
         "short_sentence_mode": None,
         "measurements": [],
         "measure_error": None,
@@ -289,9 +291,9 @@ def _install(
                 voice=request.voice,
                 phonemes="t e s t",
                 token_ids=(1, 2),
-                trace=None,
+                trace=state["trace"],
                 short_sentence_mode=state["short_sentence_mode"],
-                voice_level_applications=(),
+                voice_level_applications=state["voice_level_applications"],
             )
 
         def close(self) -> None:
@@ -303,7 +305,10 @@ def _install(
     module.TokenizerConfig = FakeConfig
     module.ShortSentenceConfig = FakeConfig
     module.SynthesisConfig = FakeSynthesisConfig
-    module.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
+    module.AudioOutputPolicy = SimpleNamespace(
+        PRESERVE_SILENCE=SimpleNamespace(value="preserve_silence"),
+        RAW=SimpleNamespace(value="raw"),
+    )
     module.VoiceLevelConfig = FakeConfig
     module.InnoEnrollmentOptions = FakeInnoOptions
     module.KokoroSynthesizer = FakeSynthesizer
@@ -340,7 +345,10 @@ def _api_probe_module(
     ):
         setattr(module, name, type(name, (), {}))
     module.SynthesisConfig.__annotations__ = {"audio_output_policy": object}
-    module.AudioOutputPolicy = SimpleNamespace(RAW=SimpleNamespace(value="raw"))
+    module.AudioOutputPolicy = SimpleNamespace(
+        PRESERVE_SILENCE=SimpleNamespace(value="preserve_silence"),
+        RAW=SimpleNamespace(value="raw"),
+    )
     module.REQUEST_API_VERSION = api_version
     module.request_api_contract = lambda: SimpleNamespace(
         supports_request_measurement=True,
@@ -372,20 +380,35 @@ def test_kokoro_probe_requires_request_api_v2_and_say_as_capability(
     )
 
 
-def test_pykokoro_raw_output_policy_is_required(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "output_policy",
+    [
+        SimpleNamespace(RAW=SimpleNamespace(value="raw")),
+        SimpleNamespace(
+            RAW=SimpleNamespace(value="raw"),
+            PROCESSED=SimpleNamespace(value="processed"),
+        ),
+        SimpleNamespace(
+            PRESERVE_SILENCE=SimpleNamespace(value="raw"),
+            RAW=SimpleNamespace(value="raw"),
+        ),
+    ],
+    ids=("raw-only", "raw-and-processed", "wrong-preserve-value"),
+)
+def test_pykokoro_preserve_silence_output_policy_is_required(
+    monkeypatch: pytest.MonkeyPatch, output_policy: SimpleNamespace
 ) -> None:
     module = _api_probe_module()
-    module.AudioOutputPolicy = SimpleNamespace(
-        PROCESSED=SimpleNamespace(value="processed")
-    )
+    module.AudioOutputPolicy = output_policy
     monkeypatch.setitem(sys.modules, "pykokoro", module)
 
     adapter = PyKokoroEngineAdapter()
     probe = adapter.probe_api()
     assert not probe.compatible
     assert (
-        probe.details["capability_mismatches"]["supports_audio_output_policy"]["actual"]
+        probe.details["capability_mismatches"][
+            "supports_preserve_silence_output_policy"
+        ]["actual"]
         is False
     )
 
@@ -393,17 +416,19 @@ def test_pykokoro_raw_output_policy_is_required(
         engine="kokoro", target_id="kokoro-test", language="en-US", voice="af_heart"
     )
     with pytest.raises(
-        EngineBackendError, match="raw acoustic output policy is required"
+        EngineBackendError,
+        match="preserve-silence audio output policy is required",
     ) as caught:
         adapter.open(selection)
-    assert caught.value.code == "pykokoro.raw_output_policy_unsupported"
+    assert caught.value.code == "pykokoro.preserve_silence_output_policy_unsupported"
 
-    assert probe.error_message == (
-        "PyKokoro raw acoustic output policy is required by VoiceRender but is unsupported"
+    expected_message = (
+        "PyKokoro preserve-silence audio output policy is required by VoiceRender but is "
+        "not supported by the installed PyKokoro version."
     )
+    assert probe.error_message == expected_message
 
-
-def test_kokoro_measurement_reports_effective_raw_output_policy(
+def test_kokoro_measurement_reports_preserve_silence_policy_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _model()
@@ -415,17 +440,19 @@ def test_kokoro_measurement_reports_effective_raw_output_policy(
     with adapter.open(selection) as session:
         measured = session.measure(
             SpeechRequest(
-                id="raw-measurement", text="measure raw policy", language="en-US"
+                id="preserve-silence-measurement",
+                text="measure preserve-silence policy",
+                language="en-US",
             )
         )
 
     detail = measured.details["preflight_detail"]
-    assert "raw output capability: supported" in detail
-    assert "effective short sentence mode: off" in detail
-    assert "effective narration context: disabled by raw policy" in detail
-    assert "generic trim: disabled" in detail
-    assert "voice-level processing: disabled by raw policy" in detail
-
+    assert "renderer output policy: preserve_silence" in detail
+    assert "preserve-silence capability: supported" in detail
+    assert "generic silence trim: disabled" in detail
+    assert "short-sentence processing: allowed/configured" in detail
+    assert "narration-context processing: allowed" in detail
+    assert "voice-level processing: allowed/configured" in detail
 
 def test_pykokoro_request_forwards_say_as_without_changing_text(
     monkeypatch: pytest.MonkeyPatch,
@@ -952,10 +979,12 @@ def _synthesize_pcm_audio(
     audio: Any,
     *,
     diagnostics: tuple[str, ...] = (),
+    trace: Any = None,
 ) -> Any:
     adapter, state = _install(monkeypatch, _model())
     state["audio"] = audio
     state["diagnostics"] = diagnostics
+    state["trace"] = trace
     selection = EngineSelection(
         engine="kokoro",
         target_id="kokoro-test",
@@ -968,7 +997,7 @@ def _synthesize_pcm_audio(
         )
 
 
-def test_kokoro_raw_audio_preserves_float32_samples_and_frames(
+def test_kokoro_adapter_preserves_pykokoro_returned_samples_and_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = np.random.default_rng(1).uniform(-1, 1, 61_800).astype(np.float32)
@@ -978,11 +1007,33 @@ def test_kokoro_raw_audio_preserves_float32_samples_and_frames(
     assert rendered.warnings == ()
     assert rendered.metadata["pykokoro_returned_frames"] == 61_800
     assert rendered.metadata["voicerender_adapter_frames"] == 61_800
-    assert rendered.metadata["renderer_output_policy"] == "raw"
+    assert rendered.metadata["renderer_output_policy"] == "preserve_silence"
     assert "pcm_range" not in rendered.metadata
 
 
-def test_kokoro_raw_adapter_preserves_exact_zero_tail(
+
+
+def test_kokoro_accepts_semantic_crop_before_final_waveform(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = np.concatenate(
+        (np.full(52_200, 0.25, dtype=np.float32), np.zeros(9_600, dtype=np.float32))
+    )
+    trace = {
+        "model": {
+            "inference_samples": 100_000,
+            "narration_context_applied": True,
+            "short_sentence_mode": "randomized-phrase",
+            "short_sentence_cut_applied": True,
+        }
+    }
+
+    rendered = _synthesize_pcm_audio(monkeypatch, source, trace=trace)
+
+    np.testing.assert_array_equal(rendered.audio, source)
+    assert rendered.metadata["trace"]["model"]["inference_samples"] == 100_000
+    assert rendered.metadata["pykokoro_returned_frames"] == 61_800
+    assert rendered.metadata["voicerender_adapter_frames"] == 61_800
+
+def test_kokoro_adapter_preserves_exact_zero_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = np.concatenate(
@@ -995,7 +1046,7 @@ def test_kokoro_raw_adapter_preserves_exact_zero_tail(
     assert np.count_nonzero(rendered.audio[-9_600:]) == 0
 
 
-def test_kokoro_raw_adapter_preserves_distinctive_final_samples(
+def test_kokoro_adapter_preserves_distinctive_final_samples(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = np.array([0.2, -0.31, 0.47, -0.82, 0.93], dtype=np.float32)
@@ -1005,7 +1056,7 @@ def test_kokoro_raw_adapter_preserves_distinctive_final_samples(
 
 
 @pytest.mark.parametrize("bad_sample", [1.000005, -1.000005])
-def test_kokoro_raw_audio_rejects_overshoots_instead_of_clamping(
+def test_kokoro_adapter_rejects_overshoots_instead_of_clamping(
     monkeypatch: pytest.MonkeyPatch, bad_sample: float
 ) -> None:
     with pytest.raises(EngineBackendError) as caught:
@@ -1244,13 +1295,14 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
             "voice_level": {"mode": "off", "gain_db": -1.5},
         },
     )
+    state["short_sentence_mode"] = "randomized-phrase"
     with adapter.open(selection) as session:
         config = state["config"]
         rendered = session.synthesize(
             SpeechRequest(id="structured", text="Configured speech", language="en-US")
         )
     assert config.short_sentence_config.enabled is True
-    assert config.audio_output_policy.value == "raw"
+    assert config.audio_output_policy.value == "preserve_silence"
     assert config.short_sentence_config.resolve_mode == "randomized-phrase"
     assert config.short_sentence_config.min_phoneme_length == 45
     assert config.short_sentence_config.phoneme_pretext == "—"
@@ -1258,7 +1310,49 @@ def test_kokoro_opens_with_structured_short_sentence_and_voice_level_options(
     assert config.voice_level.mode == "off"
     assert config.voice_level.gain_db == -1.5
     assert rendered.metadata["voice_level"]["mode"] == "off"
+    assert rendered.metadata["short_sentence_mode"] == "randomized-phrase"
 
+
+
+def test_kokoro_preserves_voice_level_application_under_preserve_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, state = _install(monkeypatch, _model())
+    state["voice_level_applications"] = (
+        {
+            "mode": "calibrated",
+            "applied": True,
+            "gain_db": -2.5,
+            "source": "static_catalog",
+            "key": "fixture-calibration",
+            "corpus": "fixture-r1",
+        },
+    )
+    selection = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        voice="af_heart",
+        options={"voice_level": {"mode": "calibrated"}},
+    )
+
+    with adapter.open(selection) as session:
+        config = state["config"]
+        rendered = session.synthesize(
+            SpeechRequest(id="voice-level", text="Calibrated voice", language="en-US")
+        )
+
+    assert config.audio_output_policy.value == "preserve_silence"
+    assert config.voice_level.mode == "calibrated"
+    assert rendered.metadata["voice_level"] == {
+        "mode": "calibrated",
+        "applied": True,
+        "gain_db": -2.5,
+        "source": "static_catalog",
+        "reason": None,
+        "calibration_identity": "fixture-calibration",
+        "calibration_revision": "fixture-r1",
+    }
 
 def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -1293,6 +1387,19 @@ def test_kokoro_omitted_short_sentence_stays_off_and_reports_resolved_mode(
     with adapter.open(explicit_off):
         assert state["config"].short_sentence_config.enabled is False
 
+
+
+    state["short_sentence_mode"] = None
+    configured = EngineSelection(
+        engine="kokoro",
+        target_id="kokoro-test",
+        language="en-US",
+        options={"short_sentence": "randomized-phrase"},
+    )
+    with adapter.open(configured) as session:
+        fallback_rendered = session.synthesize(request)
+    assert state["config"].short_sentence_config.enabled is True
+    assert fallback_rendered.metadata["short_sentence_mode"] == "randomized-phrase"
 
 def test_kokoro_forwards_persisted_g2lex_tables_as_public_file_refs(
     monkeypatch: pytest.MonkeyPatch,

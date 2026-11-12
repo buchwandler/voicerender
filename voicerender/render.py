@@ -123,7 +123,7 @@ def _read_cache(cache_dir: Path, key: str) -> tuple[Path, dict[str, Any]] | None
         or data.get("key") != key
         or data.get("schema") != _CACHE_SCHEMA
         or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
-        or data.get("renderer_output_policy") != "raw"
+        or data.get("renderer_output_policy") != "preserve_silence"
     ):
         return None
     info = data.get("wav")
@@ -427,7 +427,7 @@ def render(
                                 "schema": _CACHE_SCHEMA,
                                 "key": key,
                                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
-                                "renderer_output_policy": "raw",
+                                "renderer_output_policy": "preserve_silence",
                                 "wav": info,
                                 "timings": timings,
                                 "timing_source": "provided" if timings else "absent",

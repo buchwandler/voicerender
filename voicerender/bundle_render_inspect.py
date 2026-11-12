@@ -329,7 +329,7 @@ def _inspect_plan_output(
                 selected_items,
                 output_dir,
                 "stale",
-                "render output predates raw VoiceRender audio artifacts",
+                "render output predates the current VoiceRender audio artifact policy",
             ),
             True,
             _reset_safety_detail(output_dir),

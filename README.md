@@ -151,7 +151,7 @@ On a render-time exception, `render-diagnostics.json` keeps the existing `voicer
 
 The serializer is bounded and JSON-safe: it limits cause depth, message and detail sizes, handles cycles, and sanitizes nested values. It never persists traceback locals or arbitrary exception attributes, and omits sensitive speech text, transcripts, phonemes, audio, token sequences, and environment data. If diagnostic serialization fails, the original render error remains authoritative. Normal CLI output prints the stable error code/message plus stage, one root-cause summary, and sidecar path—never a traceback or nested JSON.
 
-Kokoro uses PyKokoro's public `error_diagnostic` helper when available. The Kokoro extra requires PyKokoro `>=0.10.13,<0.11` for its raw audio-output policy. VoiceRender requests `AudioOutputPolicy.RAW` for every synthesis request and rejects installations without that capability during preflight/session initialization. The policy keeps PyKokoro's effective short-sentence mode off and disables narration context, silence trimming, and voice-level audio processing. VoiceRender forwards canonical `say_as` text and source offsets unchanged, including wrapper punctuation inside an authored span.
+Kokoro uses PyKokoro's public `error_diagnostic` helper when available. The Kokoro extra requires PyKokoro `>=0.10.13,<0.11`, the first release with `AudioOutputPolicy.PRESERVE_SILENCE`. VoiceRender requires that exact policy on every synthesis and rejects installations without it during preflight/session initialization. `PRESERVE_SILENCE` disables generic silence trimming while allowing configured short-sentence processing and target crops, AkinVox narration-context processing and target crops, and voice-level calibration. VoiceRender does not request raw inference output. It forwards canonical `say_as` text and source offsets unchanged, including wrapper punctuation inside an authored span.
 The checked-in `examples/voices/narration.renderprofile.toml` and `examples/plans/chapter.renderplan.toml` form an identity-matched example pair. The profile records a discovery snapshot; refresh and regenerate the plan if adapter metadata changes. See `examples/README.md` for the complete command sequence.
 
 Profiles are engine-refreshed proposals: refresh metadata without overwriting user policy, then review the proposal before using it. For example:
@@ -215,11 +215,11 @@ voicerender profile show printer-cast.renderprofile.toml
 voicerender profile validate printer-cast.renderprofile.toml
 ```
 
-The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it also reports whether short-sentence processing is off implicitly, off explicitly, or enabled and which mode/threshold is configured. The pause summary distinguishes raw synthesis artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
+The human `profile show` view displays every role's engine, target, language, and voice/speaker/source. For Kokoro it reports configured short-sentence processing and its mode/threshold. The pause summary distinguishes renderer-returned speech artifacts from the shared composition policy. `--json` preserves the complete canonical binding dictionaries. `profile inspect` remains available; `profile role set` is the structured role-management equivalent. Role replacement revalidates the selected engine/target, refreshes derived requirements and capacity, preserves other roles and shared policy, and computes a new `profile_id`.
 
 ### Speech artifacts and pause policy
 
-VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, VoiceRender requires PyKokoro's raw output policy and verifies frame counts at the adapter and WAV persistence boundaries. PCM16 storage quantization is the only representation change; samples outside the PCM16 full-scale range are rejected rather than clipped. Per-segment diagnostics and cache metadata record raw policy, source/adapter/persisted frame counts, and available PyKokoro duration trace data. VoiceRender does not remove renderer-leading or renderer-trailing silence, detect speech boundaries, shape boundaries, insert silence, or normalize pauses. AudioCompose owns pause and silence removal, boundary shaping, pause insertion, and crossfades. With `mode = "manual"`, clause/sentence/paragraph durations describe pauses for AudioCompose; with `mode = "none"`, no policy pause is inserted. Artifacts from the former trailing-silence policy are stale and require a one-time re-render with `--force` or `--reset-stale`; removed samples cannot be recovered.
+VoiceRender persists the complete validated waveform returned by the selected synthesis engine. For Kokoro, `AudioOutputPolicy.PRESERVE_SILENCE` forbids generic silence trimming while retaining normal semantic processing, including short-sentence and AkinVox narration-context crops and voice-level calibration. VoiceRender verifies that PyKokoro's final returned frame count matches the adapter and persisted WAV; pre-crop inference length may differ. PCM16 storage quantization is the only VoiceRender representation change; samples outside the PCM16 full-scale range are rejected rather than clipped. Per-segment diagnostics and cache metadata record `renderer_output_policy = preserve_silence`, returned/adapter/persisted frame counts, and available PyKokoro trace data and voice-level application metadata. VoiceRender itself does not trim renderer-leading or renderer-trailing silence, detect or shape boundaries, insert silence, or normalize pauses. AudioCompose owns downstream pause and silence removal, boundary shaping, pause insertion, and crossfades. Manual pause durations describe composition policy and are not baked into individual speech WAVs. Artifacts with policy ID `voicerender.raw-synthesis.v2` are stale under `voicerender.preserve-silence.v3` and require a one-time re-render; removed samples cannot be recovered.
 
 ## ONNX Runtime provider policy
 
@@ -309,9 +309,9 @@ Preflight validates local content pins and managed catalog metadata, and measure
 
 ### Kokoro quality and voice-level options
 
-Kokoro option descriptors still list `short_sentence` (`off`, `wrap`, `phrase`, or `randomized-phrase`) and `voice_level` (`off` or `calibrated`) so profiles can retain their configured values. The fixed raw output policy takes precedence at synthesis: the effective short-sentence mode is always off, and voice-level processing does not modify the audio. No VoiceRender option can re-enable PyKokoro audio processing.
+Kokoro option descriptors list `short_sentence` (`off`, `wrap`, `phrase`, or `randomized-phrase`) and `voice_level` (`off` or `calibrated`) so profiles can retain their configured values. Under `PRESERVE_SILENCE`, those configured options remain effective: short-sentence target crops and voice-level processing are allowed, and PyKokoro reports the resulting mode/application. The policy itself does not force either feature off; it disables only generic silence trimming.
 
-`--short-sentence` and the generic `short_sentence` table remain profile-authoring conveniences, not runtime switches for raw audio processing. VoiceRender preserves their configured values for profile identity and inspection, but PyKokoro raw mode forces the effective short-sentence mode off. The same applies to `voice_level`; render diagnostics report effective raw-mode behavior.
+`--short-sentence` and the generic `short_sentence` table are profile-authoring conveniences, not policy toggles. VoiceRender preserves their values for profile identity and inspection; PyKokoro follows the configured mode under `PRESERVE_SILENCE`, and diagnostics report the resulting mode. Narration-context processing is also allowed. No VoiceRender-side logic controls those PyKokoro features.
 
 ```bash
 voicerender profile create \
@@ -336,7 +336,7 @@ voicerender profile bind kokoro.renderprofile.toml narrator \
   --option 'voice_level={"mode":"off","gain_db":-1.5}' --in-place
 ```
 
-`short_sentence` tables retain their documented field shape, but PyKokoro raw mode always bypasses their audio-processing behavior. `voice_level` settings likewise do not alter raw output, even though they remain visible in profile bindings. VoiceRender performs no loudness DSP and does not clip finite overshoots; out-of-range samples are rejected before persistence.
+`short_sentence` tables retain their documented field shape, and PyKokoro may perform their configured processing under `PRESERVE_SILENCE`. `voice_level` settings likewise remain active and their application metadata is preserved. VoiceRender performs no loudness DSP and does not clip finite overshoots; out-of-range samples are rejected before persistence.
 
 ### Kokoro pronunciation lexicons
 
@@ -604,7 +604,7 @@ The older VoicePlan-oriented Python API remains available for compatibility, but
 - **No implicit model downloads:** install SDKs and assets through each engine's supported process.
 - **Exact requests:** capacity overflow is reported for replanning; the RenderPlan renderer does not create adaptive child requests.
 - **Verified reuse:** cached WAVs are checked by digest and recorded WAV metadata before reuse.
-- **Raw speech artifacts:** VoiceRender persists the complete validated synthesis waveform without boundary detection, silence removal, or pause realization; AudioCompose owns downstream speech-boundary conditioning and explicit pauses.
+- **Renderer-returned speech artifacts:** VoiceRender persists the complete validated waveform returned by the renderer without adding boundary detection, silence removal, or pause realization; AudioCompose owns downstream speech-boundary conditioning and explicit pauses.
 - **Portable managed voices:** local `kind="reference"` paths are content-pinned and usable but machine-specific; pinned Voicefolio managed references are the portable choice.
 
 ## Tests

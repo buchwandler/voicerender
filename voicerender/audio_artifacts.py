@@ -1,1 +1,1 @@
-AUDIO_ARTIFACT_POLICY_ID = "voicerender.raw-synthesis.v2"
+AUDIO_ARTIFACT_POLICY_ID = "voicerender.preserve-silence.v3"

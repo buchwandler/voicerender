@@ -210,7 +210,7 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
     cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
     assert cache_data["schema"] == _CACHE_SCHEMA == "voicerender.batch-cache.v3"
     assert cache_data["audio_artifact_policy"] == AUDIO_ARTIFACT_POLICY_ID
-    assert cache_data["renderer_output_policy"] == "raw"
+    assert cache_data["renderer_output_policy"] == "preserve_silence"
     assert "audio_boundary" not in cache_data
 
     reused = render(
@@ -235,9 +235,7 @@ def test_legacy_render_preserves_full_waveform_and_invalidates_old_cache(
     assert rejected_policy.rendered_count == 1
     assert len(mock_engine.calls) == 2
     cache_data = json.loads(cache_meta.read_text(encoding="utf-8"))
-    cache_data["schema"] = "voicerender.batch-cache.v2"
-    cache_data.pop("audio_artifact_policy")
-    cache_data["audio_boundary_policy"] = "voicerender.trailing-silence.v1"
+    cache_data["audio_artifact_policy"] = "voicerender.raw-synthesis.v2"
     cache_meta.write_text(json.dumps(cache_data), encoding="utf-8")
     regenerated = render(
         speech,

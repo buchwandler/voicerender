@@ -508,17 +508,28 @@ def test_bundle_render_inspection_reports_stale_and_unsafe_reset(
     output = output_root / variant / "document-0001"
     output.mkdir(parents=True)
     (output / "000001.wav").mkdir()
+    plan = load_plan(
+        root / "renderplan" / variant / "document.renderplan.toml"
+    )
     stale_manifest = RenderManifest(
-        render_plan_id="sha256:" + "0" * 64,
+        render_plan_id=plan.plan_id or plan.computed_id(),
         speech=(),
         complete=False,
     ).with_identity()
     save_manifest(stale_manifest, output / "render-manifest.toml")
+    (output / "render-diagnostics.json").write_text(
+        json.dumps({"audio_artifact_policy": "voicerender.raw-synthesis.v2"}),
+        encoding="utf-8",
+    )
 
     inspected = inspect_bundle_render(root, variant=variant, output_root=output_root)
 
     assert inspected.state == "stale"
     assert inspected.stale_occurrences
+    assert (
+        inspected.stale_occurrences[0].detail
+        == "render output predates the current VoiceRender audio artifact policy"
+    )
     assert inspected.force_required
     assert not inspected.reset_safe
     assert not inspected.replacement_safe

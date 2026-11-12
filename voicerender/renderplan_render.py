@@ -308,11 +308,11 @@ def _synthesize_prepared_speech(
     if isinstance(resolved_mode, str):
         render_result["short_sentence_mode"] = resolved_mode
     metadata = rendered_speech.metadata
-    if metadata.get("renderer_output_policy") == "raw":
+    if metadata.get("renderer_output_policy") == "preserve_silence":
         render_result.update(
             {
                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
-                "renderer_output_policy": "raw",
+                "renderer_output_policy": "preserve_silence",
                 "pykokoro_returned_frames": metadata.get("pykokoro_returned_frames"),
                 "voicerender_adapter_frames": metadata.get(
                     "voicerender_adapter_frames"
@@ -339,7 +339,6 @@ def _synthesize_prepared_speech(
                 "silence_trim_applied": "pykokoro_silence_trim_applied",
                 "voice_level_applied": "pykokoro_voice_level_applied",
                 "sample_count_preserved": "pykokoro_sample_count_preserved",
-                "sample_values_preserved": "pykokoro_sample_values_preserved",
             }
             for source, target in trace_fields.items():
                 value = trace_model.get(source)
@@ -352,7 +351,6 @@ def _synthesize_prepared_speech(
                         "silence_trim_applied",
                         "voice_level_applied",
                         "sample_count_preserved",
-                        "sample_values_preserved",
                     }
                 ):
                     render_result[target] = value
@@ -754,12 +752,11 @@ def render_renderplan(
                             rendered_speech.audio,
                             rendered_speech.sample_rate,
                         )
-                        if render_result.get("renderer_output_policy") == "raw":
+                        if render_result.get("renderer_output_policy") == "preserve_silence":
                             render_result["persisted_frames"] = int(info["frames"])
                             frame_counts = [
                                 render_result.get(name)
                                 for name in (
-                                    "pykokoro_inference_frames",
                                     "pykokoro_returned_frames",
                                     "voicerender_adapter_frames",
                                     "persisted_frames",
@@ -772,14 +769,14 @@ def render_renderplan(
                                 and not isinstance(value, bool)
                             ]
                             render_result["frame_count_preserved"] = (
-                                len(frame_counts) >= 2 and len(set(frame_counts)) == 1
+                                len(frame_counts) == 3 and len(set(frame_counts)) == 1
                             )
                         atomic_json(
                             cache / f"{current.cache_key}.json",
                             {
                                 "schema": _CACHE_SCHEMA,
                                 "audio_artifact_policy": AUDIO_ARTIFACT_POLICY_ID,
-                                "renderer_output_policy": "raw",
+                                "renderer_output_policy": "preserve_silence",
                                 "key": current.cache_key,
                                 "wav": info,
                                 "render_result": render_result,
@@ -1258,7 +1255,7 @@ def _load_existing_artifacts(
         if not current_audio_policy:
             if not (force or reset_stale_output):
                 raise ArtifactError(
-                    "Existing render output predates raw VoiceRender audio artifacts. "
+                    "Existing render output predates the current VoiceRender audio artifact policy. "
                     f"Current artifact policy: {AUDIO_ARTIFACT_POLICY_ID}. "
                     "Re-render with --force or reset the stale output.",
                     code="output.stale_audio_artifact",
@@ -1443,7 +1440,7 @@ def _read_cache(
         or data.get("schema") != _CACHE_SCHEMA
         or data.get("key") != key
         or data.get("audio_artifact_policy") != AUDIO_ARTIFACT_POLICY_ID
-        or data.get("renderer_output_policy") != "raw"
+        or data.get("renderer_output_policy") != "preserve_silence"
     ):
         return None
     info = data.get("wav")

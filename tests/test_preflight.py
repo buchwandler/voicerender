@@ -1577,18 +1577,24 @@ def test_preflight_events_count_required_items_including_terminal_errors(
     assert adapter.synthesized_texts == []
 
 
-def test_kokoro_preflight_reports_raw_output_policy_details(
+def test_kokoro_preflight_reports_preserve_silence_policy_details(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from voicerender.audio_artifacts import AUDIO_ARTIFACT_POLICY_ID
+
     adapter = _Adapter()
     adapter.id = "kokoro"
     adapter.package_name = "pykokoro"
     detail = (
-        "audio policy: voicerender.raw-synthesis.v2; renderer output policy: raw; "
-        "raw output capability: supported; effective short sentence mode: off; "
-        "effective narration context: disabled by raw policy; generic trim: disabled; voice-level processing: disabled by raw policy"
+        f"audio policy: {AUDIO_ARTIFACT_POLICY_ID}; "
+        "renderer output policy: preserve_silence; "
+        "preserve-silence capability: supported; "
+        "generic silence trim: disabled; "
+        "short-sentence processing: allowed/configured; "
+        "narration-context processing: allowed; "
+        "voice-level processing: allowed/configured"
     )
-    adapter.measurements["Kokoro raw policy"] = RequestMeasure(
+    adapter.measurements["Kokoro preserve-silence policy"] = RequestMeasure(
         fits=True,
         amount=17,
         maximum=100,
@@ -1598,23 +1604,25 @@ def test_kokoro_preflight_reports_raw_output_policy_details(
     )
     monkeypatch.setitem(_ADAPTERS, "kokoro", adapter)
     plan = _plan(
-        ("Kokoro raw policy", True, "sentence"),
+        ("Kokoro preserve-silence policy", True, "sentence"),
         binding={"renderer": "kokoro", "target_id": _TARGET_ID, "voice": "voice-a"},
     )
 
-    report = preflight_render_plan(plan, tmp_path / "kokoro-raw-policy.toml")
+    report = preflight_render_plan(plan, tmp_path / "kokoro-preserve-silence-policy.toml")
 
     assert report.status == "ok"
     assert report.checks[0].detail == detail
 
-
-def test_kokoro_preflight_rejects_missing_raw_output_policy(
+def test_kokoro_preflight_rejects_missing_preserve_silence_output_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     adapter = _Adapter()
     adapter.id = "kokoro"
     adapter.package_name = "pykokoro"
-    message = "PyKokoro raw acoustic output policy is required by VoiceRender but is unsupported"
+    message = (
+        "PyKokoro preserve-silence audio output policy is required by VoiceRender but "
+        "is not supported by the installed PyKokoro version."
+    )
     adapter.probe_api = lambda: EngineApiProbe(
         engine="kokoro",
         package="pykokoro",
@@ -1625,17 +1633,17 @@ def test_kokoro_preflight_rejects_missing_raw_output_policy(
         error_message=message,
         details={
             "capability_mismatches": {
-                "supports_audio_output_policy": {"expected": True, "actual": False}
+                "supports_preserve_silence_output_policy": {"expected": True, "actual": False}
             }
         },
     )
     monkeypatch.setitem(_ADAPTERS, "kokoro", adapter)
     plan = _plan(
-        ("Kokoro raw policy", True, "sentence"),
+        ("Kokoro preserve-silence policy", True, "sentence"),
         binding={"renderer": "kokoro", "target_id": _TARGET_ID, "voice": "voice-a"},
     )
 
-    report = preflight_render_plan(plan, tmp_path / "kokoro-no-raw-policy.toml")
+    report = preflight_render_plan(plan, tmp_path / "kokoro-no-preserve-silence-policy.toml")
 
     assert report.status == "reject"
     assert report.checks[0].detail == message
